@@ -1,14 +1,33 @@
 import streamlit as st
 import requests
 import pandas as pd
-from datetime import date
 
-st.set_page_config(page_title="F&O Pro Trader Assistant", page_icon="📈", layout="wide")
+st.set_page_config(
+    page_title="F&O Pro Trader Assistant — Live Dhan",
+    page_icon="📈",
+    layout="wide"
+)
 
-BASE = "https://api.dhan.co/v2"
-MASTER = "https://images.dhan.co/api-data/api-scrip-master-detailed.csv"
+BASE_URL = "https://api.dhan.co/v2"
 
-def dhan_headers():
+# Dhan's official Option Chain documentation uses:
+# NIFTY -> Security ID 13, Segment IDX_I
+# BANKNIFTY -> Security ID 25, Segment IDX_I
+# Other index IDs can be verified from Dhan's instrument master.
+INDEX_MAP = {
+    "NIFTY": {"security_id": 13, "segment": "IDX_I"},
+    "BANKNIFTY": {"security_id": 25, "segment": "IDX_I"},
+    "FINNIFTY": {"security_id": 27, "segment": "IDX_I"},
+    "MIDCPNIFTY": {"security_id": 442, "segment": "IDX_I"},
+}
+
+STOCKS = [
+    "RELIANCE", "HDFCBANK", "ICICIBANK", "KOTAKBANK",
+    "INFY", "TCS", "SBIN", "AXISBANK", "LT", "BHARTIARTL"
+]
+
+
+def headers():
     return {
         "access-token": st.secrets["DHAN_ACCESS_TOKEN"],
         "client-id": st.secrets["DHAN_CLIENT_ID"],
@@ -16,145 +35,331 @@ def dhan_headers():
         "Accept": "application/json",
     }
 
-def api_post(path, payload):
-    r = requests.post(BASE + path, headers=dhan_headers(), json=payload, timeout=20)
-    if r.status_code != 200:
-        raise RuntimeError(f"Dhan API error {r.status_code}: {r.text[:500]}")
-    return r.json()
+
+def dhan_post(path, payload):
+    response = requests.post(
+        BASE_URL + path,
+        headers=headers(),
+        json=payload,
+        timeout=20
+    )
+
+    if response.status_code != 200:
+        raise RuntimeError(
+            f"Dhan returned HTTP {response.status_code}: "
+            f"{response.text[:800]}"
+        )
+
+    data = response.json()
+
+    if isinstance(data, dict):
+        status = str(data.get("status", "")).lower()
+        if status == "failure":
+            raise RuntimeError(str(data))
+
+    return data
+
 
 @st.cache_data(ttl=3600)
 def load_master():
-    df = pd.read_csv(MASTER, low_memory=False)
-    return df
+    url = "https://images.dhan.co/api-data/api-scrip-master-detailed.csv"
+    return pd.read_csv(url, low_memory=False)
 
-def find_underlying(master, symbol):
-    symbol = symbol.upper().strip()
-    # Prefer NSE cash equity row.
-    candidates = master[
-        (master["EXCH_ID"].astype(str).str.upper()=="NSE") &
-        (master["SEGMENT"].astype(str).str.upper().isin(["E","EQUITY"])) &
-        (master["SYMBOL_NAME"].astype(str).str.upper()==symbol)
-    ]
-    if not candidates.empty:
-        return str(candidates.iloc[0]["SECURITY_ID"]), "NSE_EQ"
-    # Fallback to derivative rows and their underlying security id.
-    candidates = master[
-        master["UNDERLYING_SYMBOL"].astype(str).str.upper().eq(symbol) &
-        master["INSTRUMENT"].astype(str).str.upper().eq("OPTSTK")
-    ]
-    if not candidates.empty:
-        return str(candidates.iloc[0]["UNDERLYING_SECURITY_ID"]), "NSE_EQ"
-    raise ValueError(f"Could not find Dhan security ID for {symbol}")
 
-def expiry_list(secid, seg):
-    out = api_post("/optionchain/expirylist", {
-        "UnderlyingScrip": int(secid),
-        "UnderlyingSeg": seg
-    })
-    return out.get("data", [])
+def resolve_underlying(symbol):
+    symbol = symbol.strip().upper()
 
-def option_chain(secid, seg, expiry):
-    return api_post("/optionchain", {
-        "UnderlyingScrip": int(secid),
-        "UnderlyingSeg": seg,
-        "Expiry": expiry
-    })
+    # IMPORTANT: indices must use IDX_I.
+    if symbol in INDEX_MAP:
+        item = INDEX_MAP[symbol]
+        return item["security_id"], item["segment"]
 
-def flatten_chain(resp):
-    rows=[]
-    data=resp.get("data", {})
-    for strike, both in data.get("oc", {}).items():
-        try: strike_f=float(strike)
-        except: continue
-        for side, item in [("CE", both.get("ce", {})), ("PE", both.get("pe", {}))]:
-            if not item: continue
-            g=item.get("greeks", {}) or {}
+    # Stocks are resolved from Dhan's instrument master.
+    master = load_master()
+
+    # First try direct NSE equity symbol.
+    cols = set(master.columns)
+    needed = {"EXCH_ID", "SEGMENT", "SYMBOL_NAME", "SECURITY_ID"}
+
+    if needed.issubset(cols):
+        m = master[
+            master["EXCH_ID"].astype(str).str.upper().eq("NSE")
+            & master["SEGMENT"].astype(str).str.upper().eq("E")
+            & master["SYMBOL_NAME"].astype(str).str.upper().eq(symbol)
+        ]
+
+        if not m.empty:
+            sid = m.iloc[0]["SECURITY_ID"]
+            return int(float(sid)), "NSE_EQ"
+
+    # Fallback: find the underlying ID from an option contract.
+    needed2 = {"UNDERLYING_SYMBOL", "INSTRUMENT", "UNDERLYING_SECURITY_ID"}
+
+    if needed2.issubset(cols):
+        m = master[
+            master["UNDERLYING_SYMBOL"].astype(str).str.upper().eq(symbol)
+            & master["INSTRUMENT"].astype(str).str.upper().isin(
+                ["OPTSTK", "OPTIDX"]
+            )
+        ]
+
+        if not m.empty:
+            sid = m.iloc[0]["UNDERLYING_SECURITY_ID"]
+            if pd.notna(sid):
+                return int(float(sid)), "NSE_EQ"
+
+    raise RuntimeError(
+        f"Could not find Dhan security ID for {symbol}. "
+        "For indices, use the built-in Dhan IDX_I mapping."
+    )
+
+
+def get_expiries(security_id, segment):
+    result = dhan_post(
+        "/optionchain/expirylist",
+        {
+            "UnderlyingScrip": int(security_id),
+            "UnderlyingSeg": segment,
+        },
+    )
+
+    expiries = result.get("data", [])
+
+    if not isinstance(expiries, list):
+        raise RuntimeError(f"Unexpected expiry response: {result}")
+
+    return expiries
+
+
+def get_chain(security_id, segment, expiry):
+    return dhan_post(
+        "/optionchain",
+        {
+            "UnderlyingScrip": int(security_id),
+            "UnderlyingSeg": segment,
+            "Expiry": expiry,
+        },
+    )
+
+
+def flatten_chain(result):
+    data = result.get("data", {})
+    oc = data.get("oc", {})
+
+    rows = []
+
+    for strike, pair in oc.items():
+        try:
+            strike_value = float(strike)
+        except Exception:
+            continue
+
+        for side, key in [("CE", "ce"), ("PE", "pe")]:
+            item = pair.get(key)
+
+            if not item:
+                continue
+
+            greeks = item.get("greeks", {}) or {}
+
             rows.append({
-                "Strike":strike_f, "Side":side,
-                "LTP":item.get("last_price",0),
-                "OI":item.get("oi",0),
-                "Prev OI":item.get("previous_oi",0),
-                "Volume":item.get("volume",0),
-                "IV":item.get("implied_volatility",0),
-                "Delta":g.get("delta",0),
-                "Theta":g.get("theta",0),
-                "Gamma":g.get("gamma",0),
-                "Vega":g.get("vega",0),
-                "Bid":item.get("top_bid_price",0),
-                "Ask":item.get("top_ask_price",0),
-                "Security ID":item.get("security_id","")
+                "Strike": strike_value,
+                "Side": side,
+                "LTP": item.get("last_price", 0),
+                "OI": item.get("oi", 0),
+                "Previous OI": item.get("previous_oi", 0),
+                "OI Change": (
+                    item.get("oi", 0) - item.get("previous_oi", 0)
+                ),
+                "Volume": item.get("volume", 0),
+                "IV": item.get("implied_volatility", 0),
+                "Delta": greeks.get("delta", 0),
+                "Theta": greeks.get("theta", 0),
+                "Gamma": greeks.get("gamma", 0),
+                "Vega": greeks.get("vega", 0),
+                "Bid": item.get("top_bid_price", 0),
+                "Ask": item.get("top_ask_price", 0),
+                "Security ID": item.get("security_id", ""),
             })
+
     return pd.DataFrame(rows)
 
-def analyze(symbol, expiry_choice):
-    master=load_master()
-    secid, seg=find_underlying(master, symbol)
-    expiries=expiry_list(secid, seg)
-    if not expiries: raise ValueError("Dhan returned no active expiries.")
-    expiry=expiry_choice if expiry_choice in expiries else expiries[0]
-    resp=option_chain(secid, seg, expiry)
-    chain=flatten_chain(resp)
-    spot=float(resp.get("data",{}).get("last_price",0))
-    if chain.empty: raise ValueError("Empty option chain.")
-    chain["OI Change"]=chain["OI"]-chain["Prev OI"]
-    ce=chain[chain.Side=="CE"].copy()
-    pe=chain[chain.Side=="PE"].copy()
-    pcr=pe.OI.sum()/max(ce.OI.sum(),1)
-    call_wall=float(ce.loc[ce.OI.idxmax(),"Strike"])
-    put_wall=float(pe.loc[pe.OI.idxmax(),"Strike"])
-    # ATM row and simple directional scoring, deliberately conservative.
-    atm_idx=(chain.Strike-spot).abs().argsort().iloc[0]
-    atm_strike=float(chain.iloc[atm_idx].Strike)
-    atm_ce=ce[ce.Strike==atm_strike]
-    atm_pe=pe[pe.Strike==atm_strike]
-    ce_oi_chg=float(atm_ce["OI Change"].iloc[0]) if not atm_ce.empty else 0
-    pe_oi_chg=float(atm_pe["OI Change"].iloc[0]) if not atm_pe.empty else 0
-    if pcr > 1.15 and pe_oi_chg > 0: view="BULLISH"
-    elif pcr < .85 and ce_oi_chg > 0: view="BEARISH"
-    else: view="NEUTRAL / WAIT"
-    return spot, expiry, pcr, call_wall, put_wall, view, chain
+
+def analyze(result):
+    data = result.get("data", {})
+    spot = float(data.get("last_price", 0))
+
+    chain = flatten_chain(result)
+
+    if chain.empty:
+        raise RuntimeError("Dhan returned an empty option chain.")
+
+    calls = chain[chain["Side"] == "CE"]
+    puts = chain[chain["Side"] == "PE"]
+
+    call_oi = calls["OI"].sum()
+    put_oi = puts["OI"].sum()
+
+    pcr = put_oi / call_oi if call_oi else 0
+
+    call_wall = (
+        float(calls.loc[calls["OI"].idxmax(), "Strike"])
+        if not calls.empty else 0
+    )
+
+    put_wall = (
+        float(puts.loc[puts["OI"].idxmax(), "Strike"])
+        if not puts.empty else 0
+    )
+
+    strikes = sorted(chain["Strike"].unique())
+
+    atm = min(strikes, key=lambda x: abs(x - spot))
+
+    atm_ce = calls[calls["Strike"] == atm]
+    atm_pe = puts[puts["Strike"] == atm]
+
+    ce_change = (
+        float(atm_ce["OI Change"].iloc[0])
+        if not atm_ce.empty else 0
+    )
+
+    pe_change = (
+        float(atm_pe["OI Change"].iloc[0])
+        if not atm_pe.empty else 0
+    )
+
+    if pcr > 1.15 and pe_change > 0:
+        view = "BULLISH"
+    elif pcr < 0.85 and ce_change > 0:
+        view = "BEARISH"
+    else:
+        view = "NEUTRAL / WAIT"
+
+    return {
+        "spot": spot,
+        "pcr": pcr,
+        "atm": atm,
+        "call_wall": call_wall,
+        "put_wall": put_wall,
+        "view": view,
+        "chain": chain,
+    }
+
+
+# =========================
+# APP
+# =========================
 
 st.title("📈 F&O Pro Trader Assistant — Live Dhan")
-st.caption("Live option-chain analysis. Recommendations remain decision support; automatic orders are disabled.")
 
-if "DHAN_ACCESS_TOKEN" not in st.secrets or "DHAN_CLIENT_ID" not in st.secrets:
-    st.error("Dhan credentials are not configured yet.")
-    st.info("After replacing this app, add DHAN_ACCESS_TOKEN and DHAN_CLIENT_ID in Streamlit App Settings → Secrets. Never put them in GitHub.")
+st.caption(
+    "LIVE DATA VALIDATION MODE — no automatic orders are placed."
+)
+
+if "DHAN_ACCESS_TOKEN" not in st.secrets:
+    st.error("DHAN_ACCESS_TOKEN is missing from Streamlit Secrets.")
     st.stop()
 
-default_symbols=["NIFTY","BANKNIFTY","RELIANCE","HDFCBANK","ICICIBANK","KOTAKBANK","INFY","TCS"]
-symbol=st.selectbox("Select underlying", default_symbols)
+if "DHAN_CLIENT_ID" not in st.secrets:
+    st.error("DHAN_CLIENT_ID is missing from Streamlit Secrets.")
+    st.stop()
+
+symbol = st.selectbox(
+    "Select underlying",
+    ["NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY"] + STOCKS
+)
+
+# Resolve before the button so the ID is visibly confirmed.
+try:
+    security_id, segment = resolve_underlying(symbol)
+
+    st.success(
+        f"✓ Dhan mapping confirmed: {symbol} | "
+        f"Security ID {security_id} | Segment {segment}"
+    )
+
+except Exception as e:
+    st.error(str(e))
+    st.stop()
+
+try:
+    expiries = get_expiries(security_id, segment)
+
+except Exception as e:
+    st.error(f"Could not retrieve expiry list from Dhan: {e}")
+    st.stop()
+
+if not expiries:
+    st.error("Dhan returned no active expiries for this underlying.")
+    st.stop()
+
+expiry = st.selectbox("Select expiry", expiries)
+
 if st.button("🔄 READ LIVE OPTION CHAIN", type="primary"):
+
     try:
-        master=load_master()
-        secid, seg=find_underlying(master, symbol)
-        expiries=expiry_list(secid, seg)
-        if not expiries: raise ValueError("No expiry returned by Dhan.")
-        expiry=st.selectbox("Expiry", expiries, index=0)
-        spot, exp, pcr, call_wall, put_wall, view, chain=analyze(symbol, expiry)
-        c1,c2,c3,c4,c5=st.columns(5)
-        c1.metric("Spot", f"₹{spot:,.2f}")
-        c2.metric("PCR", f"{pcr:.2f}")
-        c3.metric("Call OI Wall", f"{call_wall:g}")
-        c4.metric("Put OI Wall", f"{put_wall:g}")
-        c5.metric("Engine View", view)
-        st.subheader("Option Chain")
-        st.dataframe(chain.sort_values(["Strike","Side"]), use_container_width=True, hide_index=True)
-        st.warning("This first live build is a data-validation stage. It does NOT yet claim a statistically validated probability of profit.")
+        result = get_chain(
+            security_id,
+            segment,
+            expiry
+        )
+
+        analysis = analyze(result)
+
+        c1, c2, c3, c4, c5 = st.columns(5)
+
+        c1.metric(
+            "Spot",
+            f"₹{analysis['spot']:,.2f}"
+        )
+
+        c2.metric(
+            "PCR",
+            f"{analysis['pcr']:.2f}"
+        )
+
+        c3.metric(
+            "ATM",
+            f"{analysis['atm']:g}"
+        )
+
+        c4.metric(
+            "Call OI Wall",
+            f"{analysis['call_wall']:g}"
+        )
+
+        c5.metric(
+            "Put OI Wall",
+            f"{analysis['put_wall']:g}"
+        )
+
+        if analysis["view"] == "BULLISH":
+            st.success("🟢 Initial view: BULLISH")
+        elif analysis["view"] == "BEARISH":
+            st.error("🔴 Initial view: BEARISH")
+        else:
+            st.warning("🟡 Initial view: NEUTRAL / WAIT")
+
+        st.subheader("Live Option Chain")
+
+        st.dataframe(
+            analysis["chain"].sort_values(
+                ["Strike", "Side"]
+            ),
+            use_container_width=True,
+            hide_index=True
+        )
+
+        st.info(
+            "This is the live-data validation stage. "
+            "The future Pro Trader engine will combine price action, "
+            "trend, support/resistance, OI buildup/unwinding, volume, "
+            "IV, Greeks, liquidity, risk/reward and historical backtesting "
+            "before assigning a statistically calibrated probability."
+        )
+
     except Exception as e:
-        st.error(str(e))
-else:
-    st.info("Click the button to retrieve the live option chain from Dhan.")
-    st.markdown("""
-### What we are building next
-1. Live F&O universe
-2. Top gainers/losers
-3. OI + change in OI
-4. PCR + OI walls
-5. Greeks + IV + liquidity
-6. Price-action and technical signals
-7. Historical backtesting
-8. Calibrated target-before-SL probability
-9. Paper trading
-10. Broker execution only after validation
-""")
+        st.error(
+            f"Could not read live option chain: {e}"
+        )
