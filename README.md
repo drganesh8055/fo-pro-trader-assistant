@@ -1,26 +1,22 @@
-# F&O Pro Trader Assistant — MVP
+# Option Trade Assistant — Live NSE public-data build
 
-## What is included
-A browser dashboard for a non-technical trader:
-- scans multiple F&O setups
-- scores each setup 0–100
-- ranks BUY CE / BUY PE candidates
-- considers trend, support/resistance, OI, OI change, volume, IV, liquidity and risk/reward
-- has a strict NO-TRADE filter
-- has demo data and CSV upload
+## Goal
+Browser -> URL -> enter stock -> ANALYZE -> CE/PE/WAIT/NO TRADE + Entry/SL/Targets/Exit.
 
-## Run on Windows
-1. Install Python 3.11+.
-2. Open Command Prompt in this folder.
-3. Run: `pip install -r requirements.txt`
-4. Run: `streamlit run app.py`
+## Data
+This version deliberately does not require Dhan's paid Data API. It uses NSE's public web endpoints on a best-effort basis.
 
-## Very important
-Demo values are synthetic. Do not use demo mode for trading.
+Important: NSE may rate-limit/block automated requests and its Terms of Use govern use of site content. This is not a guaranteed real-time feed. For reliable production trading, use an authorized market-data API.
 
-The high-accuracy production version needs live licensed market data and historical calibration. NSE's official option-chain service provides option-chain information, while broker/data APIs can provide real-time OI, Greeks, IV, volume and bid/ask data.
+## Run locally
+pip install -r requirements.txt
+streamlit run app.py
 
-A real probability-of-profit number should NOT be guessed from a score. It should be statistically calibrated by backtesting thousands of historical setups and measuring whether target was reached before stop, then validated with walk-forward testing.
+## Deploy
+Upload `app.py` and `requirements.txt` to a Streamlit-compatible host (for example Streamlit Community Cloud) and open the generated HTTPS URL.
 
-Recommended path:
-Live data -> feature engine -> market regime -> option-chain/OI analysis -> setup score -> historical probability model -> risk engine -> paper trading -> broker execution.
+## Security
+No broker token is required by this build and it does not place orders.
+
+## Disclaimer
+The score is a rule-based decision aid, not a probability of profit or guarantee. Verify prices/liquidity with your broker before trading.
