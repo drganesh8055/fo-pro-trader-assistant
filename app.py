@@ -1,633 +1,374 @@
 
-import math
+import math, time
+from datetime import datetime, timezone, timedelta
 import numpy as np
 import pandas as pd
+import requests
 import streamlit as st
 
-st.set_page_config(
-    page_title="F&O Pro Trader Assistant — Demo",
-    page_icon="📈",
-    layout="wide",
-)
+st.set_page_config(page_title="Option Trade Assistant", page_icon="📈", layout="wide")
 
-# ============================================================
-# F&O PRO TRADER ASSISTANT — DEMO ENGINE
-# ============================================================
-# IMPORTANT:
-# This version uses SIMULATED market/option-chain data.
-# It does NOT connect to Dhan and does NOT place orders.
-# The scoring system is a rule-based prototype, not a profit guarantee.
-# ============================================================
+IST = timezone(timedelta(hours=5, minutes=30))
+NSE = "https://www.nseindia.com"
 
-INDEX_SPOTS = {
-    "NIFTY": 25200.0,
-    "BANKNIFTY": 57500.0,
-    "FINNIFTY": 26900.0,
-    "MIDCPNIFTY": 13100.0,
+COMMON = {
+    "NIFTY":"NIFTY", "NIFTY50":"NIFTY", "BANKNIFTY":"BANKNIFTY",
+    "FINNIFTY":"FINNIFTY", "MIDCPNIFTY":"MIDCPNIFTY",
+    "KOTAKBANK":"KOTAKBANK", "KOTAK MAHINDRA BANK":"KOTAKBANK",
+    "INDUSTOWER":"INDUSTOWER", "INDUS TOWERS":"INDUSTOWER",
+    "RELIANCE":"RELIANCE", "HDFCBANK":"HDFCBANK", "ICICIBANK":"ICICIBANK",
+    "SBIN":"SBIN", "AXISBANK":"AXISBANK", "INFY":"INFY", "TCS":"TCS",
+    "BHARTIARTL":"BHARTIARTL", "ADANIENT":"ADANIENT", "ADANIPORTS":"ADANIPORTS",
+    "TATAMOTORS":"TATAMOTORS", "TATASTEEL":"TATASTEEL", "MARUTI":"MARUTI",
+    "BAJFINANCE":"BAJFINANCE", "SUNPHARMA":"SUNPHARMA", "LT":"LT",
+    "HINDALCO":"HINDALCO", "COALINDIA":"COALINDIA", "BEL":"BEL",
+    "TRENT":"TRENT", "HAL":"HAL", "M&M":"M&M"
+}
+INDEXES={"NIFTY","BANKNIFTY","FINNIFTY","MIDCPNIFTY"}
+
+HEADERS={
+ "User-Agent":"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/131 Safari/537.36",
+ "Accept":"application/json,text/plain,*/*",
+ "Accept-Language":"en-US,en;q=0.9",
+ "Referer":"https://www.nseindia.com/"
 }
 
-STOCK_SPOTS = {
-    "KOTAKBANK": 420.0,
-    "INDUSTOWER": 382.0,
-    "RELIANCE": 1410.0,
-    "HDFCBANK": 1980.0,
-    "ICICIBANK": 1450.0,
-    "SBIN": 930.0,
-    "AXISBANK": 1280.0,
-    "INFY": 1550.0,
-    "TCS": 4200.0,
-    "BHARTIARTL": 1900.0,
-}
+@st.cache_resource
+def nse_session():
+    s=requests.Session()
+    s.headers.update(HEADERS)
+    s.get(NSE, timeout=10)
+    return s
 
-LOT_SIZES = {
-    "NIFTY": 65,
-    "BANKNIFTY": 30,
-    "FINNIFTY": 60,
-    "MIDCPNIFTY": 120,
-    "KOTAKBANK": 2000,
-    "INDUSTOWER": 1700,
-    "RELIANCE": 500,
-    "HDFCBANK": 550,
-    "ICICIBANK": 700,
-    "SBIN": 750,
-    "AXISBANK": 625,
-    "INFY": 400,
-    "TCS": 175,
-    "BHARTIARTL": 475,
-}
+def get_json(path, params=None, tries=3):
+    s=nse_session()
+    url=NSE+path
+    last=None
+    for i in range(tries):
+        try:
+            r=s.get(url, params=params, timeout=12)
+            if r.status_code==200:
+                return r.json()
+            last=f"HTTP {r.status_code}"
+        except Exception as e:
+            last=str(e)
+        time.sleep(1.2*(i+1))
+        try: s.get(NSE, timeout=8)
+        except: pass
+    raise RuntimeError(f"NSE data request failed: {last}")
 
-INDEX_NAMES = set(INDEX_SPOTS)
+def normalize_symbol(x):
+    x=x.strip().upper()
+    return COMMON.get(x,x.replace(" ",""))
 
+def quote(symbol):
+    if symbol in INDEXES:
+        d=get_json("/api/allIndices")
+        rows=d.get("data",[])
+        for r in rows:
+            if r.get("index","").upper() in {symbol, "NIFTY 50" if symbol=="NIFTY" else symbol}:
+                return {"price":float(r.get("last",0) or r.get("lastPrice",0)),
+                        "change":float(r.get("variation",0) or 0)}
+        # fallback
+        d=get_json("/api/option-chain-indices", {"symbol":symbol})
+        return {"price":float(d["records"]["underlyingValue"]), "change":0.0}
+    d=get_json("/api/quote-equity", {"symbol":symbol})
+    p=d.get("priceInfo",{})
+    return {"price":float(p.get("lastPrice",0)), "change":float(p.get("pChange",0))}
 
-def round_to_step(value, step):
-    return round(value / step) * step
+def chart_prices(symbol):
+    # NSE's public chart endpoint is best-effort and may change.
+    # It commonly returns intraday graph data for EQUITY symbols.
+    try:
+        d=get_json("/api/chart-databyindex", {"index":symbol+"EQN"})
+        arr=d.get("grapthData") or d.get("graphData") or []
+        vals=[float(x[1]) for x in arr if len(x)>=2 and x[1] is not None]
+        return vals
+    except Exception:
+        return []
 
+def option_chain(symbol):
+    endpoint="/api/option-chain-indices" if symbol in INDEXES else "/api/option-chain-equities"
+    return get_json(endpoint, {"symbol":symbol})
 
-def fmt_price(x):
-    if abs(x) >= 1000:
-        return f"₹{x:,.0f}"
-    return f"₹{x:,.2f}"
+def nearest_expiry(chain):
+    dates=chain.get("records",{}).get("expiryDates",[])
+    if not dates: raise RuntimeError("No active option expiry returned by NSE.")
+    today=datetime.now(IST).date()
+    parsed=[]
+    for x in dates:
+        try:
+            dt=datetime.strptime(x,"%d-%b-%Y").date()
+        except:
+            try: dt=datetime.strptime(x,"%Y-%m-%d").date()
+            except: continue
+        if dt>=today: parsed.append((dt,x))
+    if not parsed: raise RuntimeError("No future expiry returned by NSE.")
+    return sorted(parsed)[0][1]
 
-
-def sigmoid(x):
-    return 1.0 / (1.0 + math.exp(-x))
-
-
-@st.cache_data
-def generate_demo_chain(symbol, regime, seed):
-    """Create deterministic, realistic-looking synthetic option-chain data."""
-    rng = np.random.default_rng(seed)
-    is_index = symbol in INDEX_NAMES
-    base = (INDEX_SPOTS if is_index else STOCK_SPOTS)[symbol]
-
-    step = 50 if symbol in {"NIFTY", "BANKNIFTY"} else (
-        25 if symbol in {"FINNIFTY", "MIDCPNIFTY"} else
-        (5 if base < 1000 else 10)
-    )
-    spot = base * (1 + rng.normal(0, 0.0025))
-
-    if regime == "Strong Bullish":
-        bias = 1.0
-    elif regime == "Bullish":
-        bias = 0.55
-    elif regime == "Bearish":
-        bias = -0.55
-    elif regime == "Strong Bearish":
-        bias = -1.0
-    else:
-        bias = 0.0
-
-    atm = round_to_step(spot, step)
-    strikes = np.arange(atm - 8 * step, atm + 9 * step, step)
-
-    # Synthetic market metrics.
-    rows = []
-    max_dist = max(step * 8, 1)
-
-    for k in strikes:
-        dist = (k - spot) / max_dist
-        atmness = math.exp(-0.5 * (dist * 2.2) ** 2)
-
-        call_wall = max(0.15, 1.0 + dist * 0.20 - bias * 0.10)
-        put_wall = max(0.15, 1.0 - dist * 0.20 + bias * 0.10)
-
-        call_oi = int(max(
-            5000,
-            55000 * call_wall * (0.35 + 0.9 * math.exp(-((dist - 0.30) / 0.75) ** 2))
-            * rng.uniform(0.82, 1.18)
-        ))
-        put_oi = int(max(
-            5000,
-            52000 * put_wall * (0.35 + 0.9 * math.exp(-((dist + 0.30) / 0.75) ** 2))
-            * rng.uniform(0.82, 1.18)
-        ))
-
-        # OI change: bullish regime tends to build puts below and unwind calls,
-        # bearish regime tends to do the reverse.
-        call_change = int(call_oi * (
-            0.10 - bias * 0.12 + rng.normal(0, 0.045)
-        ))
-        put_change = int(put_oi * (
-            0.10 + bias * 0.12 + rng.normal(0, 0.045)
-        ))
-
-        iv_base = 14.0 + 5.0 * abs(dist) + (3.0 if regime in {"Strong Bullish", "Strong Bearish"} else 0)
-        iv = max(8.0, iv_base + rng.normal(0, 0.6))
-
-        days = 27
-        intrinsic_call = max(spot - k, 0)
-        intrinsic_put = max(k - spot, 0)
-
-        time_value = max(0.5 * step, spot * (iv / 100) * math.sqrt(days / 365) * 0.18)
-        ce_ltp = max(0.15, intrinsic_call + time_value * (0.55 + 0.75 * atmness))
-        pe_ltp = max(0.15, intrinsic_put + time_value * (0.55 + 0.75 * atmness))
-
-        # Approximate deltas.
-        ce_delta = 0.5 + 0.45 * math.tanh((spot - k) / max(step * 2.2, 1))
-        pe_delta = ce_delta - 1.0
-
-        spread_ce = max(0.05, ce_ltp * 0.025)
-        spread_pe = max(0.05, pe_ltp * 0.025)
-
-        volume_ce = int(max(100, call_oi * rng.uniform(0.05, 0.35)))
-        volume_pe = int(max(100, put_oi * rng.uniform(0.05, 0.35)))
-
+def norm_chain(chain, expiry):
+    records=chain.get("records",{})
+    rows=[]
+    for item in records.get("data",[]):
+        if item.get("expiryDate")!=expiry: continue
+        k=float(item.get("strikePrice"))
+        ce=item.get("CE",{}) or {}
+        pe=item.get("PE",{}) or {}
         rows.append({
-            "Strike": float(k),
-            "CE LTP": round(ce_ltp, 2),
-            "CE OI": call_oi,
-            "CE Chg OI": call_change,
-            "CE Volume": volume_ce,
-            "CE IV": round(iv + rng.normal(0, 0.25), 2),
-            "CE Delta": round(ce_delta, 3),
-            "CE Bid": round(max(0.05, ce_ltp - spread_ce), 2),
-            "CE Ask": round(ce_ltp + spread_ce, 2),
-            "PE LTP": round(pe_ltp, 2),
-            "PE OI": put_oi,
-            "PE Chg OI": put_change,
-            "PE Volume": volume_pe,
-            "PE IV": round(iv + rng.normal(0, 0.25), 2),
-            "PE Delta": round(pe_delta, 3),
-            "PE Bid": round(max(0.05, pe_ltp - spread_pe), 2),
-            "PE Ask": round(pe_ltp + spread_pe, 2),
+          "strike":k,
+          "ce_ltp":float(ce.get("lastPrice",0) or 0),
+          "ce_oi":int(ce.get("openInterest",0) or 0),
+          "ce_chg_oi":int(ce.get("changeinOpenInterest",0) or 0),
+          "ce_vol":int(ce.get("totalTradedVolume",0) or 0),
+          "ce_iv":float(ce.get("impliedVolatility",0) or 0),
+          "ce_bid":float(ce.get("bidprice",0) or 0),
+          "ce_ask":float(ce.get("askPrice",0) or 0),
+          "pe_ltp":float(pe.get("lastPrice",0) or 0),
+          "pe_oi":int(pe.get("openInterest",0) or 0),
+          "pe_chg_oi":int(pe.get("changeinOpenInterest",0) or 0),
+          "pe_vol":int(pe.get("totalTradedVolume",0) or 0),
+          "pe_iv":float(pe.get("impliedVolatility",0) or 0),
+          "pe_bid":float(pe.get("bidprice",0) or 0),
+          "pe_ask":float(pe.get("askPrice",0) or 0),
         })
+    return pd.DataFrame(rows)
 
-    df = pd.DataFrame(rows)
+def rsi(vals,n=14):
+    if len(vals)<n+2: return 50.0
+    s=pd.Series(vals,dtype=float)
+    d=s.diff()
+    up=d.clip(lower=0).ewm(alpha=1/n,adjust=False).mean()
+    dn=(-d.clip(upper=0)).ewm(alpha=1/n,adjust=False).mean()
+    rs=up/dn.replace(0,np.nan)
+    x=100-(100/(1+rs))
+    return float(x.iloc[-1]) if np.isfinite(x.iloc[-1]) else 50.0
 
-    # Create synthetic underlying technical metrics.
-    momentum = np.clip(50 + bias * 27 + rng.normal(0, 4), 10, 90)
-    trend_strength = np.clip(45 + abs(bias) * 38 + rng.normal(0, 5), 10, 95)
-    volume_ratio = max(0.65, 1.0 + bias * 0.28 + rng.normal(0, 0.12))
-    rsi = np.clip(52 + bias * 17 + rng.normal(0, 4), 20, 80)
+def ema(vals,n):
+    if not vals:return 0
+    return float(pd.Series(vals).ewm(span=n,adjust=False).mean().iloc[-1])
+
+def bs_delta(spot,strike,iv,days,call=True):
+    if iv<=0 or spot<=0 or strike<=0: return 0.5 if call else -0.5
+    T=max(days/365,1/3650)
+    sigma=max(iv/100,0.01)
+    d1=(math.log(spot/strike)+(0.10+0.5*sigma*sigma)*T)/(sigma*math.sqrt(T))
+    # normal CDF
+    cdf=0.5*(1+math.erf(d1/math.sqrt(2)))
+    return cdf if call else cdf-1
+
+def step_for(symbol, spot):
+    if symbol=="NIFTY": return 50
+    if symbol in {"BANKNIFTY","MIDCPNIFTY"}: return 100
+    if symbol=="FINNIFTY": return 50
+    if spot<500:return 5
+    if spot<1500:return 10
+    return 20
+
+def analyze(symbol):
+    q=quote(symbol)
+    spot=q["price"]
+    prices=chart_prices(symbol) if symbol not in INDEXES else []
+    chain=option_chain(symbol)
+    expiry=nearest_expiry(chain)
+    df=norm_chain(chain,expiry)
+    if df.empty: raise RuntimeError("NSE returned no option-chain rows for the nearest expiry.")
+
+    step=step_for(symbol,spot)
+    atm=float(df.iloc[(df["strike"]-spot).abs().argsort()[:1].iloc[0]]["strike"])
+    near=df[(df.strike>=spot-5*step)&(df.strike<=spot+5*step)].copy()
+    if near.empty: near=df.copy()
+
+    total_call=near.ce_oi.sum(); total_put=near.pe_oi.sum()
+    pcr=total_put/max(total_call,1)
+    call_wall=float(near.loc[near.ce_oi.idxmax(),"strike"])
+    put_wall=float(near.loc[near.pe_oi.idxmax(),"strike"])
+
+    if prices:
+        last=prices[-1]
+        e20=ema(prices,20); e50=ema(prices,50)
+        rv=float(np.std(np.diff(np.log(np.maximum(prices,1))))*math.sqrt(max(len(prices),1))*100)
+        r=rsi(prices)
+        momentum=float(np.clip(50+(last/e20-1)*1800,0,100))
+        trend= "BULLISH" if last>e20 and e20>=e50 else ("BEARISH" if last<e20 and e20<=e50 else "NEUTRAL")
+        recent=prices[-min(80,len(prices)):]
+        support=float(min(recent)); resistance=float(max(recent))
+    else:
+        # Option-chain-only fallback when chart endpoint is unavailable.
+        r=50.0; momentum=50.0
+        trend="BULLISH" if pcr>=1.05 else ("BEARISH" if pcr<=0.85 else "NEUTRAL")
+        support=put_wall; resistance=call_wall; rv=0
+
+    # Combine price trend, PCR and OI changes.
+    near3=near[(near.strike>=spot-3*step)&(near.strike<=spot+3*step)]
+    call_chg=float(near3.ce_chg_oi.sum()); put_chg=float(near3.pe_chg_oi.sum())
+    oi_bull = (put_chg>0 and call_chg<0)
+    oi_bear = (call_chg>0 and put_chg<0)
+
+    bull=0; bear=0
+    bull += 30 if trend=="BULLISH" else (12 if trend=="NEUTRAL" else 0)
+    bear += 30 if trend=="BEARISH" else (12 if trend=="NEUTRAL" else 0)
+    bull += float(np.clip((pcr-0.8)*35,0,25))
+    bear += float(np.clip((1.05-pcr)*45,0,25))
+    bull += 20 if oi_bull else (7 if put_chg>0 else 0)
+    bear += 20 if oi_bear else (7 if call_chg>0 else 0)
+    bull += 15 if r>=55 else 5
+    bear += 15 if r<=45 else 5
+    bull=min(100,bull); bear=min(100,bear)
+
+    side="CE" if bull>=bear else "PE"
+    strength=max(bull,bear)
+    # Quality gate: do not force a trade.
+    action="NO TRADE"
+    if strength>=68 and abs(bull-bear)>=12: action="TRADE"
+    elif strength>=55: action="WAIT"
+
+    target_strike = atm + (step if side=="CE" else -step)
+    if side=="CE":
+        candidates=near[(near.strike>=atm)&(near.strike<=atm+2*step)].copy()
+        if candidates.empty: candidates=near.copy()
+        row=candidates.iloc[(candidates.ce_ltp.replace(0,np.nan).fillna(1e9)).abs().argsort()[:1].iloc[0]]
+        premium=float(row.ce_ltp); iv=float(row.ce_iv); delta=bs_delta(spot,float(row.strike),iv,max(1,(datetime.strptime(expiry,"%d-%b-%Y").date()-datetime.now(IST).date()).days),True)
+        opt_oi=int(row.ce_oi); opt_chg=int(row.ce_chg_oi); vol=int(row.ce_vol)
+        bid=float(row.ce_bid); ask=float(row.ce_ask)
+    else:
+        candidates=near[(near.strike<=atm)&(near.strike>=atm-2*step)].copy()
+        if candidates.empty: candidates=near.copy()
+        row=candidates.iloc[(candidates.pe_ltp.replace(0,np.nan).fillna(1e9)).abs().argsort()[:1].iloc[0]]
+        premium=float(row.pe_ltp); iv=float(row.pe_iv); delta=abs(bs_delta(spot,float(row.strike),iv,max(1,(datetime.strptime(expiry,"%d-%b-%Y").date()-datetime.now(IST).date()).days),False))
+        opt_oi=int(row.pe_oi); opt_chg=int(row.pe_chg_oi); vol=int(row.pe_vol)
+        bid=float(row.pe_bid); ask=float(row.pe_ask)
+
+    if premium<=0: action="NO TRADE"
+    entry=max(premium,(bid+ask)/2 if bid>0 and ask>0 else premium)
+    # Premium risk levels. Use a tighter stop for liquid ATM/near-ATM options.
+    sl=round(entry*0.72,2)
+    t1=round(entry*1.35,2)
+    t2=round(entry*1.65,2)
+
+    trigger = resistance if side=="CE" else support
+    if prices:
+        trigger = resistance if side=="CE" else support
+        # Avoid requiring an impossible trigger far from current price.
+        if side=="CE" and trigger<=spot: trigger=spot*(1+0.0015)
+        if side=="PE" and trigger>=spot: trigger=spot*(1-0.0015)
+    else:
+        trigger=spot + step*0.15 if side=="CE" else spot-step*0.15
+
+    reasons=[]
+    reasons.append(f"Trend: {trend}. RSI: {r:.0f}.")
+    reasons.append(f"PCR: {pcr:.2f}. Put OI wall {put_wall:.0f}; Call OI wall {call_wall:.0f}.")
+    reasons.append("Put OI building / Call OI unwinding supports CE." if oi_bull else
+                   "Call OI building / Put OI unwinding supports PE." if oi_bear else
+                   "OI change is mixed; confirmation is required.")
+    reasons.append(f"Selected {side} has delta ~{delta:.2f}, IV {iv:.1f}%, volume {vol:,}.")
+    if action=="TRADE":
+        reasons.append("Multiple independent factors align; wait for the stated underlying trigger.")
+    elif action=="WAIT":
+        reasons.append("Signal is not strong enough yet; do not enter until confirmation.")
+    else:
+        reasons.append("Signals are conflicting or weak; the correct action is NO TRADE.")
 
     return {
-        "spot": float(spot),
-        "step": step,
-        "chain": df,
-        "momentum": float(momentum),
-        "trend_strength": float(trend_strength),
-        "volume_ratio": float(volume_ratio),
-        "rsi": float(rsi),
-        "regime": regime,
+      "symbol":symbol,"spot":spot,"change":q["change"],"expiry":expiry,"atm":atm,
+      "pcr":pcr,"put_wall":put_wall,"call_wall":call_wall,"support":support,
+      "resistance":resistance,"rsi":r,"trend":trend,"bull":bull,"bear":bear,
+      "action":action,"side":side,"strike":float(row.strike),"premium":premium,
+      "entry":entry,"sl":sl,"t1":t1,"t2":t2,"delta":delta,"iv":iv,
+      "oi":opt_oi,"chg_oi":opt_chg,"volume":vol,"trigger":trigger,"reasons":reasons,
+      "rows":near
     }
 
+def money(x): return f"₹{x:,.2f}" if x<1000 else f"₹{x:,.0f}"
 
-def market_summary(data):
-    df = data["chain"]
-    spot = data["spot"]
+st.title("📈 Option Trade Assistant")
+st.caption("Live NSE public-data connector • analysis only • no order placement")
 
-    total_call_oi = df["CE OI"].sum()
-    total_put_oi = df["PE OI"].sum()
-    pcr = total_put_oi / max(total_call_oi, 1)
+with st.container(border=True):
+    c1,c2=st.columns([4,1])
+    with c1:
+        symbol_input=st.text_input("Enter F&O stock / index", placeholder="KOTAKBANK, RELIANCE, NIFTY...")
+    with c2:
+        risk=st.selectbox("Risk",["Conservative","Balanced","Aggressive"],index=1)
 
-    call_wall_row = df.loc[df["CE OI"].idxmax()]
-    put_wall_row = df.loc[df["PE OI"].idxmax()]
+    go=st.button("🔎 ANALYZE", type="primary", use_container_width=True)
 
-    # OI interpretation around spot.
-    near = df[(df["Strike"] >= spot - 3 * data["step"]) &
-              (df["Strike"] <= spot + 3 * data["step"])]
+if go:
+    symbol=normalize_symbol(symbol_input)
+    if not symbol:
+        st.error("Enter a stock/index symbol.")
+        st.stop()
+    with st.spinner(f"Fetching live NSE data for {symbol}..."):
+        try:
+            a=analyze(symbol)
+        except Exception as e:
+            st.error("Live data could not be fetched right now.")
+            st.code(str(e))
+            st.info("NSE public endpoints can rate-limit or block automated requests. Try again after a short interval.")
+            st.stop()
 
-    call_chg = near["CE Chg OI"].sum()
-    put_chg = near["PE Chg OI"].sum()
+    st.success(f"Data received from NSE • {datetime.now(IST).strftime('%d-%b-%Y %H:%M:%S IST')}")
 
-    if data["momentum"] >= 65 and pcr >= 0.95:
-        direction = "BULLISH"
-    elif data["momentum"] <= 35 and pcr <= 0.95:
-        direction = "BEARISH"
-    else:
-        direction = "NEUTRAL / WAIT"
-
-    return {
-        "pcr": pcr,
-        "call_wall": float(call_wall_row["Strike"]),
-        "put_wall": float(put_wall_row["Strike"]),
-        "call_chg": int(call_chg),
-        "put_chg": int(put_chg),
-        "direction": direction,
-    }
-
-
-def score_candidate(data, option_type, strike, risk_profile):
-    df = data["chain"]
-    spot = data["spot"]
-    row = df[df["Strike"] == strike].iloc[0]
-    summary = market_summary(data)
-
-    if option_type == "CE":
-        premium = row["CE LTP"]
-        delta = row["CE Delta"]
-        iv = row["CE IV"]
-        oi = row["CE OI"]
-        chg_oi = row["CE Chg OI"]
-        volume = row["CE Volume"]
-
-        trend_score = np.interp(data["momentum"], [0, 100], [0, 30])
-        pcr_score = np.interp(summary["pcr"], [0.65, 1.30], [0, 15])
-        location_score = 15 if strike >= spot and strike <= spot + 2.5 * data["step"] else 8
-        delta_score = np.interp(delta, [0.25, 0.75], [0, 15])
-        volume_score = min(10, 10 * min(volume / max(oi * 0.18, 1), 1))
-        oi_score = 8 if chg_oi < 0 else 4
-        iv_score = 7 if iv <= df["CE IV"].median() * 1.12 else 3
-
-        direction_penalty = 0 if data["momentum"] >= 50 else 18
-    else:
-        premium = row["PE LTP"]
-        delta = abs(row["PE Delta"])
-        iv = row["PE IV"]
-        oi = row["PE OI"]
-        chg_oi = row["PE Chg OI"]
-        volume = row["PE Volume"]
-
-        trend_score = np.interp(100 - data["momentum"], [0, 100], [0, 30])
-        pcr_score = np.interp(1.30 - summary["pcr"], [0, 0.65], [0, 15])
-        location_score = 15 if strike <= spot and strike >= spot - 2.5 * data["step"] else 8
-        delta_score = np.interp(delta, [0.25, 0.75], [0, 15])
-        volume_score = min(10, 10 * min(volume / max(oi * 0.18, 1), 1))
-        oi_score = 8 if chg_oi < 0 else 4
-        iv_score = 7 if iv <= df["PE IV"].median() * 1.12 else 3
-
-        direction_penalty = 0 if data["momentum"] <= 50 else 18
-
-    raw = trend_score + pcr_score + location_score + delta_score + volume_score + oi_score + iv_score - direction_penalty
-
-    # Risk profile adjustment.
-    if risk_profile == "Conservative":
-        raw -= max(0, 0.45 - delta) * 10
-    elif risk_profile == "Aggressive":
-        raw += max(0, 0.45 - delta) * 4
-
-    score = float(np.clip(raw, 0, 100))
-
-    # Keep the demo target/SL practical and transparent.
-    sl_pct = {"Conservative": 0.18, "Balanced": 0.22, "Aggressive": 0.28}[risk_profile]
-    target_pct = {"Conservative": 0.30, "Balanced": 0.42, "Aggressive": 0.55}[risk_profile]
-
-    entry_low = float(row[f"{option_type} Bid"])
-    entry_high = float(row[f"{option_type} Ask"])
-    entry = round((entry_low + entry_high) / 2, 2)
-    sl = round(max(0.05, entry * (1 - sl_pct)), 2)
-    target = round(entry * (1 + target_pct), 2)
-
-    rr = (target - entry) / max(entry - sl, 0.01)
-
-    if option_type == "CE":
-        reasons = [
-            "Underlying momentum supports the bullish side." if data["momentum"] >= 50
-            else "Momentum is not supportive for a bullish option.",
-            f"PCR is {summary['pcr']:.2f}.",
-            f"Nearest call resistance / OI wall is around {fmt_price(summary['call_wall'])}.",
-            "Strike has usable delta and synthetic liquidity.",
-        ]
-    else:
-        reasons = [
-            "Underlying momentum supports the bearish side." if data["momentum"] <= 50
-            else "Momentum is not supportive for a bearish option.",
-            f"PCR is {summary['pcr']:.2f}.",
-            f"Nearest put support / OI wall is around {fmt_price(summary['put_wall'])}.",
-            "Strike has usable delta and synthetic liquidity.",
-        ]
-
-    if score < 55:
-        action = "NO TRADE"
-    elif score < 68:
-        action = "WATCH"
-    else:
-        action = "TRADE CANDIDATE"
-
-    return {
-        "symbol": "",
-        "type": option_type,
-        "strike": strike,
-        "score": round(score, 1),
-        "action": action,
-        "entry": entry,
-        "sl": sl,
-        "target": target,
-        "rr": round(rr, 2),
-        "premium": premium,
-        "delta": delta,
-        "iv": iv,
-        "oi": oi,
-        "chg_oi": chg_oi,
-        "volume": volume,
-        "reasons": reasons,
-    }
-
-
-def build_candidates(data, symbol, risk_profile):
-    spot = data["spot"]
-    step = data["step"]
-    df = data["chain"]
-
-    # Candidate strikes are near ATM, avoiding far OTM lottery options.
-    candidates = []
-    for strike in df["Strike"]:
-        if abs(strike - spot) <= 3 * step:
-            candidates.append(score_candidate(data, "CE", float(strike), risk_profile))
-            candidates.append(score_candidate(data, "PE", float(strike), risk_profile))
-
-    for c in candidates:
-        c["symbol"] = symbol
-
-    candidates.sort(key=lambda x: x["score"], reverse=True)
-
-    # Add a simple "quality gate": require direction alignment.
-    if data["momentum"] >= 55:
-        preferred = [c for c in candidates if c["type"] == "CE"]
-    elif data["momentum"] <= 45:
-        preferred = [c for c in candidates if c["type"] == "PE"]
-    else:
-        preferred = []
-
-    if preferred:
-        candidates = sorted(preferred, key=lambda x: x["score"], reverse=True) + [
-            c for c in candidates if c not in preferred
-        ]
-
-    return candidates[:10]
-
-
-def show_trade_card(c):
-    title = f"{c['symbol']} {c['strike']:.0f} {c['type']}"
-    if c["action"] == "TRADE CANDIDATE":
-        st.success(f"### {title} — {c['score']}/100")
-    elif c["action"] == "WATCH":
-        st.warning(f"### {title} — {c['score']}/100")
-    else:
-        st.info(f"### {title} — {c['score']}/100")
-
-    cols = st.columns(6)
-    cols[0].metric("Action", c["action"])
-    cols[1].metric("Entry", fmt_price(c["entry"]))
-    cols[2].metric("Stop Loss", fmt_price(c["sl"]))
-    cols[3].metric("Target", fmt_price(c["target"]))
-    cols[4].metric("R:R", f"1:{c['rr']:.2f}")
-    cols[5].metric("Delta", f"{c['delta']:.2f}")
-
-    with st.expander("Why the engine likes / dislikes this setup"):
-        for r in c["reasons"]:
-            st.write("•", r)
-        st.caption(
-            f"OI: {c['oi']:,} | Chg OI: {c['chg_oi']:+,} | "
-            f"Volume: {c['volume']:,} | IV: {c['iv']:.1f}%"
-        )
-
-
-# ============================================================
-# UI
-# ============================================================
-
-st.title("📈 F&O Pro Trader Assistant — DEMO")
-st.caption("SIMULATED DATA MODE • No Dhan connection • No automatic orders")
-
-st.warning(
-    "⚠️ DEMO ONLY: Every market/option-chain value on this page is simulated. "
-    "Do not use these numbers to place a real trade. The 0–100 score is a rule-based "
-    "setup score, NOT a guaranteed probability of profit."
-)
-
-with st.sidebar:
-    st.header("🎛️ Demo Controls")
-
-    universe = st.selectbox(
-        "Select instrument",
-        list(INDEX_SPOTS.keys()) + list(STOCK_SPOTS.keys()),
-        index=0,
-    )
-
-    regime = st.selectbox(
-        "Simulated market regime",
-        ["Strong Bullish", "Bullish", "Sideways", "Bearish", "Strong Bearish"],
-        index=1,
-    )
-
-    risk_profile = st.selectbox(
-        "Risk profile",
-        ["Conservative", "Balanced", "Aggressive"],
-        index=1,
-    )
-
-    seed = st.slider(
-        "Demo scenario",
-        min_value=1,
-        max_value=50,
-        value=7,
-        help="Change this to generate a different synthetic market scenario.",
-    )
+    top=st.columns(6)
+    top[0].metric("Live price",money(a["spot"]),f"{a['change']:.2f}%")
+    top[1].metric("Bias",a["trend"])
+    top[2].metric("PCR",f"{a['pcr']:.2f}")
+    top[3].metric("Put OI wall",money(a["put_wall"]))
+    top[4].metric("Call OI wall",money(a["call_wall"]))
+    top[5].metric("RSI",f"{a['rsi']:.0f}")
 
     st.divider()
-    st.write("**What this demo is designed to become:**")
-    st.write("1. Scan F&O stocks")
-    st.write("2. Read OI + Chg OI")
-    st.write("3. Detect support/resistance")
-    st.write("4. Identify bullish/bearish setups")
-    st.write("5. Rank option strikes")
-    st.write("6. Give Entry / SL / Target")
-    st.write("7. Reject weak setups with NO TRADE")
-    st.write("8. Later connect to Dhan live data")
-
-data = generate_demo_chain(universe, regime, seed)
-summary = market_summary(data)
-candidates = build_candidates(data, universe, risk_profile)
-
-# Top dashboard
-st.subheader("1️⃣ Market Dashboard")
-
-c1, c2, c3, c4, c5, c6 = st.columns(6)
-c1.metric("Spot", fmt_price(data["spot"]))
-c2.metric("Market Bias", summary["direction"])
-c3.metric("PCR", f"{summary['pcr']:.2f}")
-c4.metric("Put OI Wall", fmt_price(summary["put_wall"]))
-c5.metric("Call OI Wall", fmt_price(summary["call_wall"]))
-c6.metric("RSI", f"{data['rsi']:.0f}")
-
-c7, c8, c9 = st.columns(3)
-c7.metric("Momentum", f"{data['momentum']:.0f}/100")
-c8.metric("Trend Strength", f"{data['trend_strength']:.0f}/100")
-c9.metric("Volume vs Normal", f"{data['volume_ratio']:.2f}x")
-
-st.divider()
-
-# Tabs
-tab1, tab2, tab3, tab4 = st.tabs([
-    "🏆 Best Trades",
-    "🔎 Option Chain",
-    "📊 Market Analysis",
-    "🧠 How the Engine Thinks",
-])
-
-with tab1:
-    st.subheader("🏆 Ranked Trade Candidates")
-
-    top = candidates[0] if candidates else None
-    if top:
-        st.markdown("### ⭐ #1 Setup")
-        show_trade_card(top)
-
-    st.markdown("### Other Candidates")
-    for c in candidates[1:6]:
-        show_trade_card(c)
-
-    st.info(
-        "Professional-style rule: if no setup crosses the quality threshold, "
-        "the correct answer is NO TRADE. The app is intentionally designed not "
-        "to force a trade every time."
-    )
-
-with tab2:
-    st.subheader("🔎 Simulated Option Chain")
-
-    display = data["chain"].copy()
-    display["Strike"] = display["Strike"].map(lambda x: f"{x:,.0f}")
-
-    st.dataframe(
-        display[
-            [
-                "Strike",
-                "CE LTP", "CE OI", "CE Chg OI", "CE Volume", "CE IV", "CE Delta",
-                "PE LTP", "PE OI", "PE Chg OI", "PE Volume", "PE IV", "PE Delta",
-            ]
-        ],
-        use_container_width=True,
-        hide_index=True,
-    )
-
-    st.caption(
-        "In a future Dhan-live version, these fields will come from Dhan's option-chain "
-        "feed. Dhan's documented option chain includes OI, previous OI, Greeks, volume, "
-        "LTP, bid/ask and IV."
-    )
-
-with tab3:
-    st.subheader("📊 Support / Resistance & OI Interpretation")
-
-    left, right = st.columns(2)
-
-    with left:
-        st.markdown("### 🟢 Put Side")
-        st.write(f"**Largest Put OI:** {fmt_price(summary['put_wall'])}")
-        st.write(f"**Near-spot Put OI change:** {summary['put_chg']:+,}")
-        if summary["put_chg"] > 0:
-            st.success("Synthetic put OI is building near spot → possible support.")
-        else:
-            st.warning("Synthetic put OI is not strongly building → support is weaker.")
-
-    with right:
-        st.markdown("### 🔴 Call Side")
-        st.write(f"**Largest Call OI:** {fmt_price(summary['call_wall'])}")
-        st.write(f"**Near-spot Call OI change:** {summary['call_chg']:+,}")
-        if summary["call_chg"] > 0:
-            st.warning("Synthetic call OI is building near spot → possible resistance.")
-        else:
-            st.success("Synthetic call OI is not strongly building → resistance is weaker.")
-
-    st.markdown("### Underlying Momentum")
-    momentum_df = pd.DataFrame(
-        {
-            "Metric": ["Momentum", "Trend Strength", "RSI"],
-            "Value": [
-                round(data["momentum"], 1),
-                round(data["trend_strength"], 1),
-                round(data["rsi"], 1),
-            ],
-        }
-    )
-    st.bar_chart(momentum_df.set_index("Metric"))
-
-    st.markdown("### Engine conclusion")
-    if summary["direction"] == "BULLISH":
-        st.success(
-            f"BULLISH bias: the engine will prefer CE candidates, especially strikes "
-            f"near the money with usable delta and liquidity."
-        )
-    elif summary["direction"] == "BEARISH":
-        st.error(
-            f"BEARISH bias: the engine will prefer PE candidates, especially strikes "
-            f"near the money with usable delta and liquidity."
-        )
+    if a["action"]=="TRADE":
+        st.success(f"## 🟢 BUY {a['side']} — {a['strike']:.0f} {a['side']}  | Score {max(a['bull'],a['bear']):.0f}/100")
+    elif a["action"]=="WAIT":
+        st.warning(f"## 🟡 WAIT — {a['side']} setup is developing")
     else:
-        st.warning(
-            "NEUTRAL: conditions are mixed. A professional approach is to wait for "
-            "confirmation rather than forcing a trade."
-        )
+        st.error("## 🔴 NO TRADE")
 
-with tab4:
-    st.subheader("🧠 How the Pro Trader Engine Works")
+    if a["action"]!="NO TRADE":
+        x=st.columns(6)
+        x[0].metric("Option",f"{a['strike']:.0f} {a['side']}")
+        x[1].metric("Entry",money(a["entry"]))
+        x[2].metric("Stop Loss",money(a["sl"]))
+        x[3].metric("Target 1",money(a["t1"]))
+        x[4].metric("Target 2",money(a["t2"]))
+        x[5].metric("Delta",f"{a['delta']:.2f}")
 
+        st.markdown(f"### Entry trigger")
+        if a["side"]=="CE":
+            st.info(f"Enter only after the underlying sustains above **{money(a['trigger'])}** with volume/price confirmation.")
+        else:
+            st.info(f"Enter only after the underlying sustains below **{money(a['trigger'])}** with volume/price confirmation.")
+
+        st.markdown("### Exit plan")
+        st.write(f"1. **SL:** exit if option premium falls to **{money(a['sl'])}**.")
+        st.write(f"2. **Target 1:** book partial profit around **{money(a['t1'])}**.")
+        st.write(f"3. **Target 2:** exit the balance around **{money(a['t2'])}**.")
+        st.write("4. If the underlying invalidates the breakout/breakdown or the bias flips, exit even if the premium target has not been reached.")
+        st.write(f"5. Avoid carrying the trade into expiry just because the target was not hit.")
+
+    st.divider()
+    st.subheader("Why the engine says this")
+    for r in a["reasons"]: st.write("•",r)
+
+    with st.expander("Detailed live option-chain snapshot"):
+        d=a["rows"].copy()
+        show=d[["strike","ce_ltp","ce_oi","ce_chg_oi","ce_vol","ce_iv","pe_ltp","pe_oi","pe_chg_oi","pe_vol","pe_iv"]]
+        show.columns=["Strike","CE LTP","CE OI","CE Chg OI","CE Vol","CE IV","PE LTP","PE OI","PE Chg OI","PE Vol","PE IV"]
+        st.dataframe(show, use_container_width=True, hide_index=True)
+
+    st.caption("This is a rule-based decision aid, not a guarantee of profit. Option prices can move sharply; verify the quote and liquidity in your broker before trading.")
+
+else:
+    st.info("Enter a stock such as KOTAKBANK or RELIANCE and click ANALYZE.")
     st.markdown("""
-### The demo score is built from multiple factors
+### What this app does
+- Fetches the latest available NSE public quote and option chain.
+- Chooses the nearest active expiry.
+- Calculates PCR, OI walls, OI-change pressure, RSI/EMA when intraday chart data is available.
+- Estimates option delta from spot, strike, IV and time to expiry.
+- Ranks **CE vs PE** and can return **TRADE / WAIT / NO TRADE**.
+- Gives an entry trigger, option SL, two targets and an exit plan.
 
-**1. Direction**
-- Underlying momentum
-- RSI
-- Trend strength
-
-**2. Option-chain structure**
-- Put OI
-- Call OI
-- Change in OI
-- Put/Call Ratio (PCR)
-- OI walls around the current price
-
-**3. Option quality**
-- Delta
-- IV
-- Volume
-- Distance from spot
-- Bid/ask spread
-
-**4. Risk/reward**
-- Entry
-- Stop loss
-- Target
-- R:R
-
-**5. Final decision**
-- **68–100:** Trade Candidate
-- **55–67:** Watch
-- **Below 55:** No Trade
-
-These thresholds are prototype rules. They must be validated and recalibrated using
-historical market data before the system can make statistically meaningful claims
-about probability of profit.
+### Important data limitation
+This build intentionally avoids a paid market-data subscription. NSE's public website exposes an option-chain page and live/streaming market information, but NSE also states that its site is governed by its Terms of Use and prohibits aggregation/copying of site content. Public endpoints can also be rate-limited or blocked. Therefore this is a best-effort personal-use connector, not a guaranteed institutional-grade feed.
 """)
-
-    st.markdown("### 🚫 What the app deliberately does NOT do")
-    st.write("• It does not guarantee profit.")
-    st.write("• It does not claim that OI alone predicts price.")
-    st.write("• It does not place real orders.")
-    st.write("• It does not pretend simulated data is live market data.")
-    st.write("• It does not call a score a 'probability' without backtesting.")
-
-    st.markdown("### 🚀 Next production stages")
-    st.write("**Stage 1 — Demo:** rule engine + UI + simulated chain")
-    st.write("**Stage 2 — Historical backtest:** test the rules across past F&O sessions")
-    st.write("**Stage 3 — Live Dhan data:** replace simulated chain with live Dhan data")
-    st.write("**Stage 4 — Paper trading:** track signals without real money")
-    st.write("**Stage 5 — Optional broker execution:** only after validation and safeguards")
-
-st.divider()
-st.caption(
-    "F&O Pro Trader Assistant — Demo build. Synthetic data only. "
-    "For education and strategy development, not a recommendation to buy or sell."
-)
