@@ -170,7 +170,7 @@ def find_underlying(symbol):
             "query": symbol,
             "segments": "EQ,INDEX",
             "page_number": 1,
-            "records": 50,
+            "records": 30,
         },
     )
 
