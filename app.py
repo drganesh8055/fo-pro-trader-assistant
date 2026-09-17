@@ -54,9 +54,14 @@ INDEX_NAMES = {
 # ============================================================
 
 def get_token():
-    token = st.secrets.get("UPSTOX_ACCESS_TOKEN", "")
+
+    token = st.secrets.get(
+        "UPSTOX_ACCESS_TOKEN",
+        ""
+    )
 
     if not token:
+
         raise RuntimeError(
             "UPSTOX_ACCESS_TOKEN is missing from Streamlit Secrets."
         )
@@ -65,6 +70,7 @@ def get_token():
 
 
 def headers():
+
     return {
         "Accept": "application/json",
         "Content-Type": "application/json",
@@ -123,7 +129,10 @@ def upstox_get(endpoint, params=None):
             "Upstox returned an invalid response."
         )
 
-    if data.get("status") not in (None, "success"):
+    if data.get("status") not in (
+        None,
+        "success"
+    ):
 
         raise RuntimeError(
             f"Upstox returned status: {data.get('status')}"
@@ -157,7 +166,10 @@ def find_underlying(symbol):
             }
         )
 
-        rows = result.get("data", [])
+        rows = result.get(
+            "data",
+            []
+        )
 
         if not rows:
 
@@ -171,8 +183,13 @@ def find_underlying(symbol):
 
                 return {
                     "symbol": symbol,
-                    "name": row.get("name", symbol),
-                    "instrument_key": row.get("instrument_key"),
+                    "name": row.get(
+                        "name",
+                        symbol
+                    ),
+                    "instrument_key": row.get(
+                        "instrument_key"
+                    ),
                     "type": "INDEX"
                 }
 
@@ -195,7 +212,10 @@ def find_underlying(symbol):
         }
     )
 
-    rows = result.get("data", [])
+    rows = result.get(
+        "data",
+        []
+    )
 
     if not rows:
 
@@ -206,7 +226,12 @@ def find_underlying(symbol):
     exact = [
         r
         for r in rows
-        if str(r.get("trading_symbol", "")).upper() == symbol
+        if str(
+            r.get(
+                "trading_symbol",
+                ""
+            )
+        ).upper() == symbol
         and r.get("segment") == "NSE_EQ"
     ]
 
@@ -232,8 +257,13 @@ def find_underlying(symbol):
 
     return {
         "symbol": symbol,
-        "name": row.get("name", symbol),
-        "instrument_key": row.get("instrument_key"),
+        "name": row.get(
+            "name",
+            symbol
+        ),
+        "instrument_key": row.get(
+            "instrument_key"
+        ),
         "type": "EQUITY"
     }
 
@@ -251,7 +281,10 @@ def get_option_contracts(underlying_key):
         }
     )
 
-    rows = result.get("data", [])
+    rows = result.get(
+        "data",
+        []
+    )
 
     if not rows:
 
@@ -267,7 +300,9 @@ def nearest_expiry(contracts):
     today = date.today()
 
     expiries = sorted({
-        str(row.get("expiry"))
+        str(
+            row.get("expiry")
+        )
         for row in contracts
         if row.get("expiry")
     })
@@ -284,6 +319,7 @@ def nearest_expiry(contracts):
             ).date()
 
             if d >= today:
+
                 valid.append(d)
 
         except Exception:
@@ -296,14 +332,19 @@ def nearest_expiry(contracts):
             "No current or future option expiry was returned by Upstox."
         )
 
-    return valid[0].strftime("%Y-%m-%d")
+    return valid[0].strftime(
+        "%Y-%m-%d"
+    )
 
 
 # ============================================================
 # OPTION CHAIN
 # ============================================================
 
-def get_option_chain(underlying_key, expiry):
+def get_option_chain(
+    underlying_key,
+    expiry
+):
 
     result = upstox_get(
         "/v2/option/chain",
@@ -313,7 +354,10 @@ def get_option_chain(underlying_key, expiry):
         }
     )
 
-    rows = result.get("data", [])
+    rows = result.get(
+        "data",
+        []
+    )
 
     if not rows:
 
@@ -334,20 +378,41 @@ def normalize_chain(rows):
 
     for row in rows:
 
-        strike = row.get("strike_price")
-        spot = row.get("underlying_spot_price")
+        strike = row.get(
+            "strike_price"
+        )
+
+        spot = row.get(
+            "underlying_spot_price"
+        )
 
         if strike is None:
+
             continue
 
-        call = row.get("call_options") or {}
-        put = row.get("put_options") or {}
+        call = row.get(
+            "call_options"
+        ) or {}
 
-        call_md = call.get("market_data") or {}
-        put_md = put.get("market_data") or {}
+        put = row.get(
+            "put_options"
+        ) or {}
 
-        call_g = call.get("option_greeks") or {}
-        put_g = put.get("option_greeks") or {}
+        call_md = call.get(
+            "market_data"
+        ) or {}
+
+        put_md = put.get(
+            "market_data"
+        ) or {}
+
+        call_g = call.get(
+            "option_greeks"
+        ) or {}
+
+        put_g = put.get(
+            "option_greeks"
+        ) or {}
 
         call_oi = float(
             call_md.get("oi") or 0
@@ -366,24 +431,26 @@ def normalize_chain(rows):
         )
 
         call_chg_oi = (
-            call_oi - call_prev_oi
+            call_oi -
+            call_prev_oi
         )
 
         put_chg_oi = (
-            put_oi - put_prev_oi
+            put_oi -
+            put_prev_oi
         )
 
         records.append({
 
-            "strike": float(strike),
+            "strike": float(
+                strike
+            ),
 
             "spot": float(
                 spot or 0
             ),
 
-            # ------------------------------------------------
             # CALL
-            # ------------------------------------------------
 
             "ce_ltp": float(
                 call_md.get("ltp") or 0
@@ -419,9 +486,7 @@ def normalize_chain(rows):
                 "instrument_key"
             ),
 
-            # ------------------------------------------------
             # PUT
-            # ------------------------------------------------
 
             "pe_ltp": float(
                 put_md.get("ltp") or 0
@@ -458,7 +523,9 @@ def normalize_chain(rows):
             )
         })
 
-    df = pd.DataFrame(records)
+    df = pd.DataFrame(
+        records
+    )
 
     if df.empty:
 
@@ -468,14 +535,19 @@ def normalize_chain(rows):
 
     return df.sort_values(
         "strike"
-    ).reset_index(drop=True)
+    ).reset_index(
+        drop=True
+    )
 
 
 # ============================================================
 # ANALYSIS
 # ============================================================
 
-def analyze_chain(df, risk_profile):
+def analyze_chain(
+    df,
+    risk_profile
+):
 
     spot = float(
         df["spot"].iloc[0]
@@ -492,21 +564,32 @@ def analyze_chain(df, risk_profile):
     # --------------------------------------------------------
 
     df["distance"] = abs(
-        df["strike"] - spot
+        df["strike"] -
+        spot
     )
 
-    atm_index = df["distance"].idxmin()
+    atm_index = df[
+        "distance"
+    ].idxmin()
 
     atm_strike = float(
-        df.loc[atm_index, "strike"]
+        df.loc[
+            atm_index,
+            "strike"
+        ]
     )
 
     # --------------------------------------------------------
     # PCR
     # --------------------------------------------------------
 
-    total_call_oi = df["ce_oi"].sum()
-    total_put_oi = df["pe_oi"].sum()
+    total_call_oi = df[
+        "ce_oi"
+    ].sum()
+
+    total_put_oi = df[
+        "pe_oi"
+    ].sum()
 
     if total_call_oi > 0:
 
@@ -540,7 +623,7 @@ def analyze_chain(df, risk_profile):
     )
 
     # --------------------------------------------------------
-    # NEAR ATM REGION
+    # NEAR ATM
     # --------------------------------------------------------
 
     near = df[
@@ -577,9 +660,7 @@ def analyze_chain(df, risk_profile):
 
     reasons = []
 
-    # --------------------------------------------------------
     # PCR
-    # --------------------------------------------------------
 
     if pcr >= 1.20:
 
@@ -605,9 +686,7 @@ def analyze_chain(df, risk_profile):
 
         bear += 5
 
-    # --------------------------------------------------------
-    # CHANGE IN OI
-    # --------------------------------------------------------
+    # Change OI
 
     if put_chg_oi > call_chg_oi * 1.10:
 
@@ -625,9 +704,7 @@ def analyze_chain(df, risk_profile):
             "Near-spot call OI addition is stronger."
         )
 
-    # --------------------------------------------------------
-    # VOLUME
-    # --------------------------------------------------------
+    # Volume
 
     if put_volume > call_volume * 1.15:
 
@@ -645,9 +722,7 @@ def analyze_chain(df, risk_profile):
             "Call-side option volume is stronger near spot."
         )
 
-    # --------------------------------------------------------
-    # OI WALL LOCATION
-    # --------------------------------------------------------
+    # OI wall
 
     if put_wall < spot:
 
@@ -677,9 +752,7 @@ def analyze_chain(df, risk_profile):
             "Largest call OI wall is at/below spot."
         )
 
-    # --------------------------------------------------------
-    # CLAMP
-    # --------------------------------------------------------
+    # Clamp
 
     bull = min(
         bull,
@@ -692,7 +765,8 @@ def analyze_chain(df, risk_profile):
     )
 
     difference = abs(
-        bull - bear
+        bull -
+        bear
     )
 
     if difference < 8:
@@ -716,11 +790,19 @@ def analyze_chain(df, risk_profile):
     # ACTION
     # --------------------------------------------------------
 
-    if strength >= 70 and difference >= 15:
+    if (
+        strength >= 70
+        and
+        difference >= 15
+    ):
 
         action = "TRADE CANDIDATE"
 
-    elif strength >= 58 and difference >= 9:
+    elif (
+        strength >= 58
+        and
+        difference >= 9
+    ):
 
         action = "WATCH"
 
@@ -743,7 +825,9 @@ def analyze_chain(df, risk_profile):
 
         if not candidates.empty:
 
-            candidates["atm_distance"] = abs(
+            candidates[
+                "atm_distance"
+            ] = abs(
                 candidates["strike"] -
                 atm_strike
             )
@@ -758,10 +842,6 @@ def analyze_chain(df, risk_profile):
                     False
                 ]
             ).iloc[0]
-
-            # ------------------------------------------------
-            # SELECTED CE
-            # ------------------------------------------------
 
             suggested_strike = float(
                 selected["strike"]
@@ -799,7 +879,9 @@ def analyze_chain(df, risk_profile):
                 selected["ce_ask"]
             )
 
-            option_key = selected["ce_key"]
+            option_key = selected[
+                "ce_key"
+            ]
 
         else:
 
@@ -816,7 +898,9 @@ def analyze_chain(df, risk_profile):
 
         if not candidates.empty:
 
-            candidates["atm_distance"] = abs(
+            candidates[
+                "atm_distance"
+            ] = abs(
                 candidates["strike"] -
                 atm_strike
             )
@@ -831,10 +915,6 @@ def analyze_chain(df, risk_profile):
                     False
                 ]
             ).iloc[0]
-
-            # ------------------------------------------------
-            # SELECTED PE
-            # ------------------------------------------------
 
             suggested_strike = float(
                 selected["strike"]
@@ -872,7 +952,9 @@ def analyze_chain(df, risk_profile):
                 selected["pe_ask"]
             )
 
-            option_key = selected["pe_key"]
+            option_key = selected[
+                "pe_key"
+            ]
 
         else:
 
@@ -953,7 +1035,11 @@ def analyze_chain(df, risk_profile):
 
     spread = 0
 
-    if bid > 0 and ask > 0:
+    if (
+        bid > 0
+        and
+        ask > 0
+    ):
 
         spread = (
             (ask - bid) /
@@ -976,10 +1062,15 @@ def analyze_chain(df, risk_profile):
         risk_profile
     ]
 
-    if bid > 0 and ask > 0:
+    if (
+        bid > 0
+        and
+        ask > 0
+    ):
 
         entry = (
-            bid + ask
+            bid +
+            ask
         ) / 2
 
     else:
@@ -995,15 +1086,18 @@ def analyze_chain(df, risk_profile):
         )
 
     sl = entry * (
-        1 - risk["sl"]
+        1 -
+        risk["sl"]
     )
 
     t1 = entry * (
-        1 + risk["t1"]
+        1 +
+        risk["t1"]
     )
 
     t2 = entry * (
-        1 + risk["t2"]
+        1 +
+        risk["t2"]
     )
 
     # ========================================================
@@ -1025,7 +1119,7 @@ def analyze_chain(df, risk_profile):
         )
 
     # ========================================================
-    # RETURN RESULT
+    # RETURN
     # ========================================================
 
     return {
@@ -1034,57 +1128,79 @@ def analyze_chain(df, risk_profile):
 
         "atm": atm_strike,
 
-        # NEW:
-        # Actual strike selected from the live option chain
-        "suggested_strike": suggested_strike,
+        "suggested_strike":
+            suggested_strike,
 
         "pcr": pcr,
 
-        "call_wall": call_wall,
+        "call_wall":
+            call_wall,
 
-        "put_wall": put_wall,
+        "put_wall":
+            put_wall,
 
-        "bull": bull,
+        "bull":
+            bull,
 
-        "bear": bear,
+        "bear":
+            bear,
 
-        "bias": bias,
+        "bias":
+            bias,
 
-        "action": action,
+        "action":
+            action,
 
-        "side": side,
+        "side":
+            side,
 
-        "option_key": option_key,
+        "option_key":
+            option_key,
 
-        "premium": premium,
+        "premium":
+            premium,
 
-        "delta": delta,
+        "delta":
+            delta,
 
-        "iv": iv,
+        "iv":
+            iv,
 
-        "oi": oi,
+        "oi":
+            oi,
 
-        "chg_oi": chg_oi,
+        "chg_oi":
+            chg_oi,
 
-        "volume": volume,
+        "volume":
+            volume,
 
-        "bid": bid,
+        "bid":
+            bid,
 
-        "ask": ask,
+        "ask":
+            ask,
 
-        "spread": spread,
+        "spread":
+            spread,
 
-        "entry": entry,
+        "entry":
+            entry,
 
-        "sl": sl,
+        "sl":
+            sl,
 
-        "t1": t1,
+        "t1":
+            t1,
 
-        "t2": t2,
+        "t2":
+            t2,
 
-        "trigger": trigger,
+        "trigger":
+            trigger,
 
-        "reasons": reasons
+        "reasons":
+            reasons
     }
 
 
@@ -1092,14 +1208,19 @@ def analyze_chain(df, risk_profile):
 # MAIN ANALYSIS
 # ============================================================
 
-def run_analysis(symbol, risk_profile):
+def run_analysis(
+    symbol,
+    risk_profile
+):
 
     underlying = find_underlying(
         symbol
     )
 
     contracts = get_option_contracts(
-        underlying["instrument_key"]
+        underlying[
+            "instrument_key"
+        ]
     )
 
     expiry = nearest_expiry(
@@ -1107,7 +1228,9 @@ def run_analysis(symbol, risk_profile):
     )
 
     chain_rows = get_option_chain(
-        underlying["instrument_key"],
+        underlying[
+            "instrument_key"
+        ],
         expiry
     )
 
@@ -1148,8 +1271,8 @@ def run_analysis(symbol, risk_profile):
 # ============================================================
 
 st.info(
-    "Enter an NSE F&O stock or index. The app uses Upstox read-only market "
-    "data and does not place orders."
+    "Enter an NSE F&O stock or index. The app uses Upstox read-only "
+    "market data and does not place orders."
 )
 
 col1, col2 = st.columns(
@@ -1215,7 +1338,7 @@ if analyze_button:
         )
 
         # ====================================================
-        # TOP METRICS
+        # MARKET SNAPSHOT
         # ====================================================
 
         st.subheader(
@@ -1287,21 +1410,46 @@ if analyze_button:
 
         if result["action"] == "TRADE CANDIDATE":
 
-            st.success(
-                f"TRADE CANDIDATE — {result['side']}"
-            )
+            if result["side"] == "CE":
+
+                st.success(
+                    f"🟢 CALL — BUY\n\n"
+                    f"Suggested Strike: "
+                    f"{result['suggested_strike']:,.0f} CE"
+                )
+
+            else:
+
+                st.success(
+                    f"🟢 PUT — BUY\n\n"
+                    f"Suggested Strike: "
+                    f"{result['suggested_strike']:,.0f} PE"
+                )
 
         elif result["action"] == "WATCH":
 
-            st.warning(
-                f"WATCH — {result['side']} setup needs confirmation"
-            )
+            if result["side"] == "CE":
+
+                st.warning(
+                    f"🟡 CALL — BUY AFTER CONFIRMATION\n\n"
+                    f"Suggested Strike: "
+                    f"{result['suggested_strike']:,.0f} CE"
+                )
+
+            else:
+
+                st.warning(
+                    f"🟡 PUT — BUY AFTER CONFIRMATION\n\n"
+                    f"Suggested Strike: "
+                    f"{result['suggested_strike']:,.0f} PE"
+                )
 
         else:
 
             st.error(
-                "NO TRADE — setup does not currently meet "
-                "the strength/liquidity rules."
+                "⚪ NO TRADE\n\n"
+                "Current market conditions do not meet "
+                "the required strength/liquidity rules."
             )
 
         # ====================================================
@@ -1314,11 +1462,15 @@ if analyze_button:
                 "💰 Trade Plan"
             )
 
-            t1, t2, t3, t4, t5 = st.columns(5)
+            t1, t2, t3, t4, t5, t6 = st.columns(6)
 
             t1.metric(
-                "Option",
-                result["side"]
+                "Action",
+                (
+                    "CALL BUY"
+                    if result["side"] == "CE"
+                    else "PUT BUY"
+                )
             )
 
             t2.metric(
@@ -1341,10 +1493,12 @@ if analyze_button:
                 f"₹{result['t1']:.2f}"
             )
 
+            t6.metric(
+                "Target 2",
+                f"₹{result['t2']:.2f}"
+            )
+
             st.info(
-                f"Suggested trade: "
-                f"{result['suggested_strike']:,.0f} "
-                f"{result['side']} | "
                 f"Entry trigger: underlying around "
                 f"₹{result['trigger']:,.2f} "
                 f"with the selected option maintaining liquidity."
@@ -1359,7 +1513,7 @@ if analyze_button:
             )
 
         # ====================================================
-        # SELECTED OPTION
+        # SUGGESTED OPTION
         # ====================================================
 
         st.subheader(
@@ -1369,7 +1523,7 @@ if analyze_button:
         if result["suggested_strike"] is not None:
 
             st.info(
-                f"📌 Suggested Strike: "
+                f"📌 Suggested Option: "
                 f"{result['suggested_strike']:,.0f} "
                 f"{result['side']}"
             )
@@ -1543,7 +1697,9 @@ if analyze_button:
             ]
 
             st.dataframe(
-                display[final_columns],
+                display[
+                    final_columns
+                ],
                 use_container_width=True,
                 hide_index=True
             )
