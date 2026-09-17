@@ -23,7 +23,6 @@ st.set_page_config(
 # ============================================================
 
 IST = ZoneInfo("Asia/Kolkata")
-
 UPSTOX_BASE = "https://api.upstox.com"
 
 RISK_PROFILES = {
@@ -57,375 +56,181 @@ st.markdown(
     background: #f5f7fb;
 }
 
-.main .block-container {
-    padding-top: 1.2rem;
-    padding-bottom: 2rem;
+.block-container {
     max-width: 1500px;
+    padding-top: 1rem;
+    padding-bottom: 2rem;
 }
 
 html, body, [class*="css"] {
-    font-family: "Inter", "Segoe UI", Arial, sans-serif;
+    font-family: Inter, Segoe UI, Arial, sans-serif;
 }
 
-
-/* HEADER */
-
 .top-header {
-    background: linear-gradient(135deg, #102a56 0%, #174b8f 100%);
-    padding: 18px 24px;
-    border-radius: 14px;
+    background: linear-gradient(135deg, #0b5ed7, #173b8f);
     color: white;
+    border-radius: 16px;
+    padding: 20px 24px;
     margin-bottom: 18px;
-    box-shadow: 0 5px 18px rgba(16,42,86,0.15);
+    box-shadow: 0 8px 25px rgba(23, 59, 143, 0.18);
 }
 
 .top-header-title {
-    font-size: 25px;
-    font-weight: 750;
-    letter-spacing: -0.3px;
+    font-size: 28px;
+    font-weight: 800;
 }
 
 .top-header-subtitle {
-    font-size: 13px;
-    opacity: 0.82;
-    margin-top: 3px;
+    font-size: 14px;
+    opacity: .9;
+    margin-top: 5px;
 }
-
-
-/* STOCK HERO */
 
 .stock-hero {
     background: white;
-    border: 1px solid #e2e8f0;
-    border-radius: 14px;
+    border-radius: 16px;
     padding: 22px 24px;
-    margin-bottom: 18px;
-    box-shadow: 0 3px 12px rgba(15,23,42,0.05);
+    margin-bottom: 16px;
+    border: 1px solid #e7ebf2;
+    box-shadow: 0 4px 15px rgba(0,0,0,.04);
 }
 
 .stock-name {
-    font-size: 31px;
+    font-size: 30px;
     font-weight: 800;
-    color: #12213f;
-    letter-spacing: -0.7px;
+    color: #16213e;
 }
 
 .stock-subtitle {
-    font-size: 15px;
-    color: #64748b;
-    margin-top: 2px;
+    color: #687386;
+    font-size: 14px;
 }
-
-.hero-price-label {
-    font-size: 12px;
-    color: #64748b;
-    margin-bottom: 3px;
-}
-
-.hero-price {
-    font-size: 27px;
-    font-weight: 800;
-    color: #12213f;
-}
-
-.hero-time {
-    font-size: 12px;
-    color: #64748b;
-}
-
-
-/* SECTION */
-
-.section-title {
-    font-size: 19px;
-    font-weight: 750;
-    color: #173b70;
-    margin: 20px 0 10px 2px;
-}
-
-.section-subtitle {
-    font-size: 13px;
-    color: #64748b;
-    margin: -6px 0 12px 2px;
-}
-
-
-/* METRIC CARDS */
 
 .metric-card {
     background: white;
-    border: 1px solid #e2e8f0;
-    border-radius: 12px;
+    border: 1px solid #e7ebf2;
+    border-radius: 14px;
     padding: 16px;
     min-height: 105px;
-    box-shadow: 0 2px 9px rgba(15,23,42,0.04);
+    box-shadow: 0 3px 12px rgba(0,0,0,.035);
 }
 
 .metric-label {
+    color: #718096;
     font-size: 12px;
-    color: #64748b;
-    font-weight: 600;
-    margin-bottom: 8px;
+    font-weight: 700;
+    text-transform: uppercase;
 }
 
 .metric-value {
-    font-size: 21px;
-    font-weight: 800;
-    color: #172554;
-}
-
-.metric-small {
-    font-size: 12px;
-    margin-top: 5px;
-    color: #64748b;
-}
-
-.green-value {
-    color: #059669;
-}
-
-.red-value {
-    color: #dc2626;
-}
-
-.purple-value {
-    color: #7c3aed;
-}
-
-
-/* DECISION */
-
-.decision-card {
-    background: white;
-    border: 1px solid #e2e8f0;
-    border-radius: 14px;
-    padding: 20px;
-    box-shadow: 0 2px 10px rgba(15,23,42,0.04);
-    min-height: 175px;
-}
-
-.decision-label {
-    font-size: 12px;
-    color: #64748b;
-    font-weight: 650;
-    margin-bottom: 10px;
-}
-
-.decision-text {
-    font-size: 27px;
-    font-weight: 800;
-    color: #334155;
-}
-
-.decision-sub {
-    margin-top: 9px;
-    color: #64748b;
-    font-size: 13px;
-}
-
-
-/* SCORE */
-
-.score-card {
-    background: white;
-    border: 1px solid #e2e8f0;
-    border-radius: 14px;
-    padding: 20px;
-    box-shadow: 0 2px 10px rgba(15,23,42,0.04);
-    min-height: 175px;
-}
-
-.score-row {
-    margin-bottom: 16px;
-}
-
-.score-title {
-    display: flex;
-    justify-content: space-between;
-    font-size: 13px;
-    font-weight: 700;
-    color: #334155;
-    margin-bottom: 7px;
-}
-
-.score-track {
-    height: 9px;
-    background: #e2e8f0;
-    border-radius: 10px;
-    overflow: hidden;
-}
-
-.score-bull {
-    height: 100%;
-    background: #10b981;
-    border-radius: 10px;
-}
-
-.score-bear {
-    height: 100%;
-    background: #ef4444;
-    border-radius: 10px;
-}
-
-
-/* TRADE PLAN */
-
-.trade-plan {
-    background: white;
-    border: 1px solid #dbeafe;
-    border-radius: 14px;
-    padding: 20px;
-    box-shadow: 0 3px 12px rgba(30,64,175,0.05);
-}
-
-.trade-direction {
+    color: #16213e;
     font-size: 22px;
     font-weight: 800;
-    margin-bottom: 15px;
-}
-
-.call-direction {
-    color: #059669;
-}
-
-.put-direction {
-    color: #dc2626;
-}
-
-.trade-box {
-    background: #f8fafc;
-    border: 1px solid #e2e8f0;
-    border-radius: 10px;
-    padding: 14px;
-    text-align: center;
-    min-height: 90px;
-}
-
-.trade-box-label {
-    font-size: 11px;
-    color: #64748b;
-    font-weight: 650;
-}
-
-.trade-box-value {
-    font-size: 19px;
-    font-weight: 800;
-    color: #172554;
     margin-top: 7px;
 }
 
+.metric-small {
+    color: #718096;
+    font-size: 12px;
+    margin-top: 4px;
+}
 
-/* REASONS */
+.section-title {
+    color: #16213e;
+    font-size: 20px;
+    font-weight: 800;
+    margin: 18px 0 10px 0;
+}
 
-.reason-card {
+.decision-card {
     background: white;
-    border: 1px solid #e2e8f0;
+    border-radius: 16px;
+    padding: 22px;
+    border: 1px solid #e7ebf2;
+    box-shadow: 0 4px 15px rgba(0,0,0,.04);
+}
+
+.decision-title {
+    font-size: 25px;
+    font-weight: 900;
+    color: #16213e;
+}
+
+.score-box {
+    background: #f7f9fc;
+    border-radius: 12px;
+    padding: 13px;
+    margin-top: 10px;
+}
+
+.trade-plan {
+    background: white;
+    border-radius: 16px;
+    padding: 22px;
+    border: 1px solid #e7ebf2;
+    box-shadow: 0 4px 15px rgba(0,0,0,.04);
+}
+
+.reason-box {
+    background: white;
+    border: 1px solid #e7ebf2;
     border-radius: 14px;
-    padding: 19px 21px;
-    box-shadow: 0 2px 9px rgba(15,23,42,0.04);
+    padding: 15px 18px;
+    margin-bottom: 9px;
 }
-
-.reason-item {
-    font-size: 13px;
-    color: #334155;
-    padding: 9px 0;
-    border-bottom: 1px solid #f1f5f9;
-}
-
-.reason-item:last-child {
-    border-bottom: none;
-}
-
-
-/* STATUS */
 
 .status-open {
-    background: #ecfdf5;
-    color: #047857;
-    border: 1px solid #a7f3d0;
-    border-radius: 20px;
-    padding: 6px 12px;
-    font-size: 12px;
-    font-weight: 750;
     display: inline-block;
+    background: #e8f7ee;
+    color: #137333;
+    border-radius: 20px;
+    padding: 5px 12px;
+    font-size: 12px;
+    font-weight: 800;
 }
 
 .status-closed {
-    background: #f1f5f9;
-    color: #475569;
-    border: 1px solid #cbd5e1;
-    border-radius: 20px;
-    padding: 6px 12px;
-    font-size: 12px;
-    font-weight: 750;
     display: inline-block;
+    background: #eef1f5;
+    color: #596273;
+    border-radius: 20px;
+    padding: 5px 12px;
+    font-size: 12px;
+    font-weight: 800;
 }
 
 .status-stale {
-    background: #fff7ed;
-    color: #c2410c;
-    border: 1px solid #fed7aa;
-    border-radius: 20px;
-    padding: 6px 12px;
-    font-size: 12px;
-    font-weight: 750;
     display: inline-block;
+    background: #fff4df;
+    color: #9a6700;
+    border-radius: 20px;
+    padding: 5px 12px;
+    font-size: 12px;
+    font-weight: 800;
 }
-
-
-/* INFO BAR */
 
 .info-bar {
-    background: #eff6ff;
-    border: 1px solid #bfdbfe;
-    color: #1e40af;
-    border-radius: 10px;
-    padding: 11px 14px;
-    font-size: 12px;
-    margin-top: 12px;
-}
-
-
-/* FOOTER */
-
-.footer-bar {
-    background: #eef2ff;
-    border-radius: 10px;
+    background: #edf5ff;
+    color: #234b80;
+    border: 1px solid #d4e7ff;
+    border-radius: 12px;
     padding: 12px 15px;
-    color: #475569;
-    font-size: 11px;
-    margin-top: 20px;
+    font-size: 13px;
+    margin: 10px 0 16px 0;
+}
+
+.footer {
     text-align: center;
+    color: #8a94a6;
+    font-size: 11px;
+    margin-top: 25px;
+    padding: 15px;
 }
 
-
-/* SIDEBAR */
-
-section[data-testid="stSidebar"] {
-    background: #f8fafc;
-    border-right: 1px solid #e2e8f0;
-}
-
-.sidebar-title {
-    font-size: 18px;
-    font-weight: 800;
-    color: #173b70;
-    margin-bottom: 5px;
-}
-
-.sidebar-help {
+.sidebar-note {
+    color: #6b7280;
     font-size: 12px;
-    color: #64748b;
     line-height: 1.5;
-}
-
-
-/* TABLE */
-
-.chain-caption {
-    font-size: 12px;
-    color: #64748b;
-    margin-bottom: 7px;
 }
 
 </style>
@@ -446,7 +251,7 @@ st.markdown(
     </div>
 
     <div class="top-header-subtitle">
-        Options Analysis&nbsp;&nbsp;•&nbsp;&nbsp;Powered by Upstox
+        Options Analysis • Powered by Upstox
     </div>
 </div>
 """,
@@ -484,6 +289,7 @@ if "last_successful_refresh" not in st.session_state:
 def get_token():
 
     try:
+
         token = st.secrets["UPSTOX_ACCESS_TOKEN"]
 
         if token:
@@ -492,6 +298,7 @@ def get_token():
         return None
 
     except Exception:
+
         return None
 
 
@@ -515,6 +322,7 @@ def upstox_headers():
 def api_get(url, params=None, timeout=20):
 
     if not TOKEN:
+
         raise RuntimeError(
             "UPSTOX_ACCESS_TOKEN is missing from Streamlit Secrets."
         )
@@ -552,6 +360,7 @@ def api_get(url, params=None, timeout=20):
         )
 
     try:
+
         return response.json()
 
     except Exception:
@@ -562,8 +371,32 @@ def api_get(url, params=None, timeout=20):
 
 
 # ============================================================
-# TIME HELPERS
+# GENERAL HELPERS
 # ============================================================
+
+def sf(value):
+
+    try:
+
+        if value is None or value == "":
+            return 0.0
+
+        return float(value)
+
+    except Exception:
+
+        return 0.0
+
+
+def first_valid(*values):
+
+    for value in values:
+
+        if value is not None and value != "":
+            return value
+
+    return None
+
 
 def format_iso_ist(value):
 
@@ -577,9 +410,14 @@ def format_iso_ist(value):
         )
 
         if dt.tzinfo is None:
-            dt = dt.replace(tzinfo=timezone.utc)
 
-        return dt.astimezone(IST).strftime(
+            dt = dt.replace(
+                tzinfo=timezone.utc
+            )
+
+        return dt.astimezone(
+            IST
+        ).strftime(
             "%d-%b-%Y %I:%M:%S %p IST"
         )
 
@@ -595,15 +433,26 @@ def format_ms_ist(value):
 
     try:
 
+        if isinstance(value, str):
+
+            text = value.strip()
+
+            if "T" in text or "-" in text:
+
+                return format_iso_ist(
+                    text
+                )
+
         number = float(value)
 
-        # Unix milliseconds
         dt = datetime.fromtimestamp(
             number / 1000,
             tz=timezone.utc,
         )
 
-        return dt.astimezone(IST).strftime(
+        return dt.astimezone(
+            IST
+        ).strftime(
             "%d-%b-%Y %I:%M:%S %p IST"
         )
 
@@ -618,26 +467,71 @@ def now_ist():
 
 
 # ============================================================
+# IMPORTANT CHANGE-OI FIX
+# ============================================================
+
+def ensure_change_oi_columns(df):
+
+    """
+    Ensures Change OI columns always exist.
+
+    This is the main fix for:
+
+    KeyError: ce_chg_oi
+    KeyError: pe_chg_oi
+    """
+
+    df = df.copy()
+
+    required_columns = [
+        "ce_oi",
+        "ce_prev_oi",
+        "pe_oi",
+        "pe_prev_oi",
+    ]
+
+    for col in required_columns:
+
+        if col not in df.columns:
+
+            df[col] = 0.0
+
+        df[col] = pd.to_numeric(
+            df[col],
+            errors="coerce",
+        ).fillna(0.0)
+
+    df["ce_chg_oi"] = (
+        df["ce_oi"]
+        - df["ce_prev_oi"]
+    )
+
+    df["pe_chg_oi"] = (
+        df["pe_oi"]
+        - df["pe_prev_oi"]
+    )
+
+    return df
+
+
+# ============================================================
 # FIND UNDERLYING
 # ============================================================
 
 def find_underlying(symbol):
 
-    symbol = symbol.strip().upper()
+    symbol = str(
+        symbol
+    ).strip().upper()
 
     if not symbol:
 
         raise RuntimeError(
-            "Please enter a stock or index."
+            "Please enter a stock or index symbol."
         )
-
-    # IMPORTANT:
-    # Upstox Instrument Search requires "query",
-    # not "q".
 
     searches = [
 
-        # NSE Equity
         {
             "query": symbol,
             "exchanges": "NSE",
@@ -645,7 +539,6 @@ def find_underlying(symbol):
             "records": 30,
         },
 
-        # NSE Index
         {
             "query": symbol,
             "exchanges": "NSE",
@@ -659,250 +552,278 @@ def find_underlying(symbol):
 
     for params in searches:
 
-        data = api_get(
-            f"{UPSTOX_BASE}/v2/instruments/search",
-            params=params,
-        )
+        try:
 
-        results = data.get("data", [])
+            data = api_get(
+                f"{UPSTOX_BASE}/v2/instruments/search",
+                params=params,
+            )
 
-        if isinstance(results, list):
+            rows = data.get(
+                "data",
+                []
+            )
 
-            candidates.extend(results)
+            if isinstance(rows, list):
+
+                candidates.extend(rows)
+
+        except Exception:
+
+            continue
 
     if not candidates:
 
         raise RuntimeError(
-            f"Could not find NSE stock/index: {symbol}"
+            f"Could not find {symbol} in Upstox instruments."
         )
 
-    # --------------------------------------------------------
-    # EXACT TRADING SYMBOL
-    # --------------------------------------------------------
+    def exact_match(item):
 
-    for item in candidates:
+        values = [
+            item.get("trading_symbol"),
+            item.get("short_name"),
+            item.get("name"),
+        ]
 
-        if (
-            str(
-                item.get("trading_symbol", "")
-            ).upper()
-            == symbol
-        ):
+        return any(
+            str(v or "").upper() == symbol
+            for v in values
+        )
 
-            return item
+    exact = [
+        item
+        for item in candidates
+        if exact_match(item)
+    ]
 
-    # --------------------------------------------------------
-    # EXACT SHORT NAME
-    # --------------------------------------------------------
+    if exact:
 
-    for item in candidates:
+        return exact[0]
 
-        if (
-            str(
-                item.get("short_name", "")
-            ).upper()
-            == symbol
-        ):
-
-            return item
-
-    # --------------------------------------------------------
-    # EXACT NAME
-    # --------------------------------------------------------
-
-    for item in candidates:
-
-        if (
-            str(
-                item.get("name", "")
-            ).upper()
-            == symbol
-        ):
-
-            return item
-
-    # --------------------------------------------------------
-    # NSE EQUITY / INDEX
-    # --------------------------------------------------------
-
-    for item in candidates:
-
-        segment = str(
-            item.get("segment", "")
-        ).upper()
-
-        if segment in [
+    preferred = [
+        item
+        for item in candidates
+        if item.get("segment")
+        in [
             "NSE_EQ",
             "NSE_INDEX",
-        ]:
+        ]
+    ]
 
-            return item
+    if preferred:
+
+        return preferred[0]
 
     return candidates[0]
 
 
 # ============================================================
-# FULL MARKET QUOTE
+# MARKET QUOTE
 # ============================================================
 
-def get_full_quote_v3(instrument_key):
+def get_full_quote_v3(
+    instrument_key
+):
 
     data = api_get(
         f"{UPSTOX_BASE}/v3/market-quote/quotes",
         params={
-            "instrument_key": instrument_key,
+            "instrument_key": instrument_key
         },
     )
 
-    quote_data = data.get("data", {})
+    quote_data = data.get(
+        "data",
+        {}
+    )
 
-    if not quote_data:
+    if (
+        not isinstance(
+            quote_data,
+            dict
+        )
+        or not quote_data
+    ):
 
         raise RuntimeError(
-            "Upstox returned no market quote data."
+            "Upstox returned no market quote."
         )
 
-    # Exact key match
     if instrument_key in quote_data:
 
-        return quote_data[instrument_key]
+        return quote_data[
+            instrument_key
+        ]
 
-    # Fallback
-    first_value = next(
-        iter(quote_data.values()),
-        None,
-    )
+    for value in quote_data.values():
 
-    if isinstance(first_value, dict):
+        if isinstance(
+            value,
+            dict
+        ):
 
-        return first_value
+            return value
 
     raise RuntimeError(
-        "Could not read Upstox market quote."
+        "Could not read market quote from Upstox."
     )
 
 
-# ============================================================
-# MARKET CONTEXT
-# ============================================================
+def extract_market_context(
+    quote
+):
 
-def extract_market_context(quote):
+    last_price = sf(
+        first_valid(
+            quote.get("last_price"),
+            quote.get("ltp"),
+        )
+    )
 
-    last_price = quote.get("last_price")
+    prev_close = sf(
+        first_valid(
+            quote.get("prev_close_price"),
+            quote.get("cp"),
+        )
+    )
 
-    if last_price is None:
-        last_price = quote.get("ltp")
+    average_price = sf(
+        first_valid(
+            quote.get("average_price"),
+            quote.get("avg_price"),
+        )
+    )
 
-    prev_close = quote.get("prev_close_price")
+    net_change = sf(
+        first_valid(
+            quote.get("net_change"),
+            quote.get("change"),
+        )
+    )
 
-    if prev_close is None:
-        prev_close = quote.get("cp")
+    volume = sf(
+        first_valid(
+            quote.get("volume"),
+            quote.get("vol"),
+        )
+    )
 
-    average_price = quote.get("average_price")
+    ohlc = quote.get(
+        "ohlc",
+        {}
+    )
 
-    net_change = quote.get("net_change")
+    if isinstance(
+        ohlc,
+        list
+    ):
 
-    volume = quote.get("volume")
-
-    ohlc = quote.get("ohlc", {})
-
-    open_price = None
-    high_price = None
-    low_price = None
-    close_price = None
-
-    if isinstance(ohlc, dict):
-
-        open_price = ohlc.get("open")
-        high_price = ohlc.get("high")
-        low_price = ohlc.get("low")
-        close_price = ohlc.get("close")
-
-    elif isinstance(ohlc, list) and ohlc:
-
-        first = ohlc[0]
-
-        if isinstance(first, dict):
-
-            open_price = first.get("open")
-            high_price = first.get("high")
-            low_price = first.get("low")
-            close_price = first.get("close")
-
-    def safe_float(value, default=0.0):
-
-        try:
-            return float(value)
-        except Exception:
-            return default
-
-    last_price = safe_float(last_price)
-
-    prev_close = safe_float(prev_close)
-
-    average_price = safe_float(average_price)
-
-    net_change = safe_float(net_change)
-
-    volume = safe_float(volume)
-
-    open_price = safe_float(open_price)
-
-    high_price = safe_float(high_price)
-
-    low_price = safe_float(low_price)
-
-    close_price = safe_float(close_price)
-
-    if net_change == 0 and prev_close:
-
-        net_change = (
-            last_price - prev_close
+        ohlc = next(
+            (
+                item
+                for item in ohlc
+                if isinstance(
+                    item,
+                    dict
+                )
+            ),
+            {},
         )
 
-    if prev_close:
+    if not isinstance(
+        ohlc,
+        dict
+    ):
+
+        ohlc = {}
+
+    open_price = sf(
+        first_valid(
+            ohlc.get("open"),
+            quote.get("open"),
+        )
+    )
+
+    high_price = sf(
+        first_valid(
+            ohlc.get("high"),
+            quote.get("high"),
+        )
+    )
+
+    low_price = sf(
+        first_valid(
+            ohlc.get("low"),
+            quote.get("low"),
+        )
+    )
+
+    close_price = sf(
+        first_valid(
+            ohlc.get("close"),
+            quote.get("close"),
+            prev_close,
+        )
+    )
+
+    if (
+        net_change == 0
+        and prev_close > 0
+    ):
+
+        net_change = (
+            last_price
+            - prev_close
+        )
+
+    pct_change = 0.0
+
+    if prev_close > 0:
 
         pct_change = (
-            (last_price - prev_close)
+            net_change
             / prev_close
         ) * 100
 
-    else:
+    price_vs_open = 0.0
 
-        pct_change = 0.0
-
-    if open_price:
+    if open_price > 0:
 
         price_vs_open = (
-            (last_price - open_price)
+            (
+                last_price
+                - open_price
+            )
             / open_price
         ) * 100
 
-    else:
+    price_vs_average = 0.0
 
-        price_vs_open = 0.0
-
-    if average_price:
+    if average_price > 0:
 
         price_vs_average = (
-            (last_price - average_price)
+            (
+                last_price
+                - average_price
+            )
             / average_price
         ) * 100
 
-    else:
-
-        price_vs_average = 0.0
+    range_position = 50.0
 
     if high_price > low_price:
 
         range_position = (
-            (last_price - low_price)
-            / (high_price - low_price)
+            (
+                last_price
+                - low_price
+            )
+            / (
+                high_price
+                - low_price
+            )
         ) * 100
-
-    else:
-
-        range_position = 50.0
 
     return {
 
@@ -932,12 +853,19 @@ def extract_market_context(quote):
 
         "range_position": range_position,
 
-        "last_trade_time":
-            quote.get("last_trade_time"),
+        "last_trade_time": first_valid(
+            quote.get(
+                "last_trade_time"
+            ),
+            quote.get(
+                "last_trade_time_ms"
+            ),
+            quote.get(
+                "timestamp"
+            ),
+        ),
 
-        "snapshot_time":
-            quote.get("timestamp"),
-
+        "snapshot_time": now_ist(),
     }
 
 
@@ -945,68 +873,72 @@ def extract_market_context(quote):
 # OPTION CONTRACTS
 # ============================================================
 
-def get_option_contracts(underlying_key):
+def get_option_contracts(
+    underlying_key
+):
 
     data = api_get(
         f"{UPSTOX_BASE}/v2/option/contract",
         params={
-            "instrument_key": underlying_key,
+            "instrument_key": underlying_key
         },
     )
 
-    contracts = data.get("data", [])
+    contracts = data.get(
+        "data",
+        []
+    )
 
-    if not isinstance(contracts, list):
+    if not isinstance(
+        contracts,
+        list
+    ):
 
         return []
 
     return contracts
 
 
-# ============================================================
-# EXPIRY
-# ============================================================
-
-def get_nearest_expiry(contracts):
+def get_nearest_expiry(
+    contracts
+):
 
     today = now_ist().date()
 
-    expiries = []
+    dates = []
 
-    for contract in contracts:
+    for item in contracts:
 
-        expiry = contract.get("expiry")
+        expiry = item.get(
+            "expiry"
+        )
 
         if not expiry:
             continue
 
         try:
 
-            expiry_date = datetime.strptime(
-                expiry,
+            date_value = datetime.strptime(
+                str(expiry),
                 "%Y-%m-%d",
             ).date()
 
-            if expiry_date >= today:
+            if date_value >= today:
 
-                expiries.append(
-                    expiry_date
+                dates.append(
+                    date_value
                 )
 
         except Exception:
 
             continue
 
-    if not expiries:
+    if not dates:
 
         return None
 
-    return min(expiries)
+    return min(dates)
 
-
-# ============================================================
-# OPTION CHAIN
-# ============================================================
 
 def get_option_chain(
     underlying_key,
@@ -1017,13 +949,21 @@ def get_option_chain(
         f"{UPSTOX_BASE}/v2/option/chain",
         params={
             "instrument_key": underlying_key,
-            "expiry_date": expiry_date,
+            "expiry_date": str(
+                expiry_date
+            ),
         },
     )
 
-    chain = data.get("data", [])
+    chain = data.get(
+        "data",
+        []
+    )
 
-    if not isinstance(chain, list):
+    if not isinstance(
+        chain,
+        list
+    ):
 
         return []
 
@@ -1031,220 +971,353 @@ def get_option_chain(
 
 
 # ============================================================
-# SAFE FLOAT
-# ============================================================
-
-def sf(value):
-
-    try:
-        return float(value or 0)
-    except Exception:
-        return 0.0
-
-
-# ============================================================
 # NORMALIZE OPTION CHAIN
 # ============================================================
 
-def normalize_chain(chain):
+def normalize_chain(
+    chain
+):
 
     rows = []
 
+    if not isinstance(
+        chain,
+        list
+    ):
+
+        return pd.DataFrame()
+
     for item in chain:
 
-        strike = item.get(
-            "strike_price"
-        )
+        if not isinstance(
+            item,
+            dict
+        ):
 
-        spot = item.get(
-            "underlying_spot_price"
-        )
-
-        if strike is None:
             continue
 
-        call = (
-            item.get("call_options")
-            or {}
+        strike = sf(
+            item.get(
+                "strike_price"
+            )
         )
 
-        put = (
-            item.get("put_options")
-            or {}
+        spot = sf(
+            item.get(
+                "underlying_spot_price"
+            )
         )
 
-        call_market = (
-            call.get("market_data")
-            or {}
+        call_options = item.get(
+            "call_options",
+            {}
         )
 
-        put_market = (
-            put.get("market_data")
-            or {}
+        put_options = item.get(
+            "put_options",
+            {}
         )
 
-        call_greeks = (
-            call.get("option_greeks")
-            or {}
+        if not isinstance(
+            call_options,
+            dict
+        ):
+
+            call_options = {}
+
+        if not isinstance(
+            put_options,
+            dict
+        ):
+
+            put_options = {}
+
+        call_market = call_options.get(
+            "market_data",
+            {}
         )
 
-        put_greeks = (
-            put.get("option_greeks")
-            or {}
+        put_market = put_options.get(
+            "market_data",
+            {}
         )
 
-        rows.append(
+        call_greeks = call_options.get(
+            "option_greeks",
+            {}
+        )
 
-            {
+        put_greeks = put_options.get(
+            "option_greeks",
+            {}
+        )
 
-                "strike":
-                    sf(strike),
+        if not isinstance(
+            call_market,
+            dict
+        ):
 
-                "spot":
-                    sf(spot),
+            call_market = {}
 
-                # CALL
-                "ce_ltp":
-                    sf(
-                        call_market.get(
-                            "ltp"
-                        )
+        if not isinstance(
+            put_market,
+            dict
+        ):
+
+            put_market = {}
+
+        if not isinstance(
+            call_greeks,
+            dict
+        ):
+
+            call_greeks = {}
+
+        if not isinstance(
+            put_greeks,
+            dict
+        ):
+
+            put_greeks = {}
+
+        ce_prev_oi = first_valid(
+
+            call_market.get(
+                "prev_oi"
+            ),
+
+            call_market.get(
+                "previous_oi"
+            ),
+
+            call_market.get(
+                "prev_open_interest"
+            ),
+        )
+
+        pe_prev_oi = first_valid(
+
+            put_market.get(
+                "prev_oi"
+            ),
+
+            put_market.get(
+                "previous_oi"
+            ),
+
+            put_market.get(
+                "prev_open_interest"
+            ),
+        )
+
+        ce_pop = first_valid(
+
+            call_greeks.get(
+                "pop"
+            ),
+
+            call_greeks.get(
+                "probability_of_profit"
+            ),
+        )
+
+        pe_pop = first_valid(
+
+            put_greeks.get(
+                "pop"
+            ),
+
+            put_greeks.get(
+                "probability_of_profit"
+            ),
+        )
+
+        row = {
+
+            "strike": strike,
+
+            "spot": spot,
+
+            # ---------------- CALL ----------------
+
+            "ce_ltp": sf(
+                first_valid(
+                    call_market.get(
+                        "ltp"
                     ),
-
-                "ce_oi":
-                    sf(
-                        call_market.get(
-                            "oi"
-                        )
+                    call_market.get(
+                        "last_price"
                     ),
+                )
+            ),
 
-                "ce_prev_oi":
-                    sf(
-                        call_market.get(
-                            "prev_oi"
-                        )
+            "ce_oi": sf(
+                call_market.get(
+                    "oi"
+                )
+            ),
+
+            "ce_prev_oi": sf(
+                ce_prev_oi
+            ),
+
+            "ce_volume": sf(
+                call_market.get(
+                    "volume"
+                )
+            ),
+
+            "ce_iv": sf(
+                first_valid(
+                    call_greeks.get(
+                        "iv"
                     ),
-
-                "ce_volume":
-                    sf(
-                        call_market.get(
-                            "volume"
-                        )
+                    call_greeks.get(
+                        "implied_volatility"
                     ),
+                )
+            ),
 
-                "ce_iv":
-                    sf(
-                        call_greeks.get(
-                            "iv"
-                        )
+            "ce_delta": sf(
+                call_greeks.get(
+                    "delta"
+                )
+            ),
+
+            "ce_pop": sf(
+                ce_pop
+            ),
+
+            "ce_bid": sf(
+                first_valid(
+                    call_market.get(
+                        "bid_price"
                     ),
-
-                "ce_delta":
-                    sf(
-                        call_greeks.get(
-                            "delta"
-                        )
+                    call_market.get(
+                        "bid"
                     ),
+                )
+            ),
 
-                "ce_pop":
-                    sf(
-                        call_greeks.get(
-                            "pop"
-                        )
+            "ce_ask": sf(
+                first_valid(
+                    call_market.get(
+                        "ask_price"
                     ),
-
-                "ce_bid":
-                    sf(
-                        call_market.get(
-                            "bid_price"
-                        )
+                    call_market.get(
+                        "ask"
                     ),
+                )
+            ),
 
-                "ce_ask":
-                    sf(
-                        call_market.get(
-                            "ask_price"
-                        )
-                    ),
-
-                "ce_instrument_key":
-                    call.get(
+            "ce_instrument_key":
+                first_valid(
+                    call_options.get(
                         "instrument_key"
                     ),
-
-                # PUT
-                "pe_ltp":
-                    sf(
-                        put_market.get(
-                            "ltp"
-                        )
+                    call_options.get(
+                        "instrument_token"
                     ),
+                ),
 
-                "pe_oi":
-                    sf(
-                        put_market.get(
-                            "oi"
-                        )
+            # ---------------- PUT ----------------
+
+            "pe_ltp": sf(
+                first_valid(
+                    put_market.get(
+                        "ltp"
                     ),
-
-                "pe_prev_oi":
-                    sf(
-                        put_market.get(
-                            "prev_oi"
-                        )
+                    put_market.get(
+                        "last_price"
                     ),
+                )
+            ),
 
-                "pe_volume":
-                    sf(
-                        put_market.get(
-                            "volume"
-                        )
+            "pe_oi": sf(
+                put_market.get(
+                    "oi"
+                )
+            ),
+
+            "pe_prev_oi": sf(
+                pe_prev_oi
+            ),
+
+            "pe_volume": sf(
+                put_market.get(
+                    "volume"
+                )
+            ),
+
+            "pe_iv": sf(
+                first_valid(
+                    put_greeks.get(
+                        "iv"
                     ),
-
-                "pe_iv":
-                    sf(
-                        put_greeks.get(
-                            "iv"
-                        )
+                    put_greeks.get(
+                        "implied_volatility"
                     ),
+                )
+            ),
 
-                "pe_delta":
-                    sf(
-                        put_greeks.get(
-                            "delta"
-                        )
+            "pe_delta": sf(
+                put_greeks.get(
+                    "delta"
+                )
+            ),
+
+            "pe_pop": sf(
+                pe_pop
+            ),
+
+            "pe_bid": sf(
+                first_valid(
+                    put_market.get(
+                        "bid_price"
                     ),
-
-                "pe_pop":
-                    sf(
-                        put_greeks.get(
-                            "pop"
-                        )
+                    put_market.get(
+                        "bid"
                     ),
+                )
+            ),
 
-                "pe_bid":
-                    sf(
-                        put_market.get(
-                            "bid_price"
-                        )
+            "pe_ask": sf(
+                first_valid(
+                    put_market.get(
+                        "ask_price"
                     ),
-
-                "pe_ask":
-                    sf(
-                        put_market.get(
-                            "ask_price"
-                        )
+                    put_market.get(
+                        "ask"
                     ),
+                )
+            ),
 
-                "pe_instrument_key":
-                    put.get(
+            "pe_instrument_key":
+                first_valid(
+                    put_options.get(
                         "instrument_key"
                     ),
-            }
+                    put_options.get(
+                        "instrument_token"
+                    ),
+                ),
+        }
 
-        )
+        rows.append(row)
 
-    return pd.DataFrame(rows)
+    df = pd.DataFrame(
+        rows
+    )
+
+    # ========================================================
+    # IMPORTANT FIX
+    # ========================================================
+
+    df = ensure_change_oi_columns(
+        df
+    )
+
+    return df
 
 
 # ============================================================
@@ -1255,21 +1328,20 @@ def get_market_status(
     last_trade_time=None
 ):
 
-    current = now_ist()
+    now = now_ist()
 
-    # Weekend
-    if current.weekday() >= 5:
+    if now.weekday() >= 5:
 
         return "MARKET CLOSED"
 
-    market_open = current.replace(
+    market_open = now.replace(
         hour=9,
         minute=15,
         second=0,
         microsecond=0,
     )
 
-    market_close = current.replace(
+    market_close = now.replace(
         hour=15,
         minute=30,
         second=0,
@@ -1277,63 +1349,80 @@ def get_market_status(
     )
 
     if (
-        current < market_open
-        or current > market_close
+        now < market_open
+        or now > market_close
     ):
 
         return "MARKET CLOSED"
 
-    # Freshness
     if last_trade_time:
 
         try:
 
+            trade_dt = None
+
             if isinstance(
                 last_trade_time,
-                str,
+                str
             ):
 
-                trade_dt = (
-                    datetime.fromisoformat(
-                        last_trade_time.replace(
-                            "Z",
-                            "+00:00",
-                        )
-                    )
+                text = (
+                    last_trade_time
+                    .strip()
                 )
 
-                if trade_dt.tzinfo is None:
+                if "T" in text:
 
                     trade_dt = (
-                        trade_dt.replace(
-                            tzinfo=timezone.utc
+                        datetime.fromisoformat(
+                            text.replace(
+                                "Z",
+                                "+00:00",
+                            )
+                        )
+                    )
+
+                    if (
+                        trade_dt.tzinfo
+                        is None
+                    ):
+
+                        trade_dt = (
+                            trade_dt.replace(
+                                tzinfo=timezone.utc
+                            )
+                        )
+
+                    trade_dt = (
+                        trade_dt.astimezone(
+                            IST
                         )
                     )
 
             else:
 
+                number = float(
+                    last_trade_time
+                )
+
                 trade_dt = (
                     datetime.fromtimestamp(
-                        float(last_trade_time)
-                        / 1000,
+                        number / 1000,
                         tz=timezone.utc,
+                    ).astimezone(
+                        IST
                     )
                 )
 
-            age_seconds = (
+            if trade_dt is not None:
 
-                datetime.now(
-                    timezone.utc
-                )
-                - trade_dt.astimezone(
-                    timezone.utc
-                )
+                age = (
+                    now - trade_dt
+                ).total_seconds()
 
-            ).total_seconds()
+                if age > 600:
 
-            if age_seconds > 600:
-
-                return "DATA STALE"
+                    return "DATA STALE"
 
         except Exception:
 
@@ -1348,216 +1437,197 @@ def get_market_status(
 
 def analyze_chain(
     df,
-    market,
+    market
 ):
 
     if df.empty:
 
         raise RuntimeError(
-            "Option chain returned no usable data."
+            "Option chain returned no usable rows."
         )
 
-    df = df.copy()
+    # IMPORTANT FIX
+    df = ensure_change_oi_columns(
+        df
+    )
 
-    spot = market["last_price"]
+    spot = sf(
+        market.get(
+            "last_price"
+        )
+    )
 
-    # --------------------------------------------------------
-    # ATM
-    # --------------------------------------------------------
+    if spot <= 0:
+
+        raise RuntimeError(
+            "Invalid underlying price received from Upstox."
+        )
 
     df["atm_distance"] = (
-        abs(
-            df["strike"] - spot
-        )
-    )
+        df["strike"] - spot
+    ).abs()
 
-    atm_index = (
+    atm_row = df.loc[
         df["atm_distance"].idxmin()
+    ]
+
+    atm = sf(
+        atm_row["strike"]
     )
 
-    atm_strike = float(
-        df.loc[
-            atm_index,
-            "strike",
-        ]
+    total_call_oi = (
+        df["ce_oi"].sum()
     )
 
-    # --------------------------------------------------------
-    # CHANGE OI
-    # --------------------------------------------------------
-
-    df["ce_chg_oi"] = (
-        df["ce_oi"]
-        - df["ce_prev_oi"]
+    total_put_oi = (
+        df["pe_oi"].sum()
     )
 
-    df["pe_chg_oi"] = (
-        df["pe_oi"]
-        - df["pe_prev_oi"]
-    )
-
-    # --------------------------------------------------------
-    # PCR
-    # --------------------------------------------------------
-
-    total_ce_oi = df[
-        "ce_oi"
-    ].sum()
-
-    total_pe_oi = df[
-        "pe_oi"
-    ].sum()
-
-    if total_ce_oi > 0:
+    if total_call_oi > 0:
 
         pcr = (
-            total_pe_oi
-            / total_ce_oi
+            total_put_oi
+            / total_call_oi
         )
 
     else:
 
-        pcr = 0
+        pcr = 0.0
 
-    # --------------------------------------------------------
-    # OI WALLS
-    # --------------------------------------------------------
-
-    ce_wall_row = df.loc[
+    resistance_row = df.loc[
         df["ce_oi"].idxmax()
     ]
 
-    pe_wall_row = df.loc[
+    support_row = df.loc[
         df["pe_oi"].idxmax()
     ]
 
-    call_resistance = float(
-        ce_wall_row["strike"]
+    call_resistance = sf(
+        resistance_row["strike"]
     )
 
-    put_support = float(
-        pe_wall_row["strike"]
+    put_support = sf(
+        support_row["strike"]
     )
 
-    # --------------------------------------------------------
-    # NEAR ATM
-    # --------------------------------------------------------
-
-    lower = spot * 0.97
-    upper = spot * 1.03
-
-    near_atm = df[
-        (
-            df["strike"] >= lower
-        )
-        &
-        (
-            df["strike"] <= upper
-        )
+    near = df[
+        df["atm_distance"]
+        <= spot * 0.03
     ].copy()
 
-    if near_atm.empty:
+    if near.empty:
 
-        near_atm = df.nsmallest(
-            5,
+        near = df.nsmallest(
+            min(5, len(df)),
             "atm_distance",
         ).copy()
 
-    # --------------------------------------------------------
-    # SCORING
-    # --------------------------------------------------------
-
-    bull = 50.0
-    bear = 50.0
+    bull = 50
+    bear = 50
 
     reasons = []
 
+    # --------------------------------------------------------
     # PCR
+    # --------------------------------------------------------
+
     if pcr >= 1.20:
 
         bull += 9
 
         reasons.append(
-            "PCR above 1.20 indicates stronger put OI relative to call OI."
+            f"PCR {pcr:.2f} indicates stronger Put OI support."
         )
 
-    elif pcr <= 0.80:
+    elif (
+        pcr <= 0.80
+        and pcr > 0
+    ):
 
         bear += 9
 
         reasons.append(
-            "PCR below 0.80 indicates stronger call OI pressure."
+            f"PCR {pcr:.2f} indicates stronger Call-side OI."
         )
 
-    else:
+    # --------------------------------------------------------
+    # CHANGE OI
+    # --------------------------------------------------------
 
-        reasons.append(
-            "PCR is in a relatively balanced zone."
-        )
+    near_put_change = (
+        near["pe_chg_oi"].sum()
+    )
 
-    # Change OI
-    pe_change = near_atm[
-        "pe_chg_oi"
-    ].sum()
+    near_call_change = (
+        near["ce_chg_oi"].sum()
+    )
 
-    ce_change = near_atm[
-        "ce_chg_oi"
-    ].sum()
-
-    if pe_change > ce_change:
+    if (
+        near_put_change
+        > near_call_change
+    ):
 
         bull += 8
 
         reasons.append(
-            "Near-ATM put OI addition is stronger than call OI addition."
+            "Near-ATM Put Change OI is stronger than Call Change OI."
         )
 
-    elif ce_change > pe_change:
+    elif (
+        near_call_change
+        > near_put_change
+    ):
 
         bear += 8
 
         reasons.append(
-            "Near-ATM call OI addition is stronger than put OI addition."
+            "Near-ATM Call Change OI is stronger than Put Change OI."
         )
 
-    else:
+    # --------------------------------------------------------
+    # VOLUME
+    # --------------------------------------------------------
 
-        reasons.append(
-            "Near-ATM change in OI is relatively balanced."
-        )
+    near_put_volume = (
+        near["pe_volume"].sum()
+    )
 
-    # Volume
-    pe_volume = near_atm[
-        "pe_volume"
-    ].sum()
+    near_call_volume = (
+        near["ce_volume"].sum()
+    )
 
-    ce_volume = near_atm[
-        "ce_volume"
-    ].sum()
-
-    if pe_volume > ce_volume * 1.15:
+    if (
+        near_put_volume
+        > near_call_volume * 1.15
+    ):
 
         bull += 7
 
         reasons.append(
-            "Put-side option volume is stronger near ATM."
+            "Near-ATM Put volume is stronger than Call volume."
         )
 
-    elif ce_volume > pe_volume * 1.15:
+    elif (
+        near_call_volume
+        > near_put_volume * 1.15
+    ):
 
         bear += 7
 
         reasons.append(
-            "Call-side option volume is stronger near ATM."
+            "Near-ATM Call volume is stronger than Put volume."
         )
 
-    # OI walls
+    # --------------------------------------------------------
+    # SUPPORT / RESISTANCE
+    # --------------------------------------------------------
+
     if put_support < spot:
 
         bull += 5
 
         reasons.append(
-            f"Largest put OI wall is below spot at {put_support:.0f}."
+            f"Put OI support is below spot near {put_support:.2f}."
         )
 
     if call_resistance > spot:
@@ -1565,20 +1635,25 @@ def analyze_chain(
         bear += 5
 
         reasons.append(
-            f"Largest call OI wall is above spot at {call_resistance:.0f}."
+            f"Call OI resistance is above spot near {call_resistance:.2f}."
         )
 
-    # Underlying price action
-    pct_change = market[
-        "pct_change"
-    ]
+    # --------------------------------------------------------
+    # PRICE MOMENTUM
+    # --------------------------------------------------------
+
+    pct_change = sf(
+        market.get(
+            "pct_change"
+        )
+    )
 
     if pct_change > 0.50:
 
         bull += 8
 
         reasons.append(
-            f"Underlying is up {pct_change:.2f}% versus previous close."
+            f"Underlying is up {pct_change:.2f}% today."
         )
 
     elif pct_change < -0.50:
@@ -1586,86 +1661,59 @@ def analyze_chain(
         bear += 8
 
         reasons.append(
-            f"Underlying is down {abs(pct_change):.2f}% versus previous close."
+            f"Underlying is down {abs(pct_change):.2f}% today."
         )
 
-    else:
-
-        reasons.append(
-            "Underlying price change is relatively small."
+    price_vs_open = sf(
+        market.get(
+            "price_vs_open"
         )
+    )
 
-    # Price vs open
-    if market[
-        "price_vs_open"
-    ] > 0.30:
+    if price_vs_open > 0.30:
 
         bull += 5
 
-        reasons.append(
-            "Price is trading above today's opening price."
-        )
-
-    elif market[
-        "price_vs_open"
-    ] < -0.30:
+    elif price_vs_open < -0.30:
 
         bear += 5
 
-        reasons.append(
-            "Price is trading below today's opening price."
+    price_vs_average = sf(
+        market.get(
+            "price_vs_average"
         )
+    )
 
-    # Price vs average
-    if market[
-        "price_vs_average"
-    ] > 0.30:
+    if price_vs_average > 0.30:
 
         bull += 4
 
-        reasons.append(
-            "Price is trading above the session average."
-        )
-
-    elif market[
-        "price_vs_average"
-    ] < -0.30:
+    elif price_vs_average < -0.30:
 
         bear += 4
 
-        reasons.append(
-            "Price is trading below the session average."
+    range_position = sf(
+        market.get(
+            "range_position"
         )
+    )
 
-    # Day range
-    if market[
-        "range_position"
-    ] >= 70:
+    if range_position >= 70:
 
         bull += 4
 
-        reasons.append(
-            "Price is positioned in the upper part of today's range."
-        )
-
-    elif market[
-        "range_position"
-    ] <= 30:
+    elif range_position <= 30:
 
         bear += 4
-
-        reasons.append(
-            "Price is positioned in the lower part of today's range."
-        )
 
     bull = min(
         100,
-        round(bull),
+        int(round(bull))
     )
 
     bear = min(
         100,
-        round(bear),
+        int(round(bear))
     )
 
     gap = abs(
@@ -1674,19 +1722,17 @@ def analyze_chain(
 
     maximum = max(
         bull,
-        bear,
+        bear
     )
-
-    # --------------------------------------------------------
-    # DECISION
-    # --------------------------------------------------------
 
     if (
         maximum >= 72
         and gap >= 14
     ):
 
-        decision = "TRADE CANDIDATE"
+        decision = (
+            "TRADE CANDIDATE"
+        )
 
     elif (
         maximum >= 62
@@ -1711,13 +1757,11 @@ def analyze_chain(
 
         direction = "CALL"
 
-    # --------------------------------------------------------
-    # MARKET STATUS
-    # --------------------------------------------------------
-
-    market_status = get_market_status(
-        market.get(
-            "last_trade_time"
+    market_status = (
+        get_market_status(
+            market.get(
+                "last_trade_time"
+            )
         )
     )
 
@@ -1730,347 +1774,309 @@ def analyze_chain(
         decision = "DATA STALE"
 
     # --------------------------------------------------------
-    # SELECT OPTION
+    # OPTION SELECTION
     # --------------------------------------------------------
 
-    candidates = []
+    if direction == "CALL":
 
-    for _, row in df.iterrows():
+        prefix = "ce"
 
-        if direction == "CALL":
+    else:
 
-            ltp = row["ce_ltp"]
-            volume = row["ce_volume"]
-            bid = row["ce_bid"]
-            ask = row["ce_ask"]
-            pop = row["ce_pop"]
-            delta = row["ce_delta"]
-            iv = row["ce_iv"]
-            oi = row["ce_oi"]
-            chg_oi = row["ce_chg_oi"]
-            instrument_key = (
-                row["ce_instrument_key"]
+        prefix = "pe"
+
+    candidates = df[
+        (
+            df[
+                f"{prefix}_ltp"
+            ] > 0
+        )
+        &
+        (
+            df[
+                f"{prefix}_volume"
+            ] > 0
+        )
+        &
+        (
+            df[
+                f"{prefix}_instrument_key"
+            ].notna()
+        )
+    ].copy()
+
+    if candidates.empty:
+
+        candidates = df[
+            (
+                df[
+                    f"{prefix}_ltp"
+                ] > 0
             )
-
-        else:
-
-            ltp = row["pe_ltp"]
-            volume = row["pe_volume"]
-            bid = row["pe_bid"]
-            ask = row["pe_ask"]
-            pop = row["pe_pop"]
-            delta = row["pe_delta"]
-            iv = row["pe_iv"]
-            oi = row["pe_oi"]
-            chg_oi = row["pe_chg_oi"]
-            instrument_key = (
-                row["pe_instrument_key"]
+            &
+            (
+                df[
+                    f"{prefix}_instrument_key"
+                ].notna()
             )
+        ].copy()
 
-        if (
-            ltp > 0
-            and volume > 0
-            and instrument_key
-        ):
+    trade_plan = {
 
-            candidates.append(
+        "direction": direction,
 
-                {
+        "strike": atm,
 
-                    "strike":
-                        float(
-                            row["strike"]
-                        ),
+        "entry": 0.0,
 
-                    "ltp":
-                        float(ltp),
+        "sl": 0.0,
 
-                    "volume":
-                        float(volume),
+        "target1": 0.0,
 
-                    "bid":
-                        float(bid),
+        "target2": 0.0,
 
-                    "ask":
-                        float(ask),
+        "pop": 0.0,
 
-                    "pop":
-                        float(pop),
+        "delta": 0.0,
 
-                    "delta":
-                        float(delta),
+        "iv": 0.0,
 
-                    "iv":
-                        float(iv),
+        "oi": 0.0,
 
-                    "oi":
-                        float(oi),
+        "chg_oi": 0.0,
 
-                    "chg_oi":
-                        float(chg_oi),
+        "volume": 0.0,
 
-                    "instrument_key":
-                        instrument_key,
+        "bid": 0.0,
 
-                    "distance":
-                        abs(
-                            row["strike"]
-                            - spot
-                        ),
-                }
+        "ask": 0.0,
 
-            )
+        "spread_pct": 0.0,
 
-    selected = None
+        "trigger": spot,
 
-    if candidates:
+        "entry_status": "WAIT",
 
-        # Closest to ATM first,
-        # then liquidity.
-        candidates.sort(
-            key=lambda x: (
-                x["distance"],
-                -x["volume"],
-            )
+        "instrument_key": None,
+    }
+
+    if not candidates.empty:
+
+        candidates["distance"] = (
+            candidates["strike"]
+            - spot
+        ).abs()
+
+        candidates = candidates.sort_values(
+            [
+                "distance",
+                f"{prefix}_volume",
+            ],
+            ascending=[
+                True,
+                False,
+            ],
         )
 
-        selected = candidates[0]
+        selected = candidates.iloc[0]
 
-    # --------------------------------------------------------
-    # TRADE PLAN
-    # --------------------------------------------------------
+        ltp = sf(
+            selected[
+                f"{prefix}_ltp"
+            ]
+        )
 
-    trade_plan = None
+        bid = sf(
+            selected[
+                f"{prefix}_bid"
+            ]
+        )
 
-    if selected:
+        ask = sf(
+            selected[
+                f"{prefix}_ask"
+            ]
+        )
 
-        ltp = selected["ltp"]
-
-        bid = selected["bid"]
-
-        ask = selected["ask"]
-
-        if bid > 0 and ask > 0:
+        if (
+            bid > 0
+            and ask > 0
+        ):
 
             entry = (
                 bid + ask
             ) / 2
 
+            spread_pct = (
+                (
+                    ask - bid
+                )
+                / entry
+            ) * 100 if entry > 0 else 0.0
+
         else:
 
             entry = ltp
 
-        if (
-            entry > 0
-            and bid > 0
-            and ask > 0
-        ):
-
-            spread_pct = (
-                (ask - bid)
-                / entry
-            ) * 100
-
-        else:
-
-            spread_pct = 0
+            spread_pct = 0.0
 
         if spread_pct > 10:
 
             decision = "NO TRADE"
 
             reasons.append(
-                f"Option bid/ask spread is wide at {spread_pct:.1f}%."
+                f"Selected option spread is wide at {spread_pct:.1f}%."
             )
 
-        profile = RISK_PROFILES[
-            "Balanced"
-        ]
+        trade_plan.update({
 
-        stop_loss = (
-            entry
-            * (
-                1 - profile["sl"]
-            )
-        )
+            "direction": direction,
 
-        target1 = (
-            entry
-            * (
-                1 + profile["t1"]
-            )
-        )
+            "strike": sf(
+                selected[
+                    "strike"
+                ]
+            ),
 
-        target2 = (
-            entry
-            * (
-                1 + profile["t2"]
-            )
-        )
+            "entry": entry,
+
+            "pop": sf(
+                selected[
+                    f"{prefix}_pop"
+                ]
+            ),
+
+            "delta": sf(
+                selected[
+                    f"{prefix}_delta"
+                ]
+            ),
+
+            "iv": sf(
+                selected[
+                    f"{prefix}_iv"
+                ]
+            ),
+
+            "oi": sf(
+                selected[
+                    f"{prefix}_oi"
+                ]
+            ),
+
+            "chg_oi": sf(
+                selected[
+                    f"{prefix}_chg_oi"
+                ]
+            ),
+
+            "volume": sf(
+                selected[
+                    f"{prefix}_volume"
+                ]
+            ),
+
+            "bid": bid,
+
+            "ask": ask,
+
+            "spread_pct": spread_pct,
+
+            "instrument_key":
+                selected[
+                    f"{prefix}_instrument_key"
+                ],
+        })
 
         if direction == "CALL":
 
-            trigger = max(
+            trade_plan[
+                "trigger"
+            ] = max(
                 spot,
-                atm_strike,
+                atm
             )
 
         else:
 
-            trigger = min(
+            trade_plan[
+                "trigger"
+            ] = min(
                 spot,
-                atm_strike,
+                atm
             )
 
         if decision == "TRADE CANDIDATE":
 
-            entry_status = (
-                "ENTER NOW / CONFIRM TRIGGER"
+            trade_plan[
+                "entry_status"
+            ] = (
+                "READY — CHECK LIVE PRICE"
             )
 
         elif decision == "WATCH":
 
-            entry_status = (
+            trade_plan[
+                "entry_status"
+            ] = (
                 "WAIT FOR CONFIRMATION"
-            )
-
-        elif decision == "MARKET CLOSED":
-
-            entry_status = (
-                "WAIT FOR MARKET OPEN"
-            )
-
-        elif decision == "DATA STALE":
-
-            entry_status = (
-                "WAIT FOR FRESH DATA"
             )
 
         else:
 
-            entry_status = "NO TRADE"
-
-        trade_plan = {
-
-            "direction":
-                direction,
-
-            "strike":
-                selected["strike"],
-
-            "entry":
-                entry,
-
-            "sl":
-                stop_loss,
-
-            "target1":
-                target1,
-
-            "target2":
-                target2,
-
-            "pop":
-                selected["pop"],
-
-            "delta":
-                selected["delta"],
-
-            "iv":
-                selected["iv"],
-
-            "oi":
-                selected["oi"],
-
-            "chg_oi":
-                selected["chg_oi"],
-
-            "volume":
-                selected["volume"],
-
-            "bid":
-                selected["bid"],
-
-            "ask":
-                selected["ask"],
-
-            "spread_pct":
-                spread_pct,
-
-            "trigger":
-                trigger,
-
-            "entry_status":
-                entry_status,
-
-            "instrument_key":
-                selected[
-                    "instrument_key"
-                ],
-        }
+            trade_plan[
+                "entry_status"
+            ] = "NO ENTRY"
 
     return {
 
-        "spot":
-            spot,
+        "spot": spot,
 
-        "market":
-            market,
+        "market": market,
 
-        "pcr":
-            pcr,
+        "pcr": pcr,
 
-        "put_support":
-            put_support,
+        "put_support": put_support,
 
         "call_resistance":
             call_resistance,
 
-        "atm":
-            atm_strike,
+        "atm": atm,
 
-        "bull":
-            bull,
+        "bull": bull,
 
-        "bear":
-            bear,
+        "bear": bear,
 
-        "gap":
-            gap,
+        "gap": gap,
 
-        "decision":
-            decision,
+        "decision": decision,
 
-        "direction":
-            direction,
+        "direction": direction,
 
-        "reasons":
-            reasons,
+        "reasons": reasons,
 
-        "trade_plan":
-            trade_plan,
+        "trade_plan": trade_plan,
 
         "market_status":
             market_status,
 
-        "expiry_days":
-            None,
-
+        "expiry_days": None,
     }
 
 
 # ============================================================
-# COMPLETE ANALYSIS
+# RUN ANALYSIS
 # ============================================================
 
 def run_analysis(
     symbol,
-    risk_profile,
+    risk_profile
 ):
 
-    # 1. Find underlying
-    underlying = find_underlying(
-        symbol
+    underlying = (
+        find_underlying(
+            symbol
+        )
     )
 
     underlying_key = (
@@ -2082,83 +2088,91 @@ def run_analysis(
     if not underlying_key:
 
         raise RuntimeError(
-            "Upstox did not return an instrument key."
+            "Could not find Upstox instrument key."
         )
 
-    trading_symbol = (
-        underlying.get(
-            "trading_symbol"
+    quote = (
+        get_full_quote_v3(
+            underlying_key
         )
-        or symbol
     )
 
-    # 2. Underlying quote
-    quote = get_full_quote_v3(
-        underlying_key
+    market = (
+        extract_market_context(
+            quote
+        )
     )
 
-    market = extract_market_context(
-        quote
+    contracts = (
+        get_option_contracts(
+            underlying_key
+        )
     )
 
-    if market["last_price"] <= 0:
+    expiry = (
+        get_nearest_expiry(
+            contracts
+        )
+    )
+
+    if expiry is None:
 
         raise RuntimeError(
-            f"Upstox returned an invalid live price for {trading_symbol}."
+            "Could not find a valid future option expiry."
         )
 
-    # 3. Option contracts
-    contracts = get_option_contracts(
-        underlying_key
-    )
-
-    if not contracts:
-
-        raise RuntimeError(
-            f"No F&O option contracts found for {trading_symbol}."
-        )
-
-    # 4. Nearest expiry
-    expiry_date = get_nearest_expiry(
-        contracts
-    )
-
-    if not expiry_date:
-
-        raise RuntimeError(
-            "Could not find a valid upcoming expiry."
-        )
-
-    expiry_string = (
-        expiry_date.strftime(
-            "%Y-%m-%d"
+    raw_chain = (
+        get_option_chain(
+            underlying_key,
+            expiry,
         )
     )
 
-    # 5. Option chain
-    raw_chain = get_option_chain(
-        underlying_key,
-        expiry_string,
-    )
-
-    chain_df = normalize_chain(
-        raw_chain
+    chain_df = (
+        normalize_chain(
+            raw_chain
+        )
     )
 
     if chain_df.empty:
 
         raise RuntimeError(
-            "Option chain was received but could not be parsed."
+            "Upstox returned an empty option chain."
         )
 
-    # 6. Analysis
-    result = analyze_chain(
-        chain_df,
-        market,
+    # ========================================================
+    # IMPORTANT FIX
+    # ========================================================
+
+    chain_df = (
+        ensure_change_oi_columns(
+            chain_df
+        )
     )
 
+    result = (
+        analyze_chain(
+            chain_df,
+            market
+        )
+    )
+
+    today = (
+        now_ist().date()
+    )
+
+    expiry_days = (
+        expiry - today
+    ).days
+
     result["symbol"] = (
-        trading_symbol.upper()
+        underlying.get(
+            "trading_symbol"
+        )
+        or underlying.get(
+            "short_name"
+        )
+        or symbol.upper()
     )
 
     result["input_symbol"] = (
@@ -2169,139 +2183,1181 @@ def run_analysis(
         underlying_key
     )
 
-    result["expiry"] = (
-        expiry_string
+    result["expiry"] = str(
+        expiry
     )
 
     result["expiry_days"] = (
+        expiry_days
+    )
 
-        expiry_date
-        - now_ist().date()
-
-    ).days
-
-    result["upstox_snapshot_time"] = (
-        format_iso_ist(
-            market.get(
-                "snapshot_time"
-            )
+    result["snapshot_time"] = (
+        market.get(
+            "snapshot_time"
         )
     )
 
-    result[
-        "underlying_last_trade_time"
-    ] = (
-
-        format_ms_ist(
-            market.get(
-                "last_trade_time"
-            )
+    result["last_trade_time"] = (
+        market.get(
+            "last_trade_time"
         )
-
     )
 
     result["app_fetch_time"] = (
-        now_ist().strftime(
-            "%d-%b-%Y %I:%M:%S %p IST"
-        )
+        now_ist()
     )
 
-    # 7. Selected option timestamp
-    selected_option_last_trade = (
-        "N/A"
+    # --------------------------------------------------------
+    # RISK PROFILE
+    # --------------------------------------------------------
+
+    profile = RISK_PROFILES[
+        risk_profile
+    ]
+
+    trade_plan = (
+        result["trade_plan"]
     )
 
-    if result.get(
-        "trade_plan"
-    ):
-
-        selected_key = (
-            result[
-                "trade_plan"
-            ].get(
-                "instrument_key"
-            )
-        )
-
-        if selected_key:
-
-            try:
-
-                selected_quote = (
-                    get_full_quote_v3(
-                        selected_key
-                    )
-                )
-
-                selected_option_last_trade = (
-                    format_ms_ist(
-                        selected_quote.get(
-                            "last_trade_time"
-                        )
-                    )
-                )
-
-            except Exception:
-
-                selected_option_last_trade = (
-                    "N/A"
-                )
-
-    result[
-        "selected_option_last_trade"
-    ] = (
-        selected_option_last_trade
-    )
-
-    # 8. Risk profile
-    profile = RISK_PROFILES.get(
-        risk_profile,
-        RISK_PROFILES[
-            "Balanced"
-        ],
-    )
-
-    if result.get(
-        "trade_plan"
-    ):
-
-        tp = result[
-            "trade_plan"
-        ]
-
-        entry = tp[
+    entry = sf(
+        trade_plan.get(
             "entry"
-        ]
+        )
+    )
 
-        tp["sl"] = (
+    if entry > 0:
+
+        trade_plan["sl"] = (
             entry
             * (
-                1 - profile["sl"]
+                1
+                - profile["sl"]
             )
         )
 
-        tp["target1"] = (
+        trade_plan["target1"] = (
             entry
             * (
-                1 + profile["t1"]
+                1
+                + profile["t1"]
             )
         )
 
-        tp["target2"] = (
+        trade_plan["target2"] = (
             entry
             * (
-                1 + profile["t2"]
+                1
+                + profile["t2"]
             )
         )
 
-        tp[
-            "risk_profile"
-        ] = risk_profile
+    result["trade_plan"] = (
+        trade_plan
+    )
+
+    # --------------------------------------------------------
+    # SELECTED OPTION TIMESTAMP
+    # --------------------------------------------------------
+
+    selected_key = (
+        trade_plan.get(
+            "instrument_key"
+        )
+    )
+
+    if selected_key:
+
+        try:
+
+            selected_quote = (
+                get_full_quote_v3(
+                    selected_key
+                )
+            )
+
+            result[
+                "selected_option_last_trade_time"
+            ] = first_valid(
+
+                selected_quote.get(
+                    "last_trade_time"
+                ),
+
+                selected_quote.get(
+                    "timestamp"
+                ),
+            )
+
+        except Exception:
+
+            result[
+                "selected_option_last_trade_time"
+            ] = None
+
+    else:
+
+        result[
+            "selected_option_last_trade_time"
+        ] = None
 
     return (
         result,
         chain_df,
     )
+
+
+# ============================================================
+# DISPLAY HELPERS
+# ============================================================
+
+def fmt_price(value):
+
+    value = sf(value)
+
+    if value == 0:
+
+        return "—"
+
+    return f"₹{value:,.2f}"
+
+
+def fmt_number(value):
+
+    value = sf(value)
+
+    if value == 0:
+
+        return "—"
+
+    if abs(value) >= 10_000_000:
+
+        return (
+            f"{value / 10_000_000:.2f} Cr"
+        )
+
+    if abs(value) >= 100_000:
+
+        return (
+            f"{value / 100_000:.2f} L"
+        )
+
+    if abs(value) >= 1_000:
+
+        return (
+            f"{value / 1_000:.1f}K"
+        )
+
+    return f"{value:,.0f}"
+
+
+def fmt_pct(value):
+
+    value = sf(value)
+
+    if value == 0:
+
+        return "—"
+
+    return f"{value:.2f}%"
+
+
+def decision_display(
+    decision,
+    direction,
+):
+
+    if decision == "TRADE CANDIDATE":
+
+        return (
+            f"🟢 {direction} — BUY"
+        )
+
+    if decision == "WATCH":
+
+        return (
+            f"🟡 {direction} — BUY AFTER CONFIRMATION"
+        )
+
+    if decision == "MARKET CLOSED":
+
+        return "⚪ MARKET CLOSED"
+
+    if decision == "DATA STALE":
+
+        return "🟠 DATA STALE"
+
+    return "⚪ NO TRADE"
+
+
+# ============================================================
+# DISPLAY ANALYSIS
+# ============================================================
+
+def display_analysis(
+    result,
+    chain_df,
+):
+
+    symbol = result.get(
+        "symbol",
+        "N/A"
+    )
+
+    market = result.get(
+        "market",
+        {}
+    )
+
+    decision = result.get(
+        "decision",
+        "NO TRADE"
+    )
+
+    direction = result.get(
+        "direction",
+        "CALL"
+    )
+
+    trade = result.get(
+        "trade_plan",
+        {}
+    )
+
+    market_status = result.get(
+        "market_status",
+        "MARKET CLOSED"
+    )
+
+    spot = sf(
+        result.get(
+            "spot"
+        )
+    )
+
+    pct_change = sf(
+        market.get(
+            "pct_change"
+        )
+    )
+
+    net_change = sf(
+        market.get(
+            "net_change"
+        )
+    )
+
+    status_class = (
+        "status-closed"
+    )
+
+    if market_status == "MARKET OPEN":
+
+        status_class = (
+            "status-open"
+        )
+
+    elif market_status == "DATA STALE":
+
+        status_class = (
+            "status-stale"
+        )
+
+    last_trade_text = (
+        format_ms_ist(
+            result.get(
+                "last_trade_time"
+            )
+        )
+    )
+
+    if last_trade_text == "N/A":
+
+        last_trade_text = (
+            format_iso_ist(
+                result.get(
+                    "last_trade_time"
+                )
+            )
+        )
+
+    app_time = result.get(
+        "app_fetch_time"
+    )
+
+    # ========================================================
+    # HERO
+    # ========================================================
+
+    st.markdown(
+        f"""
+<div class="stock-hero">
+
+    <div style="
+        display:flex;
+        justify-content:space-between;
+        align-items:flex-start;
+        gap:15px;
+        flex-wrap:wrap;
+    ">
+
+        <div>
+
+            <div class="stock-name">
+                {symbol}
+            </div>
+
+            <div class="stock-subtitle">
+                F&O Options Analysis • Live Upstox Data
+            </div>
+
+        </div>
+
+        <div class="{status_class}">
+            {market_status}
+        </div>
+
+    </div>
+
+    <div style="
+        margin-top:14px;
+        color:#687386;
+        font-size:13px;
+    ">
+
+        Last traded:
+        {last_trade_text}
+
+        &nbsp; • &nbsp;
+
+        Updated:
+        {format_iso_ist(app_time)}
+
+    </div>
+
+</div>
+""",
+        unsafe_allow_html=True,
+    )
+
+    # ========================================================
+    # MARKET SNAPSHOT
+    # ========================================================
+
+    st.markdown(
+        '<div class="section-title">Market Snapshot</div>',
+        unsafe_allow_html=True,
+    )
+
+    snapshot_cols = st.columns(
+        5
+    )
+
+    snapshot_items = [
+
+        (
+            "LIVE PRICE",
+            fmt_price(spot),
+            f"{net_change:+.2f} "
+            f"({pct_change:+.2f}%)",
+        ),
+
+        (
+            "MARKET BIAS",
+            (
+                "BULLISH"
+                if result.get("bull", 0)
+                > result.get("bear", 0)
+                else "BEARISH"
+            ),
+            f"Bull {result.get('bull', 0)} "
+            f"/ Bear {result.get('bear', 0)}",
+        ),
+
+        (
+            "PCR",
+            f"{sf(result.get('pcr')):.2f}",
+            "Put OI ÷ Call OI",
+        ),
+
+        (
+            "PUT OI SUPPORT",
+            fmt_price(
+                result.get(
+                    "put_support"
+                )
+            ),
+            "Highest Put OI strike",
+        ),
+
+        (
+            "CALL OI RESISTANCE",
+            fmt_price(
+                result.get(
+                    "call_resistance"
+                )
+            ),
+            "Highest Call OI strike",
+        ),
+
+    ]
+
+    for col, item in zip(
+        snapshot_cols,
+        snapshot_items,
+    ):
+
+        with col:
+
+            st.markdown(
+                f"""
+<div class="metric-card">
+
+    <div class="metric-label">
+        {item[0]}
+    </div>
+
+    <div class="metric-value">
+        {item[1]}
+    </div>
+
+    <div class="metric-small">
+        {item[2]}
+    </div>
+
+</div>
+""",
+                unsafe_allow_html=True,
+            )
+
+    # ========================================================
+    # DECISION
+    # ========================================================
+
+    st.markdown(
+        '<div class="section-title">Engine Decision</div>',
+        unsafe_allow_html=True,
+    )
+
+    st.markdown(
+        f"""
+<div class="decision-card">
+
+    <div class="decision-title">
+        {decision_display(
+            decision,
+            direction
+        )}
+    </div>
+
+    <div style="
+        color:#687386;
+        margin-top:7px;
+    ">
+
+        Signal gap:
+        <b>{result.get("gap", 0)}</b>
+
+        &nbsp; • &nbsp;
+
+        Expiry:
+        <b>{result.get("expiry", "N/A")}</b>
+
+        &nbsp; • &nbsp;
+
+        Days left:
+        <b>{result.get("expiry_days", "N/A")}</b>
+
+    </div>
+
+</div>
+""",
+        unsafe_allow_html=True,
+    )
+
+    score_cols = st.columns(
+        2
+    )
+
+    with score_cols[0]:
+
+        st.markdown(
+            f"""
+<div class="score-box">
+    <b>
+        🟢 Bullish Score:
+        {result.get("bull", 0)}/100
+    </b>
+</div>
+""",
+            unsafe_allow_html=True,
+        )
+
+        st.progress(
+            min(
+                max(
+                    int(
+                        result.get(
+                            "bull",
+                            0
+                        )
+                    ),
+                    0,
+                ),
+                100,
+            )
+            / 100
+        )
+
+    with score_cols[1]:
+
+        st.markdown(
+            f"""
+<div class="score-box">
+    <b>
+        🔴 Bearish Score:
+        {result.get("bear", 0)}/100
+    </b>
+</div>
+""",
+            unsafe_allow_html=True,
+        )
+
+        st.progress(
+            min(
+                max(
+                    int(
+                        result.get(
+                            "bear",
+                            0
+                        )
+                    ),
+                    0,
+                ),
+                100,
+            )
+            / 100
+        )
+
+    # ========================================================
+    # TRADE PLAN
+    # ========================================================
+
+    st.markdown(
+        '<div class="section-title">Trade Plan</div>',
+        unsafe_allow_html=True,
+    )
+
+    st.markdown(
+        '<div class="trade-plan">',
+        unsafe_allow_html=True,
+    )
+
+    plan_cols = st.columns(
+        6
+    )
+
+    plan_items = [
+
+        (
+            "DIRECTION / STRIKE",
+            f"{trade.get('direction', direction)} "
+            f"{sf(trade.get('strike')):.0f}",
+        ),
+
+        (
+            "ENTRY",
+            fmt_price(
+                trade.get(
+                    "entry"
+                )
+            ),
+        ),
+
+        (
+            "STOP LOSS",
+            fmt_price(
+                trade.get(
+                    "sl"
+                )
+            ),
+        ),
+
+        (
+            "TARGET 1",
+            fmt_price(
+                trade.get(
+                    "target1"
+                )
+            ),
+        ),
+
+        (
+            "TARGET 2",
+            fmt_price(
+                trade.get(
+                    "target2"
+                )
+            ),
+        ),
+
+        (
+            "PoP",
+            fmt_pct(
+                trade.get(
+                    "pop"
+                )
+            ),
+        ),
+
+    ]
+
+    for col, item in zip(
+        plan_cols,
+        plan_items,
+    ):
+
+        with col:
+
+            st.markdown(
+                f"""
+<div class="metric-card">
+
+    <div class="metric-label">
+        {item[0]}
+    </div>
+
+    <div class="metric-value">
+        {item[1]}
+    </div>
+
+</div>
+""",
+                unsafe_allow_html=True,
+            )
+
+    st.markdown(
+        "<div style='height:10px'></div>",
+        unsafe_allow_html=True,
+    )
+
+    detail_cols = st.columns(
+        5
+    )
+
+    delta_value = sf(
+        trade.get(
+            "delta"
+        )
+    )
+
+    detail_items = [
+
+        (
+            "DELTA",
+            (
+                f"{delta_value:.3f}"
+                if delta_value != 0
+                else "—"
+            ),
+        ),
+
+        (
+            "IV",
+            fmt_pct(
+                trade.get(
+                    "iv"
+                )
+            ),
+        ),
+
+        (
+            "OI",
+            fmt_number(
+                trade.get(
+                    "oi"
+                )
+            ),
+        ),
+
+        (
+            "CHANGE OI",
+            fmt_number(
+                trade.get(
+                    "chg_oi"
+                )
+            ),
+        ),
+
+        (
+            "VOLUME",
+            fmt_number(
+                trade.get(
+                    "volume"
+                )
+            ),
+        ),
+
+    ]
+
+    for col, item in zip(
+        detail_cols,
+        detail_items,
+    ):
+
+        with col:
+
+            st.markdown(
+                f"""
+<div class="metric-card">
+
+    <div class="metric-label">
+        {item[0]}
+    </div>
+
+    <div class="metric-value">
+        {item[1]}
+    </div>
+
+</div>
+""",
+                unsafe_allow_html=True,
+            )
+
+    st.markdown(
+        f"""
+<div style="
+    margin-top:15px;
+    color:#687386;
+    font-size:13px;
+">
+
+    Entry status:
+    <b>
+        {trade.get(
+            "entry_status",
+            "WAIT"
+        )}
+    </b>
+
+    &nbsp; • &nbsp;
+
+    Trigger:
+    <b>
+        {fmt_price(
+            trade.get(
+                "trigger"
+            )
+        )}
+    </b>
+
+    &nbsp; • &nbsp;
+
+    Bid:
+    <b>
+        {fmt_price(
+            trade.get(
+                "bid"
+            )
+        )}
+    </b>
+
+    &nbsp; • &nbsp;
+
+    Ask:
+    <b>
+        {fmt_price(
+            trade.get(
+                "ask"
+            )
+        )}
+    </b>
+
+    &nbsp; • &nbsp;
+
+    Spread:
+    <b>
+        {fmt_pct(
+            trade.get(
+                "spread_pct"
+            )
+        )}
+    </b>
+
+</div>
+""",
+        unsafe_allow_html=True,
+    )
+
+    st.markdown(
+        "</div>",
+        unsafe_allow_html=True,
+    )
+
+    # ========================================================
+    # REASONS
+    # ========================================================
+
+    st.markdown(
+        '<div class="section-title">'
+        'Why the Engine Reached This View'
+        '</div>',
+        unsafe_allow_html=True,
+    )
+
+    reasons = result.get(
+        "reasons",
+        []
+    )
+
+    if not reasons:
+
+        reasons = [
+            "No strong confirming factor was detected."
+        ]
+
+    for reason in reasons:
+
+        st.markdown(
+            f"""
+<div class="reason-box">
+    • {reason}
+</div>
+""",
+            unsafe_allow_html=True,
+        )
+
+    # ========================================================
+    # SUPPORT / RESISTANCE
+    # ========================================================
+
+    st.markdown(
+        '<div class="section-title">'
+        'OI Support / Resistance'
+        '</div>',
+        unsafe_allow_html=True,
+    )
+
+    sr_cols = st.columns(
+        3
+    )
+
+    sr_items = [
+
+        (
+            "CURRENT PRICE",
+            fmt_price(
+                spot
+            ),
+        ),
+
+        (
+            "PUT SUPPORT",
+            fmt_price(
+                result.get(
+                    "put_support"
+                )
+            ),
+        ),
+
+        (
+            "CALL RESISTANCE",
+            fmt_price(
+                result.get(
+                    "call_resistance"
+                )
+            ),
+        ),
+
+    ]
+
+    for col, item in zip(
+        sr_cols,
+        sr_items,
+    ):
+
+        with col:
+
+            st.markdown(
+                f"""
+<div class="metric-card">
+
+    <div class="metric-label">
+        {item[0]}
+    </div>
+
+    <div class="metric-value">
+        {item[1]}
+    </div>
+
+</div>
+""",
+                unsafe_allow_html=True,
+            )
+
+    # ========================================================
+    # LIVE OPTION CHAIN
+    # ========================================================
+
+    st.markdown(
+        '<div class="section-title">'
+        'Live Option Chain'
+        '</div>',
+        unsafe_allow_html=True,
+    )
+
+    if (
+        chain_df is None
+        or chain_df.empty
+    ):
+
+        st.warning(
+            "No option-chain rows are available."
+        )
+
+    else:
+
+        # ====================================================
+        # IMPORTANT FIX
+        # ====================================================
+
+        display_df = (
+            chain_df.copy()
+        )
+
+        display_df = (
+            ensure_change_oi_columns(
+                display_df
+            )
+        )
+
+        display_df["distance"] = (
+            display_df["strike"]
+            - spot
+        ).abs()
+
+        display_df = (
+            display_df
+            .sort_values(
+                "distance"
+            )
+            .head(15)
+        )
+
+        display_df = (
+            display_df
+            .sort_values(
+                "strike"
+            )
+        )
+
+        table_df = pd.DataFrame({
+
+            "CALL LTP":
+                display_df[
+                    "ce_ltp"
+                ].map(
+                    lambda x:
+                    fmt_price(x)
+                ),
+
+            "CALL OI":
+                display_df[
+                    "ce_oi"
+                ].map(
+                    lambda x:
+                    fmt_number(x)
+                ),
+
+            "CALL Chg OI":
+                display_df[
+                    "ce_chg_oi"
+                ].map(
+                    lambda x:
+                    fmt_number(x)
+                ),
+
+            "CALL IV":
+                display_df[
+                    "ce_iv"
+                ].map(
+                    lambda x:
+                    fmt_pct(x)
+                ),
+
+            "STRIKE":
+                display_df[
+                    "strike"
+                ].map(
+                    lambda x:
+                    f"{sf(x):,.0f}"
+                ),
+
+            "PUT LTP":
+                display_df[
+                    "pe_ltp"
+                ].map(
+                    lambda x:
+                    fmt_price(x)
+                ),
+
+            "PUT OI":
+                display_df[
+                    "pe_oi"
+                ].map(
+                    lambda x:
+                    fmt_number(x)
+                ),
+
+            "PUT Chg OI":
+                display_df[
+                    "pe_chg_oi"
+                ].map(
+                    lambda x:
+                    fmt_number(x)
+                ),
+
+            "PUT IV":
+                display_df[
+                    "pe_iv"
+                ].map(
+                    lambda x:
+                    fmt_pct(x)
+                ),
+
+            "CALL PoP":
+                display_df[
+                    "ce_pop"
+                ].map(
+                    lambda x:
+                    fmt_pct(x)
+                ),
+
+            "PUT PoP":
+                display_df[
+                    "pe_pop"
+                ].map(
+                    lambda x:
+                    fmt_pct(x)
+                ),
+        })
+
+        st.dataframe(
+            table_df,
+            use_container_width=True,
+            hide_index=True,
+        )
+
+    # ========================================================
+    # INFO
+    # ========================================================
+
+    st.markdown(
+        """
+<div class="info-bar">
+
+    <b>Live data source:</b>
+    Upstox API
+
+    &nbsp; • &nbsp;
+
+    Underlying quote +
+    option chain +
+    OI +
+    Change OI +
+    IV +
+    Delta +
+    PoP +
+    Volume
+
+    &nbsp; • &nbsp;
+
+    The app does not place automatic orders.
+
+</div>
+""",
+        unsafe_allow_html=True,
+    )
+
+    # ========================================================
+    # FOOTER
+    # ========================================================
+
+    st.markdown(
+        f"""
+<div class="footer">
+
+    Underlying last trade:
+    {last_trade_text}
+
+    &nbsp; • &nbsp;
+
+    App refresh:
+    {format_iso_ist(app_time)}
+
+    <br>
+
+    Educational analysis only.
+    Always verify the live option price,
+    liquidity, spread and market conditions
+    before taking any trade.
+
+</div>
+""",
+        unsafe_allow_html=True,
+    )
+
+
+# ============================================================
+# REFRESH ANALYSIS
+# ============================================================
+
+def refresh_analysis():
+
+    symbol = st.session_state.get(
+        "active_symbol",
+        ""
+    )
+
+    risk_profile = st.session_state.get(
+        "active_risk",
+        "Balanced"
+    )
+
+    if not symbol:
+
+        return
+
+    try:
+
+        result, chain = (
+            run_analysis(
+                symbol,
+                risk_profile
+            )
+        )
+
+        st.session_state.active_result = (
+            result
+        )
+
+        st.session_state.active_chain = (
+            chain
+        )
+
+        st.session_state.last_error = ""
+
+        st.session_state.last_successful_refresh = (
+            now_ist()
+        )
+
+    except Exception as e:
+
+        # Keep the last successful analysis
+        # visible if a temporary refresh fails.
+
+        st.session_state.last_error = (
+            str(e)
+        )
 
 
 # ============================================================
@@ -2311,32 +3367,30 @@ def run_analysis(
 with st.sidebar:
 
     st.markdown(
-        '<div class="sidebar-title">'
-        'Analyze Instrument'
-        '</div>',
-        unsafe_allow_html=True,
+        "## 🔎 Analyze Instrument"
     )
 
     st.markdown(
         """
-        <div class="sidebar-help">
-        Enter an NSE stock or index symbol and click Analyze.
-        <br><br>
-        Examples:
-        KOTAKBANK, HDFCBANK, RELIANCE,
-        ICICIBANK, SBIN, INFY, TCS,
-        NIFTY, BANKNIFTY
-        </div>
-        """,
+<div class="sidebar-note">
+
+Enter an NSE stock or index available in F&O.
+
+Examples:
+
+KOTAKBANK, HDFCBANK, RELIANCE,
+ICICIBANK, SBIN, INFY, TCS,
+NIFTY, BANKNIFTY.
+
+</div>
+""",
         unsafe_allow_html=True,
     )
-
-    st.write("")
 
     symbol_input = st.text_input(
         "Stock / Index",
         value=st.session_state.active_symbol,
-        placeholder="e.g. KOTAKBANK",
+        placeholder="Example: KOTAKBANK",
     )
 
     risk_profile = st.selectbox(
@@ -2351,52 +3405,66 @@ with st.sidebar:
         ),
     )
 
-    analyze_button = st.button(
-        "📊  Analyze",
-        type="primary",
+    analyze_clicked = st.button(
+        "🚀 Analyze",
         use_container_width=True,
+        type="primary",
     )
 
+    st.markdown("---")
+
     st.markdown(
-        "### Quick Examples"
+        "### ⚡ Quick Select"
     )
 
     quick_symbols = [
 
+        "NIFTY",
+        "BANKNIFTY",
         "KOTAKBANK",
         "HDFCBANK",
         "RELIANCE",
         "ICICIBANK",
         "SBIN",
+        "AXISBANK",
         "INFY",
         "TCS",
-        "NIFTY",
-        "BANKNIFTY",
+        "BHARTIARTL",
 
     ]
 
-    cols = st.columns(2)
+    quick_cols = st.columns(
+        2
+    )
 
-    for i, quick in enumerate(
+    for index, quick_symbol in enumerate(
         quick_symbols
     ):
 
-        with cols[
-            i % 2
+        with quick_cols[
+            index % 2
         ]:
 
             if st.button(
-                quick,
-                key=f"quick_{quick}",
+                quick_symbol,
                 use_container_width=True,
+                key=f"quick_{quick_symbol}",
             ):
 
                 st.session_state.active_symbol = (
-                    quick
+                    quick_symbol
                 )
 
                 st.session_state.active_risk = (
                     risk_profile
+                )
+
+                st.session_state.active_result = (
+                    None
+                )
+
+                st.session_state.active_chain = (
+                    None
                 )
 
                 st.session_state.last_error = ""
@@ -2407,16 +3475,20 @@ with st.sidebar:
 
     st.markdown(
         """
-        <div class="info-bar">
-        <b>Live data from Upstox</b><br>
-        Market quote, option chain,
-        OI, Chg OI, IV, Delta, PoP and volume.
-        </div>
-        """,
+<div class="info-bar">
+
+<b>Live Upstox data</b>
+
+<br>
+
+Market quote • Option chain •
+OI • Change OI • IV • Delta •
+PoP • Volume
+
+</div>
+""",
         unsafe_allow_html=True,
     )
-
-    st.write("")
 
     st.caption(
         "No automatic orders are placed by this app."
@@ -2427,52 +3499,47 @@ with st.sidebar:
 # ANALYZE BUTTON
 # ============================================================
 
-if analyze_button:
+if analyze_clicked:
 
-    clean_symbol = (
+    cleaned_symbol = (
         symbol_input
-        .strip()
-        .upper()
-    )
+        or ""
+    ).strip().upper()
 
-    if not clean_symbol:
+    if not cleaned_symbol:
 
         st.session_state.last_error = (
-            "Please enter a stock or index."
+            "Please enter a stock or index symbol."
         )
 
     else:
 
         st.session_state.active_symbol = (
-            clean_symbol
+            cleaned_symbol
         )
 
         st.session_state.active_risk = (
             risk_profile
         )
 
-        st.session_state.last_error = ""
-
         try:
 
-            with st.spinner(
-                f"Fetching live Upstox data for {clean_symbol}..."
-            ):
-
-                result, chain_df = (
-                    run_analysis(
-                        clean_symbol,
-                        risk_profile,
-                    )
+            result, chain = (
+                run_analysis(
+                    cleaned_symbol,
+                    risk_profile
                 )
+            )
 
             st.session_state.active_result = (
                 result
             )
 
             st.session_state.active_chain = (
-                chain_df
+                chain
             )
+
+            st.session_state.last_error = ""
 
             st.session_state.last_successful_refresh = (
                 now_ist()
@@ -2484,1437 +3551,15 @@ if analyze_button:
                 str(e)
             )
 
-        st.rerun()
-
 
 # ============================================================
-# DISPLAY HELPERS
-# ============================================================
-
-def fmt_price(value):
-
-    if value is None:
-        return "N/A"
-
-    try:
-
-        return (
-            f"₹{float(value):,.2f}"
-        )
-
-    except Exception:
-
-        return "N/A"
-
-
-def fmt_number(value):
-
-    try:
-
-        return (
-            f"{float(value):,.0f}"
-        )
-
-    except Exception:
-
-        return "0"
-
-
-def fmt_pct(value):
-
-    try:
-
-        return (
-            f"{float(value):.2f}%"
-        )
-
-    except Exception:
-
-        return "N/A"
-
-
-def decision_display(
-    decision,
-    direction,
-):
-
-    if decision == "TRADE CANDIDATE":
-
-        if direction == "CALL":
-
-            return (
-                "🟢 CALL — BUY"
-            )
-
-        return (
-            "🟢 PUT — BUY"
-        )
-
-    if decision == "WATCH":
-
-        if direction == "CALL":
-
-            return (
-                "🟡 CALL — BUY AFTER CONFIRMATION"
-            )
-
-        return (
-            "🟡 PUT — BUY AFTER CONFIRMATION"
-        )
-
-    if decision == "MARKET CLOSED":
-
-        return (
-            "⚪ MARKET CLOSED"
-        )
-
-    if decision == "DATA STALE":
-
-        return (
-            "🟠 DATA STALE"
-        )
-
-    return (
-        "⚪ NO TRADE"
-    )
-
-
-# ============================================================
-# DISPLAY ANALYSIS
-# ============================================================
-
-def display_analysis(
-    result,
-    chain_df,
-):
-
-    symbol = result[
-        "symbol"
-    ]
-
-    market = result[
-        "market"
-    ]
-
-    decision = result[
-        "decision"
-    ]
-
-    direction = result[
-        "direction"
-    ]
-
-    # --------------------------------------------------------
-    # HERO
-    # --------------------------------------------------------
-
-    pct = market[
-        "pct_change"
-    ]
-
-    if pct > 0:
-
-        change_html = (
-
-            '<span style="color:#059669;'
-            'font-weight:700;">'
-            f'+{pct:.2f}% '
-            f'(+₹{market["net_change"]:.2f})'
-            '</span>'
-
-        )
-
-    elif pct < 0:
-
-        change_html = (
-
-            '<span style="color:#dc2626;'
-            'font-weight:700;">'
-            f'{pct:.2f}% '
-            f'(-₹{abs(market["net_change"]):.2f})'
-            '</span>'
-
-        )
-
-    else:
-
-        change_html = (
-
-            '<span style="color:#64748b;'
-            'font-weight:700;">'
-            '0.00%'
-            '</span>'
-
-        )
-
-    if (
-        result[
-            "market_status"
-        ]
-        == "MARKET OPEN"
-    ):
-
-        status_html = (
-            '<span class="status-open">'
-            '● MARKET OPEN'
-            '</span>'
-        )
-
-    elif (
-        result[
-            "market_status"
-        ]
-        == "DATA STALE"
-    ):
-
-        status_html = (
-            '<span class="status-stale">'
-            '● DATA STALE'
-            '</span>'
-        )
-
-    else:
-
-        status_html = (
-            '<span class="status-closed">'
-            '● MARKET CLOSED'
-            '</span>'
-        )
-
-    st.markdown(
-        f"""
-        <div class="stock-hero">
-
-            <div style="
-                display:flex;
-                justify-content:space-between;
-                align-items:center;
-                gap:20px;
-            ">
-
-                <div>
-
-                    <div class="stock-name">
-                        {symbol.upper()}
-                    </div>
-
-                    <div class="stock-subtitle">
-                        F&O Options Analysis
-                    </div>
-
-                    <div style="margin-top:12px;">
-                        {status_html}
-
-                        <span style="
-                            font-size:12px;
-                            color:#64748b;
-                            margin-left:8px;
-                        ">
-                            Live Upstox Data
-                        </span>
-                    </div>
-
-                </div>
-
-                <div style="
-                    display:flex;
-                    gap:55px;
-                    align-items:center;
-                ">
-
-                    <div>
-
-                        <div class="hero-price-label">
-                            Last Traded
-                        </div>
-
-                        <div class="hero-price">
-                            {fmt_price(
-                                market["last_price"]
-                            )}
-                        </div>
-
-                        <div>
-                            {change_html}
-                        </div>
-
-                    </div>
-
-                    <div>
-
-                        <div class="hero-price-label">
-                            Updated
-                        </div>
-
-                        <div class="hero-time">
-                            🕐
-                            {result[
-                                "underlying_last_trade_time"
-                            ]}
-                        </div>
-
-                    </div>
-
-                </div>
-
-            </div>
-
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
-
-    # --------------------------------------------------------
-    # MARKET SNAPSHOT
-    # --------------------------------------------------------
-
-    st.markdown(
-        '<div class="section-title">'
-        '📊 Market Snapshot'
-        '</div>',
-        unsafe_allow_html=True,
-    )
-
-    c1, c2, c3, c4, c5 = (
-        st.columns(5)
-    )
-
-    with c1:
-
-        st.markdown(
-            f"""
-            <div class="metric-card">
-
-                <div class="metric-label">
-                    LIVE PRICE
-                </div>
-
-                <div class="metric-value">
-                    {fmt_price(
-                        market["last_price"]
-                    )}
-                </div>
-
-                <div class="metric-small">
-                    {change_html}
-                </div>
-
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
-
-    with c2:
-
-        if result[
-            "bull"
-        ] > result[
-            "bear"
-        ]:
-
-            bias = "BULLISH"
-
-        elif result[
-            "bear"
-        ] > result[
-            "bull"
-        ]:
-
-            bias = "BEARISH"
-
-        else:
-
-            bias = "NEUTRAL"
-
-        st.markdown(
-            f"""
-            <div class="metric-card">
-
-                <div class="metric-label">
-                    MARKET BIAS
-                </div>
-
-                <div class="metric-value">
-                    {bias}
-                </div>
-
-                <div class="metric-small">
-                    Bull {result["bull"]}
-                    /
-                    Bear {result["bear"]}
-                </div>
-
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
-
-    with c3:
-
-        st.markdown(
-            f"""
-            <div class="metric-card">
-
-                <div class="metric-label">
-                    PCR
-                </div>
-
-                <div class="metric-value purple-value">
-                    {result["pcr"]:.2f}
-                </div>
-
-                <div class="metric-small">
-                    Put OI / Call OI
-                </div>
-
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
-
-    with c4:
-
-        st.markdown(
-            f"""
-            <div class="metric-card">
-
-                <div class="metric-label">
-                    PUT OI SUPPORT
-                </div>
-
-                <div class="metric-value green-value">
-                    {result["put_support"]:.0f}
-                </div>
-
-                <div class="metric-small">
-                    Largest put OI wall
-                </div>
-
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
-
-    with c5:
-
-        st.markdown(
-            f"""
-            <div class="metric-card">
-
-                <div class="metric-label">
-                    CALL OI RESISTANCE
-                </div>
-
-                <div class="metric-value red-value">
-                    {result["call_resistance"]:.0f}
-                </div>
-
-                <div class="metric-small">
-                    Largest call OI wall
-                </div>
-
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
-
-    # --------------------------------------------------------
-    # DECISION
-    # --------------------------------------------------------
-
-    st.markdown(
-        '<div class="section-title">'
-        '🎯 Trade Decision'
-        '</div>',
-        unsafe_allow_html=True,
-    )
-
-    left, right = (
-        st.columns(
-            [1.05, 1]
-        )
-    )
-
-    with left:
-
-        display_decision = (
-            decision_display(
-                decision,
-                direction,
-            )
-        )
-
-        st.markdown(
-            f"""
-            <div class="decision-card">
-
-                <div class="decision-label">
-                    ENGINE DECISION
-                </div>
-
-                <div class="decision-text">
-                    {display_decision}
-                </div>
-
-                <div class="decision-sub">
-                    Signal gap:
-                    <b>
-                        {result["gap"]} points
-                    </b>
-
-                    &nbsp;•&nbsp;
-
-                    Expiry:
-                    <b>
-                        {result["expiry"]}
-                    </b>
-                </div>
-
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
-
-    with right:
-
-        bull_width = min(
-            100,
-            result["bull"],
-        )
-
-        bear_width = min(
-            100,
-            result["bear"],
-        )
-
-        st.markdown(
-            f"""
-            <div class="score-card">
-
-                <div class="score-row">
-
-                    <div class="score-title">
-
-                        <span>
-                            🟢 Bull Score
-                        </span>
-
-                        <span>
-                            {result["bull"]}/100
-                        </span>
-
-                    </div>
-
-                    <div class="score-track">
-
-                        <div
-                            class="score-bull"
-                            style="
-                                width:
-                                {bull_width}%;
-                            "
-                        >
-                        </div>
-
-                    </div>
-
-                </div>
-
-                <div class="score-row">
-
-                    <div class="score-title">
-
-                        <span>
-                            🔴 Bear Score
-                        </span>
-
-                        <span>
-                            {result["bear"]}/100
-                        </span>
-
-                    </div>
-
-                    <div class="score-track">
-
-                        <div
-                            class="score-bear"
-                            style="
-                                width:
-                                {bear_width}%;
-                            "
-                        >
-                        </div>
-
-                    </div>
-
-                </div>
-
-                <div style="
-                    font-size:12px;
-                    color:#64748b;
-                ">
-                    Scores combine price action,
-                    PCR, OI, change OI, volume
-                    and option-chain structure.
-                </div>
-
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
-
-    # --------------------------------------------------------
-    # TRADE PLAN
-    # --------------------------------------------------------
-
-    st.markdown(
-        '<div class="section-title">'
-        '💰 Trade Plan'
-        '</div>',
-        unsafe_allow_html=True,
-    )
-
-    tp = result.get(
-        "trade_plan"
-    )
-
-    if tp:
-
-        direction_class = (
-            "call-direction"
-            if tp["direction"]
-            == "CALL"
-            else "put-direction"
-        )
-
-        direction_icon = (
-            "🟢"
-            if tp["direction"]
-            == "CALL"
-            else "🔴"
-        )
-
-        st.markdown(
-            f"""
-            <div class="trade-plan">
-
-                <div class="
-                    trade-direction
-                    {direction_class}
-                ">
-
-                    {direction_icon}
-
-                    {tp["direction"]}
-
-                    &nbsp;•&nbsp;
-
-                    {tp["strike"]:.0f}
-                    STRIKE
-
-                </div>
-
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
-
-        st.write("")
-
-        t1, t2, t3, t4, t5, t6 = (
-            st.columns(6)
-        )
-
-        trade_values = [
-
-            (
-                "ENTRY",
-                fmt_price(
-                    tp["entry"]
-                ),
-            ),
-
-            (
-                "STOP LOSS",
-                fmt_price(
-                    tp["sl"]
-                ),
-            ),
-
-            (
-                "TARGET 1",
-                fmt_price(
-                    tp["target1"]
-                ),
-            ),
-
-            (
-                "TARGET 2",
-                fmt_price(
-                    tp["target2"]
-                ),
-            ),
-
-            (
-                "PoP",
-                f'{tp["pop"]:.0f}%',
-            ),
-
-            (
-                "DELTA",
-                f'{tp["delta"]:.3f}',
-            ),
-
-        ]
-
-        for col, (
-            label,
-            value,
-        ) in zip(
-
-            [
-                t1,
-                t2,
-                t3,
-                t4,
-                t5,
-                t6,
-            ],
-
-            trade_values,
-
-        ):
-
-            with col:
-
-                st.markdown(
-                    f"""
-                    <div class="trade-box">
-
-                        <div class="
-                            trade-box-label
-                        ">
-                            {label}
-                        </div>
-
-                        <div class="
-                            trade-box-value
-                        ">
-                            {value}
-                        </div>
-
-                    </div>
-                    """,
-                    unsafe_allow_html=True,
-                )
-
-        st.write("")
-
-        x1, x2, x3, x4 = (
-            st.columns(4)
-        )
-
-        with x1:
-
-            st.metric(
-                "IV",
-                f'{tp["iv"]:.2f}%',
-            )
-
-        with x2:
-
-            st.metric(
-                "OI",
-                fmt_number(
-                    tp["oi"]
-                ),
-            )
-
-        with x3:
-
-            st.metric(
-                "Change OI",
-                fmt_number(
-                    tp["chg_oi"]
-                ),
-            )
-
-        with x4:
-
-            st.metric(
-                "Volume",
-                fmt_number(
-                    tp["volume"]
-                ),
-            )
-
-        if decision == (
-            "TRADE CANDIDATE"
-        ):
-
-            entry_message = (
-                "🟢 ENTER NOW / CONFIRM TRIGGER"
-            )
-
-        elif decision == "WATCH":
-
-            entry_message = (
-                "🟡 WAIT FOR CONFIRMATION"
-            )
-
-        elif decision == "MARKET CLOSED":
-
-            entry_message = (
-                "⚪ WAIT FOR MARKET OPEN"
-            )
-
-        elif decision == "DATA STALE":
-
-            entry_message = (
-                "🟠 WAIT FOR FRESH DATA"
-            )
-
-        else:
-
-            entry_message = (
-                "⚪ NO TRADE"
-            )
-
-        st.markdown(
-            f"""
-            <div class="info-bar">
-
-                <b>Entry Status:</b>
-                {entry_message}
-
-                &nbsp;&nbsp;•&nbsp;&nbsp;
-
-                Trigger reference:
-                <b>
-                    {fmt_price(
-                        tp["trigger"]
-                    )}
-                </b>
-
-                &nbsp;&nbsp;•&nbsp;&nbsp;
-
-                Risk:
-                <b>
-                    {tp.get(
-                        "risk_profile",
-                        "Balanced"
-                    )}
-                </b>
-
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
-
-    else:
-
-        st.markdown(
-            """
-            <div class="decision-card">
-
-                <div class="decision-text">
-                    ⚪ NO TRADE
-                </div>
-
-                <div class="decision-sub">
-                    No sufficiently liquid option
-                    was selected for a trade plan.
-                </div>
-
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
-
-    # --------------------------------------------------------
-    # REASONS
-    # --------------------------------------------------------
-
-    st.markdown(
-        '<div class="section-title">'
-        '💡 Why the Engine Says This'
-        '</div>',
-        unsafe_allow_html=True,
-    )
-
-    r1, r2 = (
-        st.columns(
-            [1.35, 0.85]
-        )
-    )
-
-    with r1:
-
-        reason_html = ""
-
-        for reason in result[
-            "reasons"
-        ]:
-
-            reason_html += (
-                '<div class="reason-item">'
-                f'✓ &nbsp;{reason}'
-                '</div>'
-            )
-
-        st.markdown(
-            f"""
-            <div class="reason-card">
-                {reason_html}
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
-
-    with r2:
-
-        st.markdown(
-            f"""
-            <div class="reason-card">
-
-                <div style="
-                    font-size:14px;
-                    font-weight:750;
-                    color:#173b70;
-                    margin-bottom:12px;
-                ">
-                    ⚡ Market Status
-                </div>
-
-                <div style="
-                    display:flex;
-                    justify-content:space-between;
-                    padding:9px 0;
-                    border-bottom:
-                    1px solid #f1f5f9;
-                ">
-
-                    <span>Market</span>
-
-                    <b>
-                        {result[
-                            "market_status"
-                        ]}
-                    </b>
-
-                </div>
-
-                <div style="
-                    display:flex;
-                    justify-content:space-between;
-                    padding:9px 0;
-                    border-bottom:
-                    1px solid #f1f5f9;
-                ">
-
-                    <span>
-                        Today's Change
-                    </span>
-
-                    <b>
-                        {market[
-                            "pct_change"
-                        ]:.2f}%
-                    </b>
-
-                </div>
-
-                <div style="
-                    display:flex;
-                    justify-content:space-between;
-                    padding:9px 0;
-                    border-bottom:
-                    1px solid #f1f5f9;
-                ">
-
-                    <span>
-                        Day Range Position
-                    </span>
-
-                    <b>
-                        {market[
-                            "range_position"
-                        ]:.0f}%
-                    </b>
-
-                </div>
-
-                <div style="
-                    display:flex;
-                    justify-content:space-between;
-                    padding:9px 0;
-                ">
-
-                    <span>
-                        Expiry Days
-                    </span>
-
-                    <b>
-                        {result[
-                            "expiry_days"
-                        ]}
-                    </b>
-
-                </div>
-
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
-
-    # --------------------------------------------------------
-    # OI SUPPORT / RESISTANCE
-    # --------------------------------------------------------
-
-    st.markdown(
-        '<div class="section-title">'
-        '📌 OI Support / Resistance'
-        '</div>',
-        unsafe_allow_html=True,
-    )
-
-    o1, o2, o3 = (
-        st.columns(3)
-    )
-
-    with o1:
-
-        st.markdown(
-            f"""
-            <div class="metric-card">
-
-                <div class="metric-label">
-                    PUT OI SUPPORT
-                </div>
-
-                <div class="
-                    metric-value
-                    green-value
-                ">
-                    {result[
-                        "put_support"
-                    ]:.0f}
-                </div>
-
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
-
-    with o2:
-
-        st.markdown(
-            f"""
-            <div class="metric-card">
-
-                <div class="metric-label">
-                    ATM
-                </div>
-
-                <div class="metric-value">
-                    {result[
-                        "atm"
-                    ]:.0f}
-                </div>
-
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
-
-    with o3:
-
-        st.markdown(
-            f"""
-            <div class="metric-card">
-
-                <div class="metric-label">
-                    CALL OI RESISTANCE
-                </div>
-
-                <div class="
-                    metric-value
-                    red-value
-                ">
-                    {result[
-                        "call_resistance"
-                    ]:.0f}
-                </div>
-
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
-
-    # --------------------------------------------------------
-    # OPTION CHAIN
-    # --------------------------------------------------------
-
-    st.markdown(
-        '<div class="section-title">'
-        '🔢 Live Option Chain'
-        '</div>',
-        unsafe_allow_html=True,
-    )
-
-    st.markdown(
-        f"""
-        <div class="chain-caption">
-
-            Expiry:
-            <b>
-                {result["expiry"]}
-            </b>
-
-            &nbsp;•&nbsp;
-
-            Spot:
-            <b>
-                {fmt_price(
-                    result["spot"]
-                )}
-            </b>
-
-            &nbsp;•&nbsp;
-
-            Live data from Upstox
-
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
-
-    display_df = (
-        chain_df.copy()
-    )
-
-    spot = result[
-        "spot"
-    ]
-
-    display_df[
-        "distance"
-    ] = abs(
-        display_df[
-            "strike"
-        ] - spot
-    )
-
-    display_df = (
-        display_df
-        .sort_values(
-            "distance"
-        )
-        .head(15)
-    )
-
-    display_df = (
-        display_df
-        .sort_values(
-            "strike"
-        )
-    )
-
-    table = pd.DataFrame(
-        {
-
-            "CALL LTP":
-                display_df[
-                    "ce_ltp"
-                ],
-
-            "CALL OI":
-                display_df[
-                    "ce_oi"
-                ],
-
-            "CALL Chg OI":
-                display_df[
-                    "ce_chg_oi"
-                ],
-
-            "CALL IV":
-                display_df[
-                    "ce_iv"
-                ],
-
-            "STRIKE":
-                display_df[
-                    "strike"
-                ],
-
-            "PUT LTP":
-                display_df[
-                    "pe_ltp"
-                ],
-
-            "PUT OI":
-                display_df[
-                    "pe_oi"
-                ],
-
-            "PUT Chg OI":
-                display_df[
-                    "pe_chg_oi"
-                ],
-
-            "PUT IV":
-                display_df[
-                    "pe_iv"
-                ],
-
-            "CALL PoP":
-                display_df[
-                    "ce_pop"
-                ],
-
-            "PUT PoP":
-                display_df[
-                    "pe_pop"
-                ],
-
-        }
-    )
-
-    table[
-        "CALL LTP"
-    ] = table[
-        "CALL LTP"
-    ].map(
-        lambda x:
-            f"₹{x:.2f}"
-    )
-
-    table[
-        "PUT LTP"
-    ] = table[
-        "PUT LTP"
-    ].map(
-        lambda x:
-            f"₹{x:.2f}"
-    )
-
-    table[
-        "CALL OI"
-    ] = table[
-        "CALL OI"
-    ].map(
-        lambda x:
-            f"{x:,.0f}"
-    )
-
-    table[
-        "PUT OI"
-    ] = table[
-        "PUT OI"
-    ].map(
-        lambda x:
-            f"{x:,.0f}"
-    )
-
-    table[
-        "CALL Chg OI"
-    ] = table[
-        "CALL Chg OI"
-    ].map(
-        lambda x:
-            f"{x:+,.0f}"
-    )
-
-    table[
-        "PUT Chg OI"
-    ] = table[
-        "PUT Chg OI"
-    ].map(
-        lambda x:
-            f"{x:+,.0f}"
-    )
-
-    table[
-        "CALL IV"
-    ] = table[
-        "CALL IV"
-    ].map(
-        lambda x:
-            f"{x:.2f}%"
-    )
-
-    table[
-        "PUT IV"
-    ] = table[
-        "PUT IV"
-    ].map(
-        lambda x:
-            f"{x:.2f}%"
-    )
-
-    table[
-        "CALL PoP"
-    ] = table[
-        "CALL PoP"
-    ].map(
-        lambda x:
-            f"{x:.0f}%"
-    )
-
-    table[
-        "PUT PoP"
-    ] = table[
-        "PUT PoP"
-    ].map(
-        lambda x:
-            f"{x:.0f}%"
-    )
-
-    table[
-        "STRIKE"
-    ] = table[
-        "STRIKE"
-    ].map(
-        lambda x:
-            f"{x:.0f}"
-    )
-
-    st.dataframe(
-        table,
-        use_container_width=True,
-        hide_index=True,
-        height=520,
-    )
-
-    # --------------------------------------------------------
-    # DATA QUALITY
-    # --------------------------------------------------------
-
-    st.markdown(
-        '<div class="section-title">'
-        '🔍 Data & Signal Quality'
-        '</div>',
-        unsafe_allow_html=True,
-    )
-
-    q1, q2, q3 = (
-        st.columns(3)
-    )
-
-    with q1:
-
-        st.info(
-            "PoP is taken directly from "
-            "the Upstox option-chain response."
-        )
-
-    with q2:
-
-        st.info(
-            "OI, Change OI, IV, Delta and "
-            "Volume come from the live option chain."
-        )
-
-    with q3:
-
-        st.info(
-            "The app can return NO TRADE "
-            "when signals conflict or liquidity is poor."
-        )
-
-    # --------------------------------------------------------
-    # TIMESTAMPS
-    # --------------------------------------------------------
-
-    st.markdown(
-        f"""
-        <div class="footer-bar">
-
-            🔄 Last successful refresh:
-            <b>
-                {result["app_fetch_time"]}
-            </b>
-
-            &nbsp; • &nbsp;
-
-            Underlying last trade:
-            <b>
-                {result[
-                    "underlying_last_trade_time"
-                ]}
-            </b>
-
-            &nbsp; • &nbsp;
-
-            Auto refresh every
-            <b>30 seconds</b>
-
-            <br><br>
-
-            This application is for educational
-            and analytical purposes only.
-            It does not place orders and is not
-            a recommendation to buy or sell securities.
-
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
-
-
-# ============================================================
-# AUTO REFRESH
-# ============================================================
-
-def refresh_analysis():
-
-    if not st.session_state.active_symbol:
-
-        return
-
-    try:
-
-        result, chain_df = run_analysis(
-
-            st.session_state.active_symbol,
-
-            st.session_state.active_risk,
-
-        )
-
-        st.session_state.active_result = (
-            result
-        )
-
-        st.session_state.active_chain = (
-            chain_df
-        )
-
-        st.session_state.last_error = ""
-
-        st.session_state.last_successful_refresh = (
-            now_ist()
-        )
-
-    except Exception as e:
-
-        # Keep previous successful data
-        # if a temporary refresh fails.
-
-        st.session_state.last_error = (
-            str(e)
-        )
-
-
-# ============================================================
-# MAIN DISPLAY
+# MAIN LIVE ANALYSIS AREA
 # ============================================================
 
 fragment = getattr(
     st,
     "fragment",
-    None,
+    None
 )
 
 
@@ -3925,36 +3570,29 @@ if fragment:
     )
     def live_analysis_area():
 
+        if st.session_state.active_symbol:
+
+            refresh_analysis()
+
         if (
             st.session_state.active_result
             is not None
         ):
 
-            refresh_analysis()
+            display_analysis(
+                st.session_state.active_result,
+                st.session_state.active_chain,
+            )
 
-            if (
+            if st.session_state.last_error:
 
-                st.session_state.active_result
-                is not None
-
-                and
-
-                st.session_state.active_chain
-                is not None
-
-            ):
-
-                display_analysis(
-
-                    st.session_state.active_result,
-
-                    st.session_state.active_chain,
-
+                st.warning(
+                    "Latest automatic refresh "
+                    "could not update the data: "
+                    f"{st.session_state.last_error}"
                 )
 
-        elif (
-            st.session_state.last_error
-        ):
+        elif st.session_state.last_error:
 
             st.error(
                 st.session_state.last_error
@@ -3964,63 +3602,69 @@ if fragment:
 
             st.markdown(
                 """
-                <div class="stock-hero"
-                     style="
-                     text-align:center;
-                     padding:55px 25px;
-                     ">
+<div class="stock-hero"
+     style="
+        text-align:center;
+        padding:55px 25px;
+     ">
 
-                    <div style="
-                        font-size:45px;
-                    ">
-                        📈
-                    </div>
+    <div style="font-size:45px;">
+        📈
+    </div>
 
-                    <div class="stock-name"
-                         style="
-                         font-size:25px;
-                         margin-top:10px;
-                         ">
-                        READY FOR ANALYSIS
-                    </div>
+    <div class="stock-name"
+         style="
+            font-size:25px;
+            margin-top:10px;
+         ">
 
-                    <div class="stock-subtitle"
-                         style="
-                         margin-top:8px;
-                         ">
-                        Enter a stock or index on
-                        the left and click Analyze.
-                    </div>
+        READY FOR ANALYSIS
 
-                </div>
-                """,
+    </div>
+
+    <div class="stock-subtitle"
+         style="
+            margin-top:8px;
+         ">
+
+        Enter a stock or index on the left
+        and click Analyze.
+
+    </div>
+
+</div>
+""",
                 unsafe_allow_html=True,
             )
 
     live_analysis_area()
 
+
 else:
 
-    # Fallback for older Streamlit
+    if st.session_state.active_symbol:
+
+        refresh_analysis()
 
     if (
         st.session_state.active_result
         is not None
     ):
 
-        refresh_analysis()
-
         display_analysis(
-
             st.session_state.active_result,
-
             st.session_state.active_chain,
-
         )
 
-    elif (
-        st.session_state.last_error
-    ):
+        if st.session_state.last_error:
+
+            st.warning(
+                "Latest refresh could not "
+                "update the data: "
+                f"{st.session_state.last_error}"
+            )
+
+    elif st.session_state.last_error:
 
         st.error(
             st.session_state.last_error
@@ -4030,35 +3674,37 @@ else:
 
         st.markdown(
             """
-            <div class="stock-hero"
-                 style="
-                 text-align:center;
-                 padding:55px 25px;
-                 ">
+<div class="stock-hero"
+     style="
+        text-align:center;
+        padding:55px 25px;
+     ">
 
-                <div style="
-                    font-size:45px;
-                ">
-                    📈
-                </div>
+    <div style="font-size:45px;">
+        📈
+    </div>
 
-                <div class="stock-name"
-                     style="
-                     font-size:25px;
-                     margin-top:10px;
-                     ">
-                    READY FOR ANALYSIS
-                </div>
+    <div class="stock-name"
+         style="
+            font-size:25px;
+            margin-top:10px;
+         ">
 
-                <div class="stock-subtitle"
-                     style="
-                     margin-top:8px;
-                     ">
-                    Enter a stock or index on
-                    the left and click Analyze.
-                </div>
+        READY FOR ANALYSIS
 
-            </div>
-            """,
+    </div>
+
+    <div class="stock-subtitle"
+         style="
+            margin-top:8px;
+         ">
+
+        Enter a stock or index on the left
+        and click Analyze.
+
+    </div>
+
+</div>
+""",
             unsafe_allow_html=True,
         )
