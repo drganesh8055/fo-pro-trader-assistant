@@ -414,6 +414,10 @@ def normalize_chain(rows):
             "option_greeks"
         ) or {}
 
+        # ----------------------------------------------------
+        # OI
+        # ----------------------------------------------------
+
         call_oi = float(
             call_md.get("oi") or 0
         )
@@ -440,6 +444,19 @@ def normalize_chain(rows):
             put_prev_oi
         )
 
+        # ----------------------------------------------------
+        # PROBABILITY OF PROFIT
+        # Upstox provides this directly in option_greeks.pop
+        # ----------------------------------------------------
+
+        ce_pop = float(
+            call_g.get("pop") or 0
+        )
+
+        pe_pop = float(
+            put_g.get("pop") or 0
+        )
+
         records.append({
 
             "strike": float(
@@ -450,7 +467,9 @@ def normalize_chain(rows):
                 spot or 0
             ),
 
+            # =================================================
             # CALL
+            # =================================================
 
             "ce_ltp": float(
                 call_md.get("ltp") or 0
@@ -474,6 +493,8 @@ def normalize_chain(rows):
                 call_g.get("delta") or 0
             ),
 
+            "ce_pop": ce_pop,
+
             "ce_bid": float(
                 call_md.get("bid_price") or 0
             ),
@@ -486,7 +507,9 @@ def normalize_chain(rows):
                 "instrument_key"
             ),
 
+            # =================================================
             # PUT
+            # =================================================
 
             "pe_ltp": float(
                 put_md.get("ltp") or 0
@@ -509,6 +532,8 @@ def normalize_chain(rows):
             "pe_delta": float(
                 put_g.get("delta") or 0
             ),
+
+            "pe_pop": pe_pop,
 
             "pe_bid": float(
                 put_md.get("bid_price") or 0
@@ -660,7 +685,9 @@ def analyze_chain(
 
     reasons = []
 
+    # --------------------------------------------------------
     # PCR
+    # --------------------------------------------------------
 
     if pcr >= 1.20:
 
@@ -686,7 +713,9 @@ def analyze_chain(
 
         bear += 5
 
-    # Change OI
+    # --------------------------------------------------------
+    # CHANGE OI
+    # --------------------------------------------------------
 
     if put_chg_oi > call_chg_oi * 1.10:
 
@@ -704,7 +733,9 @@ def analyze_chain(
             "Near-spot call OI addition is stronger."
         )
 
-    # Volume
+    # --------------------------------------------------------
+    # VOLUME
+    # --------------------------------------------------------
 
     if put_volume > call_volume * 1.15:
 
@@ -722,7 +753,9 @@ def analyze_chain(
             "Call-side option volume is stronger near spot."
         )
 
-    # OI wall
+    # --------------------------------------------------------
+    # OI WALL
+    # --------------------------------------------------------
 
     if put_wall < spot:
 
@@ -752,7 +785,9 @@ def analyze_chain(
             "Largest call OI wall is at/below spot."
         )
 
-    # Clamp
+    # --------------------------------------------------------
+    # CLAMP
+    # --------------------------------------------------------
 
     bull = min(
         bull,
@@ -786,9 +821,9 @@ def analyze_chain(
         bear
     )
 
-    # --------------------------------------------------------
+    # ========================================================
     # ACTION
-    # --------------------------------------------------------
+    # ========================================================
 
     if (
         strength >= 70
@@ -857,6 +892,10 @@ def analyze_chain(
 
             iv = float(
                 selected["ce_iv"]
+            )
+
+            pop = float(
+                selected["ce_pop"]
             )
 
             oi = float(
@@ -930,6 +969,10 @@ def analyze_chain(
 
             iv = float(
                 selected["pe_iv"]
+            )
+
+            pop = float(
+                selected["pe_pop"]
             )
 
             oi = float(
@@ -1006,6 +1049,8 @@ def analyze_chain(
 
             "iv": 0,
 
+            "pop": 0,
+
             "oi": 0,
 
             "chg_oi": 0,
@@ -1052,6 +1097,17 @@ def analyze_chain(
 
         reasons.append(
             f"Option spread is too wide ({spread:.1f}%)."
+        )
+
+    # ========================================================
+    # POP QUALITY CHECK
+    # ========================================================
+
+    if pop <= 0:
+
+        reasons.append(
+            "Upstox did not provide a valid Probability of Profit "
+            "for the selected option."
         )
 
     # ========================================================
@@ -1119,6 +1175,22 @@ def analyze_chain(
         )
 
     # ========================================================
+    # ENTRY STATUS
+    # ========================================================
+
+    if action == "TRADE CANDIDATE":
+
+        entry_status = "ENTER NOW / CONFIRM TRIGGER"
+
+    elif action == "WATCH":
+
+        entry_status = "WAIT FOR CONFIRMATION"
+
+    else:
+
+        entry_status = "NO TRADE"
+
+    # ========================================================
     # RETURN
     # ========================================================
 
@@ -1166,6 +1238,9 @@ def analyze_chain(
         "iv":
             iv,
 
+        "pop":
+            pop,
+
         "oi":
             oi,
 
@@ -1198,6 +1273,9 @@ def analyze_chain(
 
         "trigger":
             trigger,
+
+        "entry_status":
+            entry_status,
 
         "reasons":
             reasons
@@ -1462,7 +1540,8 @@ if analyze_button:
                 "💰 Trade Plan"
             )
 
-            t1, t2, t3, t4, t5, t6 = st.columns(6)
+            # First row
+            t1, t2, t3, t4 = st.columns(4)
 
             t1.metric(
                 "Action",
@@ -1484,18 +1563,62 @@ if analyze_button:
             )
 
             t4.metric(
+                "Probability of Profit",
+                (
+                    f"{result['pop']:.2f}%"
+                    if result["pop"] > 0
+                    else "N/A"
+                )
+            )
+
+            # Second row
+            t5, t6, t7, t8 = st.columns(4)
+
+            t5.metric(
                 "Stop Loss",
                 f"₹{result['sl']:.2f}"
             )
 
-            t5.metric(
+            t6.metric(
                 "Target 1",
                 f"₹{result['t1']:.2f}"
             )
 
-            t6.metric(
+            t7.metric(
                 "Target 2",
                 f"₹{result['t2']:.2f}"
+            )
+
+            t8.metric(
+                "Entry Status",
+                result["entry_status"]
+            )
+
+            # Third row
+            t9, t10, t11, t12 = st.columns(4)
+
+            t9.metric(
+                "Delta",
+                f"{result['delta']:.3f}"
+            )
+
+            t10.metric(
+                "IV",
+                f"{result['iv']:.2f}%"
+            )
+
+            t11.metric(
+                "Expiry",
+                result["expiry"]
+            )
+
+            t12.metric(
+                "Signal Strength",
+                (
+                    f"{result['bull']}/100"
+                    if result["side"] == "CE"
+                    else f"{result['bear']}/100"
+                )
             )
 
             st.info(
@@ -1503,6 +1626,28 @@ if analyze_button:
                 f"₹{result['trigger']:,.2f} "
                 f"with the selected option maintaining liquidity."
             )
+
+            # ------------------------------------------------
+            # IMPORTANT PO P EXPLANATION
+            # ------------------------------------------------
+
+            if result["pop"] > 0:
+
+                st.info(
+                    f"📊 **Probability of Profit: "
+                    f"{result['pop']:.2f}%**\n\n"
+                    "This is the Probability of Profit supplied "
+                    "by Upstox for the selected option. It should "
+                    "not be treated as a guarantee of profit and "
+                    "does not indicate how large the profit may be."
+                )
+
+            else:
+
+                st.warning(
+                    "Probability of Profit is currently unavailable "
+                    "from Upstox for the selected option."
+                )
 
             st.write(
                 "**Exit plan:** Book partial profit at Target 1. "
@@ -1528,7 +1673,7 @@ if analyze_button:
                 f"{result['side']}"
             )
 
-        o1, o2, o3, o4, o5, o6, o7 = st.columns(7)
+        o1, o2, o3, o4, o5, o6, o7, o8 = st.columns(8)
 
         o1.metric(
             "Strike",
@@ -1550,21 +1695,30 @@ if analyze_button:
         )
 
         o4.metric(
+            "PoP",
+            (
+                f"{result['pop']:.2f}%"
+                if result["pop"] > 0
+                else "N/A"
+            )
+        )
+
+        o5.metric(
             "Delta",
             f"{result['delta']:.3f}"
         )
 
-        o5.metric(
+        o6.metric(
             "IV",
             f"{result['iv']:.2f}%"
         )
 
-        o6.metric(
+        o7.metric(
             "OI",
             f"{result['oi']:,.0f}"
         )
 
-        o7.metric(
+        o8.metric(
             "Chg OI",
             f"{result['chg_oi']:,.0f}"
         )
@@ -1649,32 +1803,40 @@ if analyze_button:
                 display["ce_delta"].round(3)
             )
 
+            display["CE PoP"] = (
+                display["ce_pop"].round(2)
+            )
+
             display["Strike"] = (
                 display["strike"].round(2)
             )
 
-            display["PE LTP"] = (
-                display["pe_ltp"].round(2)
-            )
-
-            display["PE OI"] = (
-                display["pe_oi"].round(0)
-            )
-
-            display["PE Chg OI"] = (
-                display["pe_chg_oi"].round(0)
-            )
-
-            display["PE Vol"] = (
-                display["pe_volume"].round(0)
+            display["PE Delta"] = (
+                display["pe_delta"].round(3)
             )
 
             display["PE IV"] = (
                 display["pe_iv"].round(2)
             )
 
-            display["PE Delta"] = (
-                display["pe_delta"].round(3)
+            display["PE PoP"] = (
+                display["pe_pop"].round(2)
+            )
+
+            display["PE Vol"] = (
+                display["pe_volume"].round(0)
+            )
+
+            display["PE Chg OI"] = (
+                display["pe_chg_oi"].round(0)
+            )
+
+            display["PE OI"] = (
+                display["pe_oi"].round(0)
+            )
+
+            display["PE LTP"] = (
+                display["pe_ltp"].round(2)
             )
 
             final_columns = [
@@ -1685,9 +1847,11 @@ if analyze_button:
                 "CE Vol",
                 "CE IV",
                 "CE Delta",
+                "CE PoP",
 
                 "Strike",
 
+                "PE PoP",
                 "PE Delta",
                 "PE IV",
                 "PE Vol",
@@ -1722,8 +1886,14 @@ if analyze_button:
             )
 
             st.write(
-                "Delta and IV are taken from the Upstox "
-                "option-chain response."
+                "Delta, IV and Probability of Profit are taken "
+                "from the Upstox option-chain response."
+            )
+
+            st.write(
+                "Probability of Profit is shown separately from "
+                "the Bull/Bear directional score. The app does "
+                "not convert its signal score into a fake probability."
             )
 
             st.write(
