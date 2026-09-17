@@ -14,238 +14,126 @@ st.set_page_config(
 )
 
 # ============================================================
-# CUSTOM CSS
+# CSS
 # ============================================================
 
-st.markdown("""
-<style>
-
-    /* --------------------------------------------------------
-       GLOBAL
-    -------------------------------------------------------- */
-
-    .stApp {
-        background: #f7f9fc;
-    }
+st.markdown(
+    """
+    <style>
 
     .block-container {
-        padding-top: 1.2rem;
+        padding-top: 1.5rem;
         padding-bottom: 2rem;
         max-width: 1450px;
     }
 
-    /* --------------------------------------------------------
-       HEADER
-    -------------------------------------------------------- */
-
-    .main-header {
-        width: 100%;
-        padding: 18px 25px;
-        border-radius: 14px;
+    .app-header {
         background: white;
+        padding: 20px 24px;
+        border-radius: 14px;
         border: 1px solid #e5e7eb;
         margin-bottom: 20px;
-        box-shadow: 0 2px 8px rgba(0,0,0,0.04);
     }
 
-    .main-title {
+    .app-title {
         font-size: 30px;
         font-weight: 800;
         color: #111827;
         line-height: 1.2;
-        white-space: nowrap;
     }
 
-    .main-subtitle {
+    .app-subtitle {
         font-size: 14px;
         color: #6b7280;
-        margin-top: 5px;
+        margin-top: 6px;
     }
 
-    /* --------------------------------------------------------
-       SIDEBAR
-       -------------------------------------------------------- */
-
-    section[data-testid="stSidebar"] {
-        background: #ffffff;
-        border-right: 1px solid #e5e7eb;
-    }
-
-    section[data-testid="stSidebar"] .block-container {
-        padding-top: 1.4rem;
-        padding-left: 1.2rem;
-        padding-right: 1.2rem;
-    }
-
-    .sidebar-title {
-        font-size: 22px;
-        font-weight: 800;
-        color: #111827;
-        margin-bottom: 4px;
-    }
-
-    .sidebar-subtitle {
-        font-size: 13px;
-        color: #6b7280;
-        margin-bottom: 20px;
-    }
-
-    .input-label {
-        font-size: 13px;
-        font-weight: 700;
-        color: #374151;
-        margin-bottom: 5px;
-    }
-
-    /* --------------------------------------------------------
-       READY SCREEN
-       -------------------------------------------------------- */
-
-    .ready-container {
-        min-height: 570px;
+    .ready-box {
         background: white;
         border: 1px solid #e5e7eb;
         border-radius: 18px;
-        display: flex;
-        flex-direction: column;
-        align-items: center;
-        justify-content: center;
+        padding: 100px 30px;
         text-align: center;
-        box-shadow: 0 3px 12px rgba(0,0,0,0.04);
-        padding: 40px;
+        min-height: 500px;
     }
 
     .ready-icon {
-        font-size: 72px;
-        line-height: 1;
-        margin-bottom: 18px;
+        font-size: 65px;
     }
 
     .ready-title {
         font-size: 30px;
         font-weight: 800;
+        margin-top: 15px;
         color: #111827;
-        margin-bottom: 10px;
     }
 
-    .ready-subtitle {
-        font-size: 16px;
+    .ready-text {
         color: #6b7280;
-        max-width: 550px;
-        line-height: 1.6;
+        font-size: 16px;
+        margin-top: 10px;
     }
 
-    /* --------------------------------------------------------
-       SECTION HEADERS
-       -------------------------------------------------------- */
-
-    .section-title {
-        font-size: 21px;
-        font-weight: 800;
-        color: #111827;
-        margin-top: 8px;
-        margin-bottom: 12px;
-    }
-
-    /* --------------------------------------------------------
-       CARDS
-       -------------------------------------------------------- */
-
-    .info-card {
+    .card {
         background: white;
         border: 1px solid #e5e7eb;
         border-radius: 14px;
-        padding: 18px;
+        padding: 20px;
         margin-bottom: 15px;
-        box-shadow: 0 2px 8px rgba(0,0,0,0.03);
     }
 
-    .metric-label {
-        font-size: 12px;
-        color: #6b7280;
-        font-weight: 600;
-    }
-
-    .metric-value {
-        font-size: 23px;
+    .card-title {
+        font-size: 20px;
         font-weight: 800;
         color: #111827;
-        margin-top: 3px;
     }
 
-    /* --------------------------------------------------------
-       TRADE SIGNAL
-       -------------------------------------------------------- */
-
-    .trade-card {
-        background: white;
-        border: 1px solid #e5e7eb;
-        border-radius: 16px;
-        padding: 24px;
-        margin-bottom: 18px;
-        box-shadow: 0 3px 12px rgba(0,0,0,0.04);
-    }
-
-    .trade-action {
-        font-size: 28px;
-        font-weight: 900;
-        color: #111827;
-    }
-
-    .trade-description {
-        color: #6b7280;
+    .card-subtitle {
         font-size: 14px;
+        color: #6b7280;
         margin-top: 5px;
     }
 
-    /* --------------------------------------------------------
-       STATUS
-       -------------------------------------------------------- */
-
-    .status-box {
-        border-radius: 12px;
-        padding: 15px 18px;
-        background: #f8fafc;
-        border: 1px solid #e5e7eb;
-        margin-bottom: 15px;
+    .signal {
+        font-size: 28px;
+        font-weight: 800;
+        color: #111827;
     }
 
-    /* --------------------------------------------------------
-       BUTTONS
-       -------------------------------------------------------- */
-
-    .stButton > button {
-        border-radius: 9px;
-        font-weight: 700;
-        min-height: 42px;
+    .signal-description {
+        font-size: 14px;
+        color: #6b7280;
+        margin-top: 5px;
     }
 
-    /* --------------------------------------------------------
-       TABLE
-       -------------------------------------------------------- */
-
-    .dataframe {
-        border-radius: 10px;
-        overflow: hidden;
+    .section-heading {
+        font-size: 21px;
+        font-weight: 800;
+        color: #111827;
+        margin-top: 10px;
+        margin-bottom: 10px;
     }
 
-</style>
-""", unsafe_allow_html=True)
+    </style>
+    """,
+    unsafe_allow_html=True
+)
 
 # ============================================================
 # HEADER
 # ============================================================
 
-st.markdown("""
-<div class="main-header">
-    <div class="main-title">
-        📈 F&O Pro Trader Assistant
+st.markdown(
+    """
+    <div class="app-header">
+        <div class="app-title">📈 F&O Pro Trader Assistant</div>
+        <div class="app-subtitle">
+            Options market analysis • Entry • Stop Loss • Target • Exit
+        </div>
     </div>
-    <div class="main-subtitle">
-        Options market analysis • Entry • Stop Loss • Target • Exit
-    </div>
-</div>
-""", unsafe_allow_html=True)
+    """,
+    unsafe_allow_html=True
+)
 
 # ============================================================
 # SESSION STATE
@@ -254,11 +142,171 @@ st.markdown("""
 if "analyzed" not in st.session_state:
     st.session_state.analyzed = False
 
-if "selected_symbol" not in st.session_state:
-    st.session_state.selected_symbol = ""
+if "symbol" not in st.session_state:
+    st.session_state.symbol = ""
 
-if "risk_profile" not in st.session_state:
-    st.session_state.risk_profile = "Balanced"
+if "risk" not in st.session_state:
+    st.session_state.risk = "Balanced"
+
+
+# ============================================================
+# SYMBOL NORMALIZATION
+# ============================================================
+
+symbol_aliases = {
+    "HDFC": "HDFCBANK",
+    "HDFC BANK": "HDFCBANK",
+    "HDFC BANK LTD": "HDFCBANK",
+    "KOTAK": "KOTAKBANK",
+    "KOTAK BANK": "KOTAKBANK",
+    "ICICI": "ICICIBANK",
+    "SBI": "SBIN",
+    "BHARTI": "BHARTIARTL",
+    "AIRTEL": "BHARTIARTL",
+    "NIFTY 50": "NIFTY",
+    "NIFTY50": "NIFTY",
+    "BANK NIFTY": "BANKNIFTY",
+    "BANKNIFTY": "BANKNIFTY"
+}
+
+
+def normalize_symbol(value):
+    value = value.strip().upper()
+
+    if value in symbol_aliases:
+        return symbol_aliases[value]
+
+    return value
+
+
+# ============================================================
+# MARKET DATA
+# ============================================================
+
+market_data = {
+
+    "NIFTY": {
+        "spot": 25200,
+        "pcr": 1.08,
+        "rsi": 58,
+        "trend": "Bullish",
+        "momentum": "Positive",
+        "volume": "Above Normal",
+        "call_wall": 25300,
+        "put_wall": 25000
+    },
+
+    "BANKNIFTY": {
+        "spot": 57500,
+        "pcr": 1.02,
+        "rsi": 55,
+        "trend": "Bullish",
+        "momentum": "Positive",
+        "volume": "Normal",
+        "call_wall": 58000,
+        "put_wall": 57000
+    },
+
+    "HDFCBANK": {
+        "spot": 1950,
+        "pcr": 1.06,
+        "rsi": 55,
+        "trend": "Bullish",
+        "momentum": "Positive",
+        "volume": "Normal",
+        "call_wall": 2000,
+        "put_wall": 1900
+    },
+
+    "KOTAKBANK": {
+        "spot": 420,
+        "pcr": 0.96,
+        "rsi": 56,
+        "trend": "Bullish",
+        "momentum": "Positive",
+        "volume": "Above Normal",
+        "call_wall": 430,
+        "put_wall": 410
+    },
+
+    "RELIANCE": {
+        "spot": 1400,
+        "pcr": 1.10,
+        "rsi": 57,
+        "trend": "Bullish",
+        "momentum": "Positive",
+        "volume": "Above Normal",
+        "call_wall": 1450,
+        "put_wall": 1380
+    },
+
+    "ICICIBANK": {
+        "spot": 1450,
+        "pcr": 1.03,
+        "rsi": 54,
+        "trend": "Bullish",
+        "momentum": "Positive",
+        "volume": "Normal",
+        "call_wall": 1500,
+        "put_wall": 1400
+    },
+
+    "SBIN": {
+        "spot": 900,
+        "pcr": 1.00,
+        "rsi": 53,
+        "trend": "Sideways",
+        "momentum": "Neutral",
+        "volume": "Normal",
+        "call_wall": 920,
+        "put_wall": 880
+    },
+
+    "INFY": {
+        "spot": 1500,
+        "pcr": 0.98,
+        "rsi": 52,
+        "trend": "Sideways",
+        "momentum": "Neutral",
+        "volume": "Normal",
+        "call_wall": 1550,
+        "put_wall": 1470
+    },
+
+    "TCS": {
+        "spot": 3100,
+        "pcr": 1.01,
+        "rsi": 51,
+        "trend": "Sideways",
+        "momentum": "Neutral",
+        "volume": "Normal",
+        "call_wall": 3200,
+        "put_wall": 3050
+    },
+
+    "BHARTIARTL": {
+        "spot": 1850,
+        "pcr": 1.07,
+        "rsi": 56,
+        "trend": "Bullish",
+        "momentum": "Positive",
+        "volume": "Above Normal",
+        "call_wall": 1900,
+        "put_wall": 1800
+    },
+
+    "INDUSTOWER": {
+        "spot": 382,
+        "pcr": 1.04,
+        "rsi": 54,
+        "trend": "Bullish",
+        "momentum": "Positive",
+        "volume": "Normal",
+        "call_wall": 390,
+        "put_wall": 375
+    }
+}
+
 
 # ============================================================
 # SIDEBAR
@@ -266,65 +314,48 @@ if "risk_profile" not in st.session_state:
 
 with st.sidebar:
 
-    st.markdown("""
-    <div class="sidebar-title">
-        🔎 Analyze Instrument
-    </div>
-    <div class="sidebar-subtitle">
-        Enter an NSE stock or index available in F&O.
-    </div>
-    """, unsafe_allow_html=True)
+    st.markdown("### 🔎 Analyze Instrument")
 
-    st.markdown(
-        '<div class="input-label">Stock / Index</div>',
-        unsafe_allow_html=True
+    st.caption(
+        "Enter an NSE stock or index available in F&O."
     )
 
-    symbol = st.text_input(
+    entered_symbol = st.text_input(
         "Stock / Index",
-        value=st.session_state.selected_symbol,
-        placeholder="Example: KOTAKBANK",
-        label_visibility="collapsed"
-    )
-
-    st.markdown(
-        '<div class="input-label" style="margin-top:15px;">Risk Profile</div>',
-        unsafe_allow_html=True
+        value=st.session_state.symbol,
+        placeholder="Enter symbol e.g. HDFCBANK",
+        label_visibility="visible"
     )
 
     risk = st.selectbox(
         "Risk Profile",
-        ["Conservative", "Balanced", "Aggressive"],
-        index=["Conservative", "Balanced", "Aggressive"].index(
-            st.session_state.risk_profile
-        ),
-        label_visibility="collapsed"
+        [
+            "Conservative",
+            "Balanced",
+            "Aggressive"
+        ],
+        index=[
+            "Conservative",
+            "Balanced",
+            "Aggressive"
+        ].index(st.session_state.risk)
     )
 
-    st.markdown("<br>", unsafe_allow_html=True)
-
-    analyze_clicked = st.button(
+    analyze = st.button(
         "🔍 Analyze",
-        use_container_width=True,
-        type="primary"
+        type="primary",
+        use_container_width=True
     )
 
-    # --------------------------------------------------------
-    # QUICK SELECT
-    # --------------------------------------------------------
+    st.markdown("---")
 
-    st.markdown("<br>", unsafe_allow_html=True)
-
-    st.markdown(
-        '<div class="input-label">⚡ Quick Select</div>',
-        unsafe_allow_html=True
-    )
+    st.markdown("### ⚡ Quick Select")
 
     quick_symbols = [
         "NIFTY",
         "BANKNIFTY",
-        "KOTAKBANK",
         "HDFCBANK",
+        "KOTAKBANK",
         "RELIANCE",
         "ICICIBANK",
         "SBIN",
@@ -337,225 +368,110 @@ with st.sidebar:
 
         if st.button(
             item,
-            key=f"quick_{item}",
+            key="quick_" + item,
             use_container_width=True
         ):
-            st.session_state.selected_symbol = item
-            st.session_state.analyzed = False
+
+            st.session_state.symbol = item
+            st.session_state.risk = risk
+            st.session_state.analyzed = True
             st.rerun()
 
+
 # ============================================================
-# PROCESS ANALYZE
+# ANALYZE BUTTON
 # ============================================================
 
-if analyze_clicked:
+if analyze:
 
-    clean_symbol = symbol.strip().upper()
-
-    if clean_symbol:
-
-        st.session_state.selected_symbol = clean_symbol
-        st.session_state.risk_profile = risk
-        st.session_state.analyzed = True
-
-    else:
+    if not entered_symbol.strip():
 
         st.warning("Please enter a stock or index.")
 
+    else:
+
+        st.session_state.symbol = normalize_symbol(
+            entered_symbol
+        )
+
+        st.session_state.risk = risk
+        st.session_state.analyzed = True
+
+        st.rerun()
+
+
 # ============================================================
-# MAIN AREA — READY SCREEN
+# READY SCREEN
 # ============================================================
 
 if not st.session_state.analyzed:
 
-    st.markdown("""
-    <div class="ready-container">
+    st.markdown(
+        """
+        <div class="ready-box">
 
-        <div class="ready-icon">
-            📈
+            <div class="ready-icon">📈</div>
+
+            <div class="ready-title">
+                READY FOR ANALYSIS
+            </div>
+
+            <div class="ready-text">
+                Enter a stock or index on the left
+                and click Analyze.
+            </div>
+
         </div>
-
-        <div class="ready-title">
-            READY FOR ANALYSIS
-        </div>
-
-        <div class="ready-subtitle">
-            Enter a stock or index in the left panel,
-            select your risk profile, and click
-            <b>Analyze</b> to view the F&O setup.
-        </div>
-
-    </div>
-    """, unsafe_allow_html=True)
+        """,
+        unsafe_allow_html=True
+    )
 
     st.stop()
 
-# ============================================================
-# SYMBOL
-# ============================================================
-
-symbol = st.session_state.selected_symbol
-risk = st.session_state.risk_profile
 
 # ============================================================
-# DEMO / FALLBACK MARKET DATA
+# GET SYMBOL
 # ============================================================
 
-# These values are used only as fallback data.
-# Replace this section with live NSE / broker API data later.
+symbol = normalize_symbol(
+    st.session_state.symbol
+)
 
-market_data = {
+risk = st.session_state.risk
 
-    "NIFTY": {
-        "spot": 25200,
-        "pcr": 1.08,
-        "oi_call": "25,300",
-        "oi_put": "25,000",
-        "rsi": 58,
-        "momentum": "Positive",
-        "trend": "Bullish",
-        "volume": "Above Normal"
-    },
-
-    "BANKNIFTY": {
-        "spot": 57500,
-        "pcr": 1.02,
-        "oi_call": "58,000",
-        "oi_put": "57,000",
-        "rsi": 55,
-        "momentum": "Positive",
-        "trend": "Bullish",
-        "volume": "Normal"
-    },
-
-    "KOTAKBANK": {
-        "spot": 420,
-        "pcr": 0.96,
-        "oi_call": "430",
-        "oi_put": "410",
-        "rsi": 56,
-        "momentum": "Positive",
-        "trend": "Bullish",
-        "volume": "Above Normal"
-    },
-
-    "INDUSTOWER": {
-        "spot": 382,
-        "pcr": 1.04,
-        "oi_call": "390",
-        "oi_put": "375",
-        "rsi": 54,
-        "momentum": "Positive",
-        "trend": "Bullish",
-        "volume": "Normal"
-    },
-
-    "RELIANCE": {
-        "spot": 1400,
-        "pcr": 1.10,
-        "oi_call": "1450",
-        "oi_put": "1380",
-        "rsi": 57,
-        "momentum": "Positive",
-        "trend": "Bullish",
-        "volume": "Above Normal"
-    },
-
-    "HDFCBANK": {
-        "spot": 1950,
-        "pcr": 1.06,
-        "oi_call": "2000",
-        "oi_put": "1900",
-        "rsi": 55,
-        "momentum": "Positive",
-        "trend": "Bullish",
-        "volume": "Normal"
-    },
-
-    "ICICIBANK": {
-        "spot": 1450,
-        "pcr": 1.03,
-        "oi_call": "1500",
-        "oi_put": "1400",
-        "rsi": 54,
-        "momentum": "Positive",
-        "trend": "Bullish",
-        "volume": "Normal"
-    },
-
-    "SBIN": {
-        "spot": 900,
-        "pcr": 1.00,
-        "oi_call": "920",
-        "oi_put": "880",
-        "rsi": 53,
-        "momentum": "Neutral",
-        "trend": "Sideways",
-        "volume": "Normal"
-    },
-
-    "INFY": {
-        "spot": 1500,
-        "pcr": 0.98,
-        "oi_call": "1550",
-        "oi_put": "1470",
-        "rsi": 52,
-        "momentum": "Neutral",
-        "trend": "Sideways",
-        "volume": "Normal"
-    },
-
-    "TCS": {
-        "spot": 3100,
-        "pcr": 1.01,
-        "oi_call": "3200",
-        "oi_put": "3050",
-        "rsi": 51,
-        "momentum": "Neutral",
-        "trend": "Sideways",
-        "volume": "Normal"
-    },
-
-    "BHARTIARTL": {
-        "spot": 1850,
-        "pcr": 1.07,
-        "oi_call": "1900",
-        "oi_put": "1800",
-        "rsi": 56,
-        "momentum": "Positive",
-        "trend": "Bullish",
-        "volume": "Above Normal"
-    }
-}
 
 # ============================================================
-# DEFAULT DATA FOR UNKNOWN SYMBOL
+# CHECK SYMBOL
 # ============================================================
 
-if symbol in market_data:
+if symbol not in market_data:
 
-    data = market_data[symbol]
+    st.error(
+        f"'{symbol}' is not currently available in the analysis list."
+    )
 
-else:
+    st.info(
+        "Try HDFCBANK, KOTAKBANK, RELIANCE, ICICIBANK, "
+        "SBIN, INFY, TCS, BHARTIARTL, NIFTY or BANKNIFTY."
+    )
 
-    data = {
-        "spot": 1000,
-        "pcr": 1.00,
-        "oi_call": "ATM + 50",
-        "oi_put": "ATM - 50",
-        "rsi": 50,
-        "momentum": "Neutral",
-        "trend": "Sideways",
-        "volume": "Normal"
-    }
+    st.stop()
+
 
 # ============================================================
-# SIMPLE SIGNAL ENGINE
+# LOAD DATA
 # ============================================================
+
+data = market_data[symbol]
 
 spot = float(data["spot"])
 pcr = float(data["pcr"])
 rsi = float(data["rsi"])
+
+
+# ============================================================
+# ANALYSIS ENGINE
+# ============================================================
 
 score = 0
 
@@ -565,17 +481,20 @@ if data["trend"] == "Bullish":
 elif data["trend"] == "Bearish":
     score -= 2
 
+
 if data["momentum"] == "Positive":
     score += 1
 
 elif data["momentum"] == "Negative":
     score -= 1
 
-if pcr > 1.05:
+
+if pcr >= 1.05:
     score += 1
 
-elif pcr < 0.95:
+elif pcr <= 0.95:
     score -= 1
+
 
 if rsi >= 55:
     score += 1
@@ -583,8 +502,9 @@ if rsi >= 55:
 elif rsi <= 45:
     score -= 1
 
+
 # ============================================================
-# ACTION
+# SIGNAL
 # ============================================================
 
 if score >= 3:
@@ -602,8 +522,9 @@ else:
     action = "NO TRADE"
     bias = "Neutral"
 
+
 # ============================================================
-# ENTRY / SL / TARGET
+# TRADE PLAN
 # ============================================================
 
 if action == "CALL BUY":
@@ -611,213 +532,191 @@ if action == "CALL BUY":
     strike = round(spot / 50) * 50
 
     entry = spot
-    sl = spot * 0.985
+    stop_loss = spot * 0.985
     target = spot * 1.03
 
+    option_type = "CE"
+
+
 elif action == "PUT BUY":
 
     strike = round(spot / 50) * 50
 
     entry = spot
-    sl = spot * 1.015
+    stop_loss = spot * 1.015
     target = spot * 0.97
+
+    option_type = "PE"
+
 
 else:
 
     strike = round(spot / 50) * 50
 
     entry = spot
-    sl = spot
-    target = spot
+    stop_loss = None
+    target = None
+
+    option_type = "-"
+
 
 # ============================================================
-# MAIN TITLE
+# PAGE TITLE
 # ============================================================
 
 st.markdown(
-    f"""
-    <div class="section-title">
-        📊 {symbol} — F&O Analysis
-    </div>
-    """,
-    unsafe_allow_html=True
+    f"## 📊 {symbol} — F&O Analysis"
 )
 
+
 # ============================================================
-# TOP STATUS
+# MARKET STATUS
 # ============================================================
 
 if action == "CALL BUY":
 
-    status_text = "Bullish setup detected"
+    st.success(
+        f"Market Bias: {bias}  |  Signal: CALL BUY"
+    )
 
 elif action == "PUT BUY":
 
-    status_text = "Bearish setup detected"
+    st.error(
+        f"Market Bias: {bias}  |  Signal: PUT BUY"
+    )
 
 else:
 
-    status_text = "Market conditions are not strong enough for a trade"
+    st.warning(
+        "Market Bias: Neutral  |  "
+        "Signal: Market conditions are not strong enough for a trade"
+    )
+
+
+# ============================================================
+# TRADE SIGNAL
+# ============================================================
 
 st.markdown(
-    f"""
-    <div class="status-box">
-        <b>Market Bias:</b> {bias}
-        &nbsp;&nbsp; | &nbsp;&nbsp;
-        <b>Signal:</b> {status_text}
+    '<div class="card">',
+    unsafe_allow_html=True
+)
+
+st.markdown(
+    f'<div class="signal">{action}</div>',
+    unsafe_allow_html=True
+)
+
+st.markdown(
+    """
+    <div class="signal-description">
+        Suggested setup based on the available market factors.
     </div>
     """,
     unsafe_allow_html=True
 )
 
-# ============================================================
-# TRADE SIGNAL CARD
-# ============================================================
+st.markdown("</div>", unsafe_allow_html=True)
 
-st.markdown(
-    f"""
-    <div class="trade-card">
-
-        <div class="trade-action">
-            {action}
-        </div>
-
-        <div class="trade-description">
-            Suggested setup based on the current analysis factors.
-        </div>
-
-    </div>
-    """,
-    unsafe_allow_html=True
-)
 
 # ============================================================
 # KEY METRICS
 # ============================================================
 
+st.markdown(
+    '<div class="section-heading">📊 Market Snapshot</div>',
+    unsafe_allow_html=True
+)
+
 c1, c2, c3, c4, c5 = st.columns(5)
 
 with c1:
-
-    st.markdown(
-        f"""
-        <div class="info-card">
-            <div class="metric-label">SPOT PRICE</div>
-            <div class="metric-value">₹{spot:,.2f}</div>
-        </div>
-        """,
-        unsafe_allow_html=True
+    st.metric(
+        "SPOT PRICE",
+        f"₹{spot:,.2f}"
     )
 
 with c2:
-
-    st.markdown(
-        f"""
-        <div class="info-card">
-            <div class="metric-label">PCR</div>
-            <div class="metric-value">{pcr:.2f}</div>
-        </div>
-        """,
-        unsafe_allow_html=True
+    st.metric(
+        "PCR",
+        f"{pcr:.2f}"
     )
 
 with c3:
-
-    st.markdown(
-        f"""
-        <div class="info-card">
-            <div class="metric-label">RSI</div>
-            <div class="metric-value">{rsi}</div>
-        </div>
-        """,
-        unsafe_allow_html=True
+    st.metric(
+        "RSI",
+        f"{rsi:.1f}"
     )
 
 with c4:
-
-    st.markdown(
-        f"""
-        <div class="info-card">
-            <div class="metric-label">TREND</div>
-            <div class="metric-value">{data["trend"]}</div>
-        </div>
-        """,
-        unsafe_allow_html=True
+    st.metric(
+        "TREND",
+        data["trend"]
     )
 
 with c5:
-
-    st.markdown(
-        f"""
-        <div class="info-card">
-            <div class="metric-label">VOLUME</div>
-            <div class="metric-value">{data["volume"]}</div>
-        </div>
-        """,
-        unsafe_allow_html=True
+    st.metric(
+        "VOLUME",
+        data["volume"]
     )
+
 
 # ============================================================
 # TRADE PLAN
 # ============================================================
 
 st.markdown(
-    '<div class="section-title">🎯 Trade Plan</div>',
+    '<div class="section-heading">🎯 Trade Plan</div>',
     unsafe_allow_html=True
 )
 
-p1, p2, p3, p4 = st.columns(4)
+t1, t2, t3, t4, t5 = st.columns(5)
 
-with p1:
-
+with t1:
     st.metric(
         "Action",
         action
     )
 
-with p2:
-
+with t2:
     st.metric(
-        "Reference Price",
+        "Strike",
+        f"{strike:.0f}"
+    )
+
+with t3:
+    st.metric(
+        "Entry",
         f"₹{entry:,.2f}"
     )
 
-with p3:
+with t4:
 
-    if action == "CALL BUY":
-
-        sl_display = f"₹{sl:,.2f}"
-
-    elif action == "PUT BUY":
-
-        sl_display = f"₹{sl:,.2f}"
-
+    if stop_loss is None:
+        sl_text = "—"
     else:
-
-        sl_display = "—"
+        sl_text = f"₹{stop_loss:,.2f}"
 
     st.metric(
         "Stop Loss",
-        sl_display
+        sl_text
     )
 
-with p4:
+with t5:
 
-    if action in ["CALL BUY", "PUT BUY"]:
-
-        target_display = f"₹{target:,.2f}"
-
+    if target is None:
+        target_text = "—"
     else:
-
-        target_display = "—"
+        target_text = f"₹{target:,.2f}"
 
     st.metric(
         "Target",
-        target_display
+        target_text
     )
 
+
 # ============================================================
-# OPTION CHAIN / MARKET ANALYSIS
+# TABS
 # ============================================================
 
 tab1, tab2, tab3, tab4 = st.tabs(
@@ -829,13 +728,14 @@ tab1, tab2, tab3, tab4 = st.tabs(
     ]
 )
 
+
 # ============================================================
 # TAB 1
 # ============================================================
 
 with tab1:
 
-    st.markdown("### Suggested Setup")
+    st.subheader("Suggested Setup")
 
     if action == "NO TRADE":
 
@@ -843,31 +743,37 @@ with tab1:
             "NO TRADE — Current conditions do not provide enough confirmation."
         )
 
+        st.write(
+            "Wait for stronger alignment between trend, momentum, "
+            "PCR, RSI and volume."
+        )
+
     else:
 
-        option_type = "CE" if action == "CALL BUY" else "PE"
-
-        st.info(
+        st.success(
             f"Potential setup: {symbol} {strike} {option_type}"
         )
 
-        setup_df = pd.DataFrame(
+        trade_table = pd.DataFrame(
             {
                 "Parameter": [
                     "Instrument",
                     "Direction",
+                    "Option Type",
                     "Strike",
-                    "Entry Reference",
+                    "Entry",
                     "Stop Loss",
                     "Target",
                     "Risk Profile"
                 ],
+
                 "Value": [
                     symbol,
                     action,
+                    option_type,
                     strike,
                     f"₹{entry:,.2f}",
-                    f"₹{sl:,.2f}",
+                    f"₹{stop_loss:,.2f}",
                     f"₹{target:,.2f}",
                     risk
                 ]
@@ -875,18 +781,19 @@ with tab1:
         )
 
         st.dataframe(
-            setup_df,
+            trade_table,
             use_container_width=True,
             hide_index=True
         )
 
+
 # ============================================================
-# TAB 2
+# TAB 2 — OPTION CHAIN
 # ============================================================
 
 with tab2:
 
-    st.markdown("### Option Chain Snapshot")
+    st.subheader("Option Chain Snapshot")
 
     strikes = [
         strike - 100,
@@ -896,7 +803,7 @@ with tab2:
         strike + 100
     ]
 
-    chain = pd.DataFrame(
+    option_chain = pd.DataFrame(
         {
             "Strike": strikes,
 
@@ -935,24 +842,26 @@ with tab2:
     )
 
     st.dataframe(
-        chain,
+        option_chain,
         use_container_width=True,
         hide_index=True
     )
 
     st.caption(
-        "Option-chain values shown here are placeholder/fallback values until live market data is connected."
+        "Option-chain values will be replaced with live market data "
+        "when the live data connection is enabled."
     )
 
+
 # ============================================================
-# TAB 3
+# TAB 3 — MARKET ANALYSIS
 # ============================================================
 
 with tab3:
 
-    st.markdown("### Market Analysis")
+    st.subheader("Market Analysis")
 
-    analysis_df = pd.DataFrame(
+    analysis_table = pd.DataFrame(
         {
             "Factor": [
                 "Trend",
@@ -968,62 +877,66 @@ with tab3:
                 data["trend"],
                 data["momentum"],
                 f"{pcr:.2f}",
-                str(rsi),
+                f"{rsi:.1f}",
                 data["volume"],
-                data["oi_call"],
-                data["oi_put"]
+                data["call_wall"],
+                data["put_wall"]
             ]
         }
     )
 
     st.dataframe(
-        analysis_df,
+        analysis_table,
         use_container_width=True,
         hide_index=True
     )
 
+
 # ============================================================
-# TAB 4
+# TAB 4 — ENGINE
 # ============================================================
 
 with tab4:
 
-    st.markdown("### How the Engine Thinks")
+    st.subheader("How the Engine Thinks")
 
     st.write(
-        """
-        The analysis combines multiple market factors instead of relying
-        on a single indicator.
-        """
+        "The analysis uses multiple factors rather than relying on "
+        "a single indicator."
     )
 
     st.markdown(
         """
-        **Factors considered:**
+        **Factors considered**
 
-        - Trend direction
-        - Momentum
-        - Put/Call Ratio (PCR)
-        - RSI
-        - Volume
-        - Call Open Interest
-        - Put Open Interest
-        - Overall market bias
+        • Trend direction  
+        • Momentum  
+        • Put/Call Ratio (PCR)  
+        • RSI  
+        • Volume  
+        • Call Open Interest  
+        • Put Open Interest  
+        • Overall market bias
         """
     )
 
     st.info(
-        "The engine is designed to avoid forcing a trade when the available "
-        "signals are not sufficiently aligned."
+        f"Current analysis score: {score}"
     )
+
+    st.caption(
+        "A stronger combination of aligned factors is required before "
+        "the engine produces a trade signal."
+    )
+
 
 # ============================================================
 # FOOTER
 # ============================================================
 
-st.markdown("<br><br>", unsafe_allow_html=True)
+st.markdown("---")
 
 st.caption(
-    "F&O Pro Trader Assistant • For educational and analytical purposes. "
-    "Trade decisions should be independently verified."
+    "F&O Pro Trader Assistant • Analysis tool only • "
+    "Verify live market conditions before taking any trade."
 )
