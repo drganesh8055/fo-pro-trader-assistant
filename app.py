@@ -45,10 +45,35 @@ RISK_PROFILES = {
 
 
 # ============================================================
+# HTML RENDERER
+# ============================================================
+# IMPORTANT:
+# We use st.html() instead of st.markdown(... unsafe_allow_html)
+# for the application's custom HTML UI.
+#
+# This prevents Streamlit from displaying HTML tags literally.
+# ============================================================
+
+def render_html(html):
+    """
+    Render custom HTML using Streamlit's native HTML renderer.
+    Falls back to markdown for older Streamlit versions.
+    """
+
+    if hasattr(st, "html"):
+        st.html(html)
+    else:
+        st.markdown(
+            html,
+            unsafe_allow_html=True,
+        )
+
+
+# ============================================================
 # CUSTOM CSS
 # ============================================================
 
-st.markdown(
+render_html(
     """
 <style>
 
@@ -60,10 +85,6 @@ st.markdown(
     max-width: 1500px;
     padding-top: 1rem;
     padding-bottom: 2rem;
-}
-
-html, body, [class*="css"] {
-    font-family: Inter, Segoe UI, Arial, sans-serif;
 }
 
 .top-header {
@@ -82,7 +103,7 @@ html, body, [class*="css"] {
 
 .top-header-subtitle {
     font-size: 14px;
-    opacity: .9;
+    opacity: 0.9;
     margin-top: 5px;
 }
 
@@ -233,9 +254,28 @@ html, body, [class*="css"] {
     line-height: 1.5;
 }
 
+.market-closed-note {
+    background: #f8f9fb;
+    border: 1px solid #e2e6ec;
+    border-radius: 12px;
+    padding: 12px 15px;
+    margin-top: 12px;
+    color: #596273;
+    font-size: 13px;
+}
+
+.trade-warning {
+    background: #fff8e8;
+    border: 1px solid #f0d58c;
+    border-radius: 12px;
+    padding: 12px 15px;
+    margin-top: 12px;
+    color: #765800;
+    font-size: 13px;
+}
+
 </style>
-""",
-    unsafe_allow_html=True,
+"""
 )
 
 
@@ -243,7 +283,7 @@ html, body, [class*="css"] {
 # HEADER
 # ============================================================
 
-st.markdown(
+render_html(
     """
 <div class="top-header">
     <div class="top-header-title">
@@ -254,8 +294,7 @@ st.markdown(
         Options Analysis • Powered by Upstox
     </div>
 </div>
-""",
-    unsafe_allow_html=True,
+"""
 )
 
 
@@ -289,7 +328,6 @@ if "last_successful_refresh" not in st.session_state:
 def get_token():
 
     try:
-
         token = st.secrets["UPSTOX_ACCESS_TOKEN"]
 
         if token:
@@ -298,7 +336,6 @@ def get_token():
         return None
 
     except Exception:
-
         return None
 
 
@@ -322,7 +359,6 @@ def upstox_headers():
 def api_get(url, params=None, timeout=20):
 
     if not TOKEN:
-
         raise RuntimeError(
             "UPSTOX_ACCESS_TOKEN is missing from Streamlit Secrets."
         )
@@ -360,7 +396,6 @@ def api_get(url, params=None, timeout=20):
         )
 
     try:
-
         return response.json()
 
     except Exception:
@@ -384,7 +419,6 @@ def sf(value):
         return float(value)
 
     except Exception:
-
         return 0.0
 
 
@@ -410,7 +444,6 @@ def format_iso_ist(value):
         )
 
         if dt.tzinfo is None:
-
             dt = dt.replace(
                 tzinfo=timezone.utc
             )
@@ -422,7 +455,6 @@ def format_iso_ist(value):
         )
 
     except Exception:
-
         return str(value)
 
 
@@ -439,9 +471,7 @@ def format_ms_ist(value):
 
             if "T" in text or "-" in text:
 
-                return format_iso_ist(
-                    text
-                )
+                return format_iso_ist(text)
 
         number = float(value)
 
@@ -462,24 +492,14 @@ def format_ms_ist(value):
 
 
 def now_ist():
-
     return datetime.now(IST)
 
 
 # ============================================================
-# IMPORTANT CHANGE-OI FIX
+# CHANGE-OI FIX
 # ============================================================
 
 def ensure_change_oi_columns(df):
-
-    """
-    Ensures Change OI columns always exist.
-
-    This is the main fix for:
-
-    KeyError: ce_chg_oi
-    KeyError: pe_chg_oi
-    """
 
     df = df.copy()
 
@@ -493,7 +513,6 @@ def ensure_change_oi_columns(df):
     for col in required_columns:
 
         if col not in df.columns:
-
             df[col] = 0.0
 
         df[col] = pd.to_numeric(
@@ -502,13 +521,13 @@ def ensure_change_oi_columns(df):
         ).fillna(0.0)
 
     df["ce_chg_oi"] = (
-        df["ce_oi"]
-        - df["ce_prev_oi"]
+        df["ce_oi"] -
+        df["ce_prev_oi"]
     )
 
     df["pe_chg_oi"] = (
-        df["pe_oi"]
-        - df["pe_prev_oi"]
+        df["pe_oi"] -
+        df["pe_prev_oi"]
     )
 
     return df
@@ -520,9 +539,7 @@ def ensure_change_oi_columns(df):
 
 def find_underlying(symbol):
 
-    symbol = str(
-        symbol
-    ).strip().upper()
+    symbol = str(symbol).strip().upper()
 
     if not symbol:
 
@@ -565,11 +582,9 @@ def find_underlying(symbol):
             )
 
             if isinstance(rows, list):
-
                 candidates.extend(rows)
 
         except Exception:
-
             continue
 
     if not candidates:
@@ -598,7 +613,6 @@ def find_underlying(symbol):
     ]
 
     if exact:
-
         return exact[0]
 
     preferred = [
@@ -612,7 +626,6 @@ def find_underlying(symbol):
     ]
 
     if preferred:
-
         return preferred[0]
 
     return candidates[0]
@@ -622,9 +635,7 @@ def find_underlying(symbol):
 # MARKET QUOTE
 # ============================================================
 
-def get_full_quote_v3(
-    instrument_key
-):
+def get_full_quote_v3(instrument_key):
 
     data = api_get(
         f"{UPSTOX_BASE}/v3/market-quote/quotes",
@@ -639,10 +650,7 @@ def get_full_quote_v3(
     )
 
     if (
-        not isinstance(
-            quote_data,
-            dict
-        )
+        not isinstance(quote_data, dict)
         or not quote_data
     ):
 
@@ -651,18 +659,11 @@ def get_full_quote_v3(
         )
 
     if instrument_key in quote_data:
-
-        return quote_data[
-            instrument_key
-        ]
+        return quote_data[instrument_key]
 
     for value in quote_data.values():
 
-        if isinstance(
-            value,
-            dict
-        ):
-
+        if isinstance(value, dict):
             return value
 
     raise RuntimeError(
@@ -670,9 +671,7 @@ def get_full_quote_v3(
     )
 
 
-def extract_market_context(
-    quote
-):
+def extract_market_context(quote):
 
     last_price = sf(
         first_valid(
@@ -714,28 +713,18 @@ def extract_market_context(
         {}
     )
 
-    if isinstance(
-        ohlc,
-        list
-    ):
+    if isinstance(ohlc, list):
 
         ohlc = next(
             (
                 item
                 for item in ohlc
-                if isinstance(
-                    item,
-                    dict
-                )
+                if isinstance(item, dict)
             ),
             {},
         )
 
-    if not isinstance(
-        ohlc,
-        dict
-    ):
-
+    if not isinstance(ohlc, dict):
         ohlc = {}
 
     open_price = sf(
@@ -767,14 +756,11 @@ def extract_market_context(
         )
     )
 
-    if (
-        net_change == 0
-        and prev_close > 0
-    ):
+    if net_change == 0 and prev_close > 0:
 
         net_change = (
-            last_price
-            - prev_close
+            last_price -
+            prev_close
         )
 
     pct_change = 0.0
@@ -782,8 +768,8 @@ def extract_market_context(
     if prev_close > 0:
 
         pct_change = (
-            net_change
-            / prev_close
+            net_change /
+            prev_close
         ) * 100
 
     price_vs_open = 0.0
@@ -792,10 +778,10 @@ def extract_market_context(
 
         price_vs_open = (
             (
-                last_price
-                - open_price
-            )
-            / open_price
+                last_price -
+                open_price
+            ) /
+            open_price
         ) * 100
 
     price_vs_average = 0.0
@@ -804,10 +790,10 @@ def extract_market_context(
 
         price_vs_average = (
             (
-                last_price
-                - average_price
-            )
-            / average_price
+                last_price -
+                average_price
+            ) /
+            average_price
         ) * 100
 
     range_position = 50.0
@@ -816,56 +802,45 @@ def extract_market_context(
 
         range_position = (
             (
-                last_price
-                - low_price
-            )
-            / (
-                high_price
-                - low_price
+                last_price -
+                low_price
+            ) /
+            (
+                high_price -
+                low_price
             )
         ) * 100
 
     return {
 
         "last_price": last_price,
-
         "prev_close": prev_close,
-
         "average_price": average_price,
-
         "net_change": net_change,
-
         "pct_change": pct_change,
-
         "volume": volume,
-
         "open": open_price,
-
         "high": high_price,
-
         "low": low_price,
-
         "close": close_price,
 
-        "price_vs_open": price_vs_open,
+        "price_vs_open":
+            price_vs_open,
 
-        "price_vs_average": price_vs_average,
+        "price_vs_average":
+            price_vs_average,
 
-        "range_position": range_position,
+        "range_position":
+            range_position,
 
         "last_trade_time": first_valid(
-            quote.get(
-                "last_trade_time"
-            ),
-            quote.get(
-                "last_trade_time_ms"
-            ),
-            quote.get(
-                "timestamp"
-            ),
+            quote.get("last_trade_time"),
+            quote.get("last_trade_time_ms"),
+            quote.get("timestamp"),
         ),
 
-        "snapshot_time": now_ist(),
+        "snapshot_time":
+            now_ist(),
     }
 
 
@@ -873,9 +848,7 @@ def extract_market_context(
 # OPTION CONTRACTS
 # ============================================================
 
-def get_option_contracts(
-    underlying_key
-):
+def get_option_contracts(underlying_key):
 
     data = api_get(
         f"{UPSTOX_BASE}/v2/option/contract",
@@ -889,19 +862,13 @@ def get_option_contracts(
         []
     )
 
-    if not isinstance(
-        contracts,
-        list
-    ):
-
+    if not isinstance(contracts, list):
         return []
 
     return contracts
 
 
-def get_nearest_expiry(
-    contracts
-):
+def get_nearest_expiry(contracts):
 
     today = now_ist().date()
 
@@ -909,9 +876,7 @@ def get_nearest_expiry(
 
     for item in contracts:
 
-        expiry = item.get(
-            "expiry"
-        )
+        expiry = item.get("expiry")
 
         if not expiry:
             continue
@@ -924,17 +889,12 @@ def get_nearest_expiry(
             ).date()
 
             if date_value >= today:
-
-                dates.append(
-                    date_value
-                )
+                dates.append(date_value)
 
         except Exception:
-
             continue
 
     if not dates:
-
         return None
 
     return min(dates)
@@ -949,9 +909,7 @@ def get_option_chain(
         f"{UPSTOX_BASE}/v2/option/chain",
         params={
             "instrument_key": underlying_key,
-            "expiry_date": str(
-                expiry_date
-            ),
+            "expiry_date": str(expiry_date),
         },
     )
 
@@ -960,11 +918,7 @@ def get_option_chain(
         []
     )
 
-    if not isinstance(
-        chain,
-        list
-    ):
-
+    if not isinstance(chain, list):
         return []
 
     return chain
@@ -974,38 +928,24 @@ def get_option_chain(
 # NORMALIZE OPTION CHAIN
 # ============================================================
 
-def normalize_chain(
-    chain
-):
+def normalize_chain(chain):
 
     rows = []
 
-    if not isinstance(
-        chain,
-        list
-    ):
-
+    if not isinstance(chain, list):
         return pd.DataFrame()
 
     for item in chain:
 
-        if not isinstance(
-            item,
-            dict
-        ):
-
+        if not isinstance(item, dict):
             continue
 
         strike = sf(
-            item.get(
-                "strike_price"
-            )
+            item.get("strike_price")
         )
 
         spot = sf(
-            item.get(
-                "underlying_spot_price"
-            )
+            item.get("underlying_spot_price")
         )
 
         call_options = item.get(
@@ -1018,18 +958,10 @@ def normalize_chain(
             {}
         )
 
-        if not isinstance(
-            call_options,
-            dict
-        ):
-
+        if not isinstance(call_options, dict):
             call_options = {}
 
-        if not isinstance(
-            put_options,
-            dict
-        ):
-
+        if not isinstance(put_options, dict):
             put_options = {}
 
         call_market = call_options.get(
@@ -1052,109 +984,55 @@ def normalize_chain(
             {}
         )
 
-        if not isinstance(
-            call_market,
-            dict
-        ):
-
+        if not isinstance(call_market, dict):
             call_market = {}
 
-        if not isinstance(
-            put_market,
-            dict
-        ):
-
+        if not isinstance(put_market, dict):
             put_market = {}
 
-        if not isinstance(
-            call_greeks,
-            dict
-        ):
-
+        if not isinstance(call_greeks, dict):
             call_greeks = {}
 
-        if not isinstance(
-            put_greeks,
-            dict
-        ):
-
+        if not isinstance(put_greeks, dict):
             put_greeks = {}
 
         ce_prev_oi = first_valid(
-
-            call_market.get(
-                "prev_oi"
-            ),
-
-            call_market.get(
-                "previous_oi"
-            ),
-
-            call_market.get(
-                "prev_open_interest"
-            ),
+            call_market.get("prev_oi"),
+            call_market.get("previous_oi"),
+            call_market.get("prev_open_interest"),
         )
 
         pe_prev_oi = first_valid(
-
-            put_market.get(
-                "prev_oi"
-            ),
-
-            put_market.get(
-                "previous_oi"
-            ),
-
-            put_market.get(
-                "prev_open_interest"
-            ),
+            put_market.get("prev_oi"),
+            put_market.get("previous_oi"),
+            put_market.get("prev_open_interest"),
         )
 
         ce_pop = first_valid(
-
-            call_greeks.get(
-                "pop"
-            ),
-
-            call_greeks.get(
-                "probability_of_profit"
-            ),
+            call_greeks.get("pop"),
+            call_greeks.get("probability_of_profit"),
         )
 
         pe_pop = first_valid(
-
-            put_greeks.get(
-                "pop"
-            ),
-
-            put_greeks.get(
-                "probability_of_profit"
-            ),
+            put_greeks.get("pop"),
+            put_greeks.get("probability_of_profit"),
         )
 
         row = {
 
             "strike": strike,
-
             "spot": spot,
 
-            # ---------------- CALL ----------------
-
+            # CALL
             "ce_ltp": sf(
                 first_valid(
-                    call_market.get(
-                        "ltp"
-                    ),
-                    call_market.get(
-                        "last_price"
-                    ),
+                    call_market.get("ltp"),
+                    call_market.get("last_price"),
                 )
             ),
 
             "ce_oi": sf(
-                call_market.get(
-                    "oi"
-                )
+                call_market.get("oi")
             ),
 
             "ce_prev_oi": sf(
@@ -1162,16 +1040,12 @@ def normalize_chain(
             ),
 
             "ce_volume": sf(
-                call_market.get(
-                    "volume"
-                )
+                call_market.get("volume")
             ),
 
             "ce_iv": sf(
                 first_valid(
-                    call_greeks.get(
-                        "iv"
-                    ),
+                    call_greeks.get("iv"),
                     call_greeks.get(
                         "implied_volatility"
                     ),
@@ -1179,23 +1053,17 @@ def normalize_chain(
             ),
 
             "ce_delta": sf(
-                call_greeks.get(
-                    "delta"
-                )
+                call_greeks.get("delta")
             ),
 
-            "ce_pop": sf(
-                ce_pop
-            ),
+            "ce_pop": sf(ce_pop),
 
             "ce_bid": sf(
                 first_valid(
                     call_market.get(
                         "bid_price"
                     ),
-                    call_market.get(
-                        "bid"
-                    ),
+                    call_market.get("bid"),
                 )
             ),
 
@@ -1204,9 +1072,7 @@ def normalize_chain(
                     call_market.get(
                         "ask_price"
                     ),
-                    call_market.get(
-                        "ask"
-                    ),
+                    call_market.get("ask"),
                 )
             ),
 
@@ -1220,23 +1086,16 @@ def normalize_chain(
                     ),
                 ),
 
-            # ---------------- PUT ----------------
-
+            # PUT
             "pe_ltp": sf(
                 first_valid(
-                    put_market.get(
-                        "ltp"
-                    ),
-                    put_market.get(
-                        "last_price"
-                    ),
+                    put_market.get("ltp"),
+                    put_market.get("last_price"),
                 )
             ),
 
             "pe_oi": sf(
-                put_market.get(
-                    "oi"
-                )
+                put_market.get("oi")
             ),
 
             "pe_prev_oi": sf(
@@ -1244,16 +1103,12 @@ def normalize_chain(
             ),
 
             "pe_volume": sf(
-                put_market.get(
-                    "volume"
-                )
+                put_market.get("volume")
             ),
 
             "pe_iv": sf(
                 first_valid(
-                    put_greeks.get(
-                        "iv"
-                    ),
+                    put_greeks.get("iv"),
                     put_greeks.get(
                         "implied_volatility"
                     ),
@@ -1261,23 +1116,17 @@ def normalize_chain(
             ),
 
             "pe_delta": sf(
-                put_greeks.get(
-                    "delta"
-                )
+                put_greeks.get("delta")
             ),
 
-            "pe_pop": sf(
-                pe_pop
-            ),
+            "pe_pop": sf(pe_pop),
 
             "pe_bid": sf(
                 first_valid(
                     put_market.get(
                         "bid_price"
                     ),
-                    put_market.get(
-                        "bid"
-                    ),
+                    put_market.get("bid"),
                 )
             ),
 
@@ -1286,9 +1135,7 @@ def normalize_chain(
                     put_market.get(
                         "ask_price"
                     ),
-                    put_market.get(
-                        "ask"
-                    ),
+                    put_market.get("ask"),
                 )
             ),
 
@@ -1305,33 +1152,20 @@ def normalize_chain(
 
         rows.append(row)
 
-    df = pd.DataFrame(
-        rows
-    )
+    df = pd.DataFrame(rows)
 
-    # ========================================================
-    # IMPORTANT FIX
-    # ========================================================
-
-    df = ensure_change_oi_columns(
-        df
-    )
-
-    return df
+    return ensure_change_oi_columns(df)
 
 
 # ============================================================
 # MARKET STATUS
 # ============================================================
 
-def get_market_status(
-    last_trade_time=None
-):
+def get_market_status(last_trade_time=None):
 
     now = now_ist()
 
     if now.weekday() >= 5:
-
         return "MARKET CLOSED"
 
     market_open = now.replace(
@@ -1348,11 +1182,7 @@ def get_market_status(
         microsecond=0,
     )
 
-    if (
-        now < market_open
-        or now > market_close
-    ):
-
+    if now < market_open or now > market_close:
         return "MARKET CLOSED"
 
     if last_trade_time:
@@ -1366,37 +1196,25 @@ def get_market_status(
                 str
             ):
 
-                text = (
-                    last_trade_time
-                    .strip()
-                )
+                text = last_trade_time.strip()
 
                 if "T" in text:
 
-                    trade_dt = (
-                        datetime.fromisoformat(
-                            text.replace(
-                                "Z",
-                                "+00:00",
-                            )
+                    trade_dt = datetime.fromisoformat(
+                        text.replace(
+                            "Z",
+                            "+00:00",
                         )
                     )
 
-                    if (
-                        trade_dt.tzinfo
-                        is None
-                    ):
+                    if trade_dt.tzinfo is None:
 
-                        trade_dt = (
-                            trade_dt.replace(
-                                tzinfo=timezone.utc
-                            )
+                        trade_dt = trade_dt.replace(
+                            tzinfo=timezone.utc
                         )
 
-                    trade_dt = (
-                        trade_dt.astimezone(
-                            IST
-                        )
+                    trade_dt = trade_dt.astimezone(
+                        IST
                     )
 
             else:
@@ -1405,27 +1223,22 @@ def get_market_status(
                     last_trade_time
                 )
 
-                trade_dt = (
-                    datetime.fromtimestamp(
-                        number / 1000,
-                        tz=timezone.utc,
-                    ).astimezone(
-                        IST
-                    )
-                )
+                trade_dt = datetime.fromtimestamp(
+                    number / 1000,
+                    tz=timezone.utc,
+                ).astimezone(IST)
 
             if trade_dt is not None:
 
                 age = (
-                    now - trade_dt
+                    now -
+                    trade_dt
                 ).total_seconds()
 
                 if age > 600:
-
                     return "DATA STALE"
 
         except Exception:
-
             pass
 
     return "MARKET OPEN"
@@ -1437,7 +1250,7 @@ def get_market_status(
 
 def analyze_chain(
     df,
-    market
+    market,
 ):
 
     if df.empty:
@@ -1446,15 +1259,10 @@ def analyze_chain(
             "Option chain returned no usable rows."
         )
 
-    # IMPORTANT FIX
-    df = ensure_change_oi_columns(
-        df
-    )
+    df = ensure_change_oi_columns(df)
 
     spot = sf(
-        market.get(
-            "last_price"
-        )
+        market.get("last_price")
     )
 
     if spot <= 0:
@@ -1464,7 +1272,8 @@ def analyze_chain(
         )
 
     df["atm_distance"] = (
-        df["strike"] - spot
+        df["strike"] -
+        spot
     ).abs()
 
     atm_row = df.loc[
@@ -1475,19 +1284,14 @@ def analyze_chain(
         atm_row["strike"]
     )
 
-    total_call_oi = (
-        df["ce_oi"].sum()
-    )
-
-    total_put_oi = (
-        df["pe_oi"].sum()
-    )
+    total_call_oi = df["ce_oi"].sum()
+    total_put_oi = df["pe_oi"].sum()
 
     if total_call_oi > 0:
 
         pcr = (
-            total_put_oi
-            / total_call_oi
+            total_put_oi /
+            total_call_oi
         )
 
     else:
@@ -1511,8 +1315,8 @@ def analyze_chain(
     )
 
     near = df[
-        df["atm_distance"]
-        <= spot * 0.03
+        df["atm_distance"] <=
+        spot * 0.03
     ].copy()
 
     if near.empty:
@@ -1527,10 +1331,7 @@ def analyze_chain(
 
     reasons = []
 
-    # --------------------------------------------------------
     # PCR
-    # --------------------------------------------------------
-
     if pcr >= 1.20:
 
         bull += 9
@@ -1539,10 +1340,7 @@ def analyze_chain(
             f"PCR {pcr:.2f} indicates stronger Put OI support."
         )
 
-    elif (
-        pcr <= 0.80
-        and pcr > 0
-    ):
+    elif pcr <= 0.80 and pcr > 0:
 
         bear += 9
 
@@ -1550,22 +1348,11 @@ def analyze_chain(
             f"PCR {pcr:.2f} indicates stronger Call-side OI."
         )
 
-    # --------------------------------------------------------
     # CHANGE OI
-    # --------------------------------------------------------
+    near_put_change = near["pe_chg_oi"].sum()
+    near_call_change = near["ce_chg_oi"].sum()
 
-    near_put_change = (
-        near["pe_chg_oi"].sum()
-    )
-
-    near_call_change = (
-        near["ce_chg_oi"].sum()
-    )
-
-    if (
-        near_put_change
-        > near_call_change
-    ):
+    if near_put_change > near_call_change:
 
         bull += 8
 
@@ -1573,10 +1360,7 @@ def analyze_chain(
             "Near-ATM Put Change OI is stronger than Call Change OI."
         )
 
-    elif (
-        near_call_change
-        > near_put_change
-    ):
+    elif near_call_change > near_put_change:
 
         bear += 8
 
@@ -1584,22 +1368,11 @@ def analyze_chain(
             "Near-ATM Call Change OI is stronger than Put Change OI."
         )
 
-    # --------------------------------------------------------
     # VOLUME
-    # --------------------------------------------------------
+    near_put_volume = near["pe_volume"].sum()
+    near_call_volume = near["ce_volume"].sum()
 
-    near_put_volume = (
-        near["pe_volume"].sum()
-    )
-
-    near_call_volume = (
-        near["ce_volume"].sum()
-    )
-
-    if (
-        near_put_volume
-        > near_call_volume * 1.15
-    ):
+    if near_put_volume > near_call_volume * 1.15:
 
         bull += 7
 
@@ -1607,10 +1380,7 @@ def analyze_chain(
             "Near-ATM Put volume is stronger than Call volume."
         )
 
-    elif (
-        near_call_volume
-        > near_put_volume * 1.15
-    ):
+    elif near_call_volume > near_put_volume * 1.15:
 
         bear += 7
 
@@ -1618,10 +1388,7 @@ def analyze_chain(
             "Near-ATM Call volume is stronger than Put volume."
         )
 
-    # --------------------------------------------------------
     # SUPPORT / RESISTANCE
-    # --------------------------------------------------------
-
     if put_support < spot:
 
         bull += 5
@@ -1638,14 +1405,9 @@ def analyze_chain(
             f"Call OI resistance is above spot near {call_resistance:.2f}."
         )
 
-    # --------------------------------------------------------
     # PRICE MOMENTUM
-    # --------------------------------------------------------
-
     pct_change = sf(
-        market.get(
-            "pct_change"
-        )
+        market.get("pct_change")
     )
 
     if pct_change > 0.50:
@@ -1665,45 +1427,33 @@ def analyze_chain(
         )
 
     price_vs_open = sf(
-        market.get(
-            "price_vs_open"
-        )
+        market.get("price_vs_open")
     )
 
     if price_vs_open > 0.30:
-
         bull += 5
 
     elif price_vs_open < -0.30:
-
         bear += 5
 
     price_vs_average = sf(
-        market.get(
-            "price_vs_average"
-        )
+        market.get("price_vs_average")
     )
 
     if price_vs_average > 0.30:
-
         bull += 4
 
     elif price_vs_average < -0.30:
-
         bear += 4
 
     range_position = sf(
-        market.get(
-            "range_position"
-        )
+        market.get("range_position")
     )
 
     if range_position >= 70:
-
         bull += 4
 
     elif range_position <= 30:
-
         bear += 4
 
     bull = min(
@@ -1725,19 +1475,11 @@ def analyze_chain(
         bear
     )
 
-    if (
-        maximum >= 72
-        and gap >= 14
-    ):
+    if maximum >= 72 and gap >= 14:
 
-        decision = (
-            "TRADE CANDIDATE"
-        )
+        decision = "TRADE CANDIDATE"
 
-    elif (
-        maximum >= 62
-        and gap >= 8
-    ):
+    elif maximum >= 62 and gap >= 8:
 
         decision = "WATCH"
 
@@ -1746,56 +1488,38 @@ def analyze_chain(
         decision = "NO TRADE"
 
     if bull > bear:
-
         direction = "CALL"
 
     elif bear > bull:
-
         direction = "PUT"
 
     else:
-
         direction = "CALL"
 
-    market_status = (
-        get_market_status(
-            market.get(
-                "last_trade_time"
-            )
-        )
+    market_status = get_market_status(
+        market.get("last_trade_time")
     )
 
     if market_status == "MARKET CLOSED":
-
         decision = "MARKET CLOSED"
 
     elif market_status == "DATA STALE":
-
         decision = "DATA STALE"
 
-    # --------------------------------------------------------
     # OPTION SELECTION
-    # --------------------------------------------------------
-
-    if direction == "CALL":
-
-        prefix = "ce"
-
-    else:
-
-        prefix = "pe"
+    prefix = (
+        "ce"
+        if direction == "CALL"
+        else "pe"
+    )
 
     candidates = df[
         (
-            df[
-                f"{prefix}_ltp"
-            ] > 0
+            df[f"{prefix}_ltp"] > 0
         )
         &
         (
-            df[
-                f"{prefix}_volume"
-            ] > 0
+            df[f"{prefix}_volume"] > 0
         )
         &
         (
@@ -1824,47 +1548,30 @@ def analyze_chain(
     trade_plan = {
 
         "direction": direction,
-
         "strike": atm,
-
         "entry": 0.0,
-
         "sl": 0.0,
-
         "target1": 0.0,
-
         "target2": 0.0,
-
         "pop": 0.0,
-
         "delta": 0.0,
-
         "iv": 0.0,
-
         "oi": 0.0,
-
         "chg_oi": 0.0,
-
         "volume": 0.0,
-
         "bid": 0.0,
-
         "ask": 0.0,
-
         "spread_pct": 0.0,
-
         "trigger": spot,
-
         "entry_status": "WAIT",
-
         "instrument_key": None,
     }
 
     if not candidates.empty:
 
         candidates["distance"] = (
-            candidates["strike"]
-            - spot
+            candidates["strike"] -
+            spot
         ).abs()
 
         candidates = candidates.sort_values(
@@ -1881,27 +1588,18 @@ def analyze_chain(
         selected = candidates.iloc[0]
 
         ltp = sf(
-            selected[
-                f"{prefix}_ltp"
-            ]
+            selected[f"{prefix}_ltp"]
         )
 
         bid = sf(
-            selected[
-                f"{prefix}_bid"
-            ]
+            selected[f"{prefix}_bid"]
         )
 
         ask = sf(
-            selected[
-                f"{prefix}_ask"
-            ]
+            selected[f"{prefix}_ask"]
         )
 
-        if (
-            bid > 0
-            and ask > 0
-        ):
+        if bid > 0 and ask > 0:
 
             entry = (
                 bid + ask
@@ -1910,14 +1608,13 @@ def analyze_chain(
             spread_pct = (
                 (
                     ask - bid
-                )
-                / entry
+                ) /
+                entry
             ) * 100 if entry > 0 else 0.0
 
         else:
 
             entry = ltp
-
             spread_pct = 0.0
 
         if spread_pct > 10:
@@ -1930,57 +1627,41 @@ def analyze_chain(
 
         trade_plan.update({
 
-            "direction": direction,
+            "direction":
+                direction,
 
-            "strike": sf(
-                selected[
-                    "strike"
-                ]
-            ),
+            "strike":
+                sf(selected["strike"]),
 
-            "entry": entry,
+            "entry":
+                entry,
 
-            "pop": sf(
-                selected[
-                    f"{prefix}_pop"
-                ]
-            ),
+            "pop":
+                sf(selected[f"{prefix}_pop"]),
 
-            "delta": sf(
-                selected[
-                    f"{prefix}_delta"
-                ]
-            ),
+            "delta":
+                sf(selected[f"{prefix}_delta"]),
 
-            "iv": sf(
-                selected[
-                    f"{prefix}_iv"
-                ]
-            ),
+            "iv":
+                sf(selected[f"{prefix}_iv"]),
 
-            "oi": sf(
-                selected[
-                    f"{prefix}_oi"
-                ]
-            ),
+            "oi":
+                sf(selected[f"{prefix}_oi"]),
 
-            "chg_oi": sf(
-                selected[
-                    f"{prefix}_chg_oi"
-                ]
-            ),
+            "chg_oi":
+                sf(selected[f"{prefix}_chg_oi"]),
 
-            "volume": sf(
-                selected[
-                    f"{prefix}_volume"
-                ]
-            ),
+            "volume":
+                sf(selected[f"{prefix}_volume"]),
 
-            "bid": bid,
+            "bid":
+                bid,
 
-            "ask": ask,
+            "ask":
+                ask,
 
-            "spread_pct": spread_pct,
+            "spread_pct":
+                spread_pct,
 
             "instrument_key":
                 selected[
@@ -1990,37 +1671,41 @@ def analyze_chain(
 
         if direction == "CALL":
 
-            trade_plan[
-                "trigger"
-            ] = max(
+            trade_plan["trigger"] = max(
                 spot,
                 atm
             )
 
         else:
 
-            trade_plan[
-                "trigger"
-            ] = min(
+            trade_plan["trigger"] = min(
                 spot,
                 atm
             )
 
-        if decision == "TRADE CANDIDATE":
+        if market_status == "MARKET CLOSED":
 
             trade_plan[
                 "entry_status"
-            ] = (
-                "READY — CHECK LIVE PRICE"
-            )
+            ] = "MARKET CLOSED"
+
+        elif market_status == "DATA STALE":
+
+            trade_plan[
+                "entry_status"
+            ] = "DATA STALE"
+
+        elif decision == "TRADE CANDIDATE":
+
+            trade_plan[
+                "entry_status"
+            ] = "READY — CHECK LIVE PRICE"
 
         elif decision == "WATCH":
 
             trade_plan[
                 "entry_status"
-            ] = (
-                "WAIT FOR CONFIRMATION"
-            )
+            ] = "WAIT FOR CONFIRMATION"
 
         else:
 
@@ -2031,35 +1716,19 @@ def analyze_chain(
     return {
 
         "spot": spot,
-
         "market": market,
-
         "pcr": pcr,
-
         "put_support": put_support,
-
-        "call_resistance":
-            call_resistance,
-
+        "call_resistance": call_resistance,
         "atm": atm,
-
         "bull": bull,
-
         "bear": bear,
-
         "gap": gap,
-
         "decision": decision,
-
         "direction": direction,
-
         "reasons": reasons,
-
         "trade_plan": trade_plan,
-
-        "market_status":
-            market_status,
-
+        "market_status": market_status,
         "expiry_days": None,
     }
 
@@ -2070,19 +1739,13 @@ def analyze_chain(
 
 def run_analysis(
     symbol,
-    risk_profile
+    risk_profile,
 ):
 
-    underlying = (
-        find_underlying(
-            symbol
-        )
-    )
+    underlying = find_underlying(symbol)
 
-    underlying_key = (
-        underlying.get(
-            "instrument_key"
-        )
+    underlying_key = underlying.get(
+        "instrument_key"
     )
 
     if not underlying_key:
@@ -2091,28 +1754,20 @@ def run_analysis(
             "Could not find Upstox instrument key."
         )
 
-    quote = (
-        get_full_quote_v3(
-            underlying_key
-        )
+    quote = get_full_quote_v3(
+        underlying_key
     )
 
-    market = (
-        extract_market_context(
-            quote
-        )
+    market = extract_market_context(
+        quote
     )
 
-    contracts = (
-        get_option_contracts(
-            underlying_key
-        )
+    contracts = get_option_contracts(
+        underlying_key
     )
 
-    expiry = (
-        get_nearest_expiry(
-            contracts
-        )
+    expiry = get_nearest_expiry(
+        contracts
     )
 
     if expiry is None:
@@ -2121,17 +1776,13 @@ def run_analysis(
             "Could not find a valid future option expiry."
         )
 
-    raw_chain = (
-        get_option_chain(
-            underlying_key,
-            expiry,
-        )
+    raw_chain = get_option_chain(
+        underlying_key,
+        expiry,
     )
 
-    chain_df = (
-        normalize_chain(
-            raw_chain
-        )
+    chain_df = normalize_chain(
+        raw_chain
     )
 
     if chain_df.empty:
@@ -2140,139 +1791,95 @@ def run_analysis(
             "Upstox returned an empty option chain."
         )
 
-    # ========================================================
-    # IMPORTANT FIX
-    # ========================================================
-
-    chain_df = (
-        ensure_change_oi_columns(
-            chain_df
-        )
+    chain_df = ensure_change_oi_columns(
+        chain_df
     )
 
-    result = (
-        analyze_chain(
-            chain_df,
-            market
-        )
+    result = analyze_chain(
+        chain_df,
+        market,
     )
 
-    today = (
-        now_ist().date()
-    )
+    today = now_ist().date()
 
     expiry_days = (
         expiry - today
     ).days
 
     result["symbol"] = (
-        underlying.get(
-            "trading_symbol"
-        )
-        or underlying.get(
-            "short_name"
-        )
+        underlying.get("trading_symbol")
+        or underlying.get("short_name")
         or symbol.upper()
     )
 
-    result["input_symbol"] = (
-        symbol.upper()
+    result["input_symbol"] = symbol.upper()
+
+    result["underlying_key"] = underlying_key
+
+    result["expiry"] = str(expiry)
+
+    result["expiry_days"] = expiry_days
+
+    result["snapshot_time"] = market.get(
+        "snapshot_time"
     )
 
-    result["underlying_key"] = (
-        underlying_key
+    result["last_trade_time"] = market.get(
+        "last_trade_time"
     )
 
-    result["expiry"] = str(
-        expiry
-    )
-
-    result["expiry_days"] = (
-        expiry_days
-    )
-
-    result["snapshot_time"] = (
-        market.get(
-            "snapshot_time"
-        )
-    )
-
-    result["last_trade_time"] = (
-        market.get(
-            "last_trade_time"
-        )
-    )
-
-    result["app_fetch_time"] = (
-        now_ist()
-    )
-
-    # --------------------------------------------------------
-    # RISK PROFILE
-    # --------------------------------------------------------
+    result["app_fetch_time"] = now_ist()
 
     profile = RISK_PROFILES[
         risk_profile
     ]
 
-    trade_plan = (
-        result["trade_plan"]
-    )
+    trade_plan = result[
+        "trade_plan"
+    ]
 
     entry = sf(
-        trade_plan.get(
-            "entry"
-        )
+        trade_plan.get("entry")
     )
 
     if entry > 0:
 
         trade_plan["sl"] = (
-            entry
-            * (
-                1
-                - profile["sl"]
+            entry *
+            (
+                1 -
+                profile["sl"]
             )
         )
 
         trade_plan["target1"] = (
-            entry
-            * (
-                1
-                + profile["t1"]
+            entry *
+            (
+                1 +
+                profile["t1"]
             )
         )
 
         trade_plan["target2"] = (
-            entry
-            * (
-                1
-                + profile["t2"]
+            entry *
+            (
+                1 +
+                profile["t2"]
             )
         )
 
-    result["trade_plan"] = (
-        trade_plan
-    )
+    result["trade_plan"] = trade_plan
 
-    # --------------------------------------------------------
-    # SELECTED OPTION TIMESTAMP
-    # --------------------------------------------------------
-
-    selected_key = (
-        trade_plan.get(
-            "instrument_key"
-        )
+    selected_key = trade_plan.get(
+        "instrument_key"
     )
 
     if selected_key:
 
         try:
 
-            selected_quote = (
-                get_full_quote_v3(
-                    selected_key
-                )
+            selected_quote = get_full_quote_v3(
+                selected_key
             )
 
             result[
@@ -2300,10 +1907,7 @@ def run_analysis(
             "selected_option_last_trade_time"
         ] = None
 
-    return (
-        result,
-        chain_df,
-    )
+    return result, chain_df
 
 
 # ============================================================
@@ -2315,7 +1919,6 @@ def fmt_price(value):
     value = sf(value)
 
     if value == 0:
-
         return "—"
 
     return f"₹{value:,.2f}"
@@ -2326,7 +1929,6 @@ def fmt_number(value):
     value = sf(value)
 
     if value == 0:
-
         return "—"
 
     if abs(value) >= 10_000_000:
@@ -2355,7 +1957,6 @@ def fmt_pct(value):
     value = sf(value)
 
     if value == 0:
-
         return "—"
 
     return f"{value:.2f}%"
@@ -2429,55 +2030,33 @@ def display_analysis(
     )
 
     spot = sf(
-        result.get(
-            "spot"
-        )
+        result.get("spot")
     )
 
     pct_change = sf(
-        market.get(
-            "pct_change"
-        )
+        market.get("pct_change")
     )
 
     net_change = sf(
-        market.get(
-            "net_change"
-        )
+        market.get("net_change")
     )
 
-    status_class = (
-        "status-closed"
-    )
+    status_class = "status-closed"
 
     if market_status == "MARKET OPEN":
-
-        status_class = (
-            "status-open"
-        )
+        status_class = "status-open"
 
     elif market_status == "DATA STALE":
+        status_class = "status-stale"
 
-        status_class = (
-            "status-stale"
-        )
-
-    last_trade_text = (
-        format_ms_ist(
-            result.get(
-                "last_trade_time"
-            )
-        )
+    last_trade_text = format_ms_ist(
+        result.get("last_trade_time")
     )
 
     if last_trade_text == "N/A":
 
-        last_trade_text = (
-            format_iso_ist(
-                result.get(
-                    "last_trade_time"
-                )
-            )
+        last_trade_text = format_iso_ist(
+            result.get("last_trade_time")
         )
 
     app_time = result.get(
@@ -2488,7 +2067,7 @@ def display_analysis(
     # HERO
     # ========================================================
 
-    st.markdown(
+    render_html(
         f"""
 <div class="stock-hero">
 
@@ -2535,30 +2114,29 @@ def display_analysis(
     </div>
 
 </div>
-""",
-        unsafe_allow_html=True,
+"""
     )
 
     # ========================================================
     # MARKET SNAPSHOT
     # ========================================================
 
-    st.markdown(
-        '<div class="section-title">Market Snapshot</div>',
-        unsafe_allow_html=True,
+    render_html(
+        """
+<div class="section-title">
+    Market Snapshot
+</div>
+"""
     )
 
-    snapshot_cols = st.columns(
-        5
-    )
+    snapshot_cols = st.columns(5)
 
     snapshot_items = [
 
         (
             "LIVE PRICE",
             fmt_price(spot),
-            f"{net_change:+.2f} "
-            f"({pct_change:+.2f}%)",
+            f"{net_change:+.2f} ({pct_change:+.2f}%)",
         ),
 
         (
@@ -2566,11 +2144,13 @@ def display_analysis(
             (
                 "BULLISH"
                 if result.get("bull", 0)
-                > result.get("bear", 0)
-                else "BEARISH"
+                >
+                result.get("bear", 0)
+                else
+                "BEARISH"
             ),
-            f"Bull {result.get('bull', 0)} "
-            f"/ Bear {result.get('bear', 0)}",
+            f"Bull {result.get('bull', 0)} / "
+            f"Bear {result.get('bear', 0)}",
         ),
 
         (
@@ -2582,9 +2162,7 @@ def display_analysis(
         (
             "PUT OI SUPPORT",
             fmt_price(
-                result.get(
-                    "put_support"
-                )
+                result.get("put_support")
             ),
             "Highest Put OI strike",
         ),
@@ -2592,9 +2170,7 @@ def display_analysis(
         (
             "CALL OI RESISTANCE",
             fmt_price(
-                result.get(
-                    "call_resistance"
-                )
+                result.get("call_resistance")
             ),
             "Highest Call OI strike",
         ),
@@ -2608,7 +2184,7 @@ def display_analysis(
 
         with col:
 
-            st.markdown(
+            render_html(
                 f"""
 <div class="metric-card">
 
@@ -2625,20 +2201,22 @@ def display_analysis(
     </div>
 
 </div>
-""",
-                unsafe_allow_html=True,
+"""
             )
 
     # ========================================================
     # DECISION
     # ========================================================
 
-    st.markdown(
-        '<div class="section-title">Engine Decision</div>',
-        unsafe_allow_html=True,
+    render_html(
+        """
+<div class="section-title">
+    Engine Decision
+</div>
+"""
     )
 
-    st.markdown(
+    render_html(
         f"""
 <div class="decision-card">
 
@@ -2670,17 +2248,27 @@ def display_analysis(
     </div>
 
 </div>
-""",
-        unsafe_allow_html=True,
+"""
     )
 
-    score_cols = st.columns(
-        2
-    )
+    if market_status == "MARKET CLOSED":
+
+        render_html(
+            """
+<div class="market-closed-note">
+    <b>Market is currently closed.</b>
+    The option setup shown below is based on the latest
+    available Upstox data. No live entry should be taken
+    while the market is closed.
+</div>
+"""
+        )
+
+    score_cols = st.columns(2)
 
     with score_cols[0]:
 
-        st.markdown(
+        render_html(
             f"""
 <div class="score-box">
     <b>
@@ -2688,8 +2276,7 @@ def display_analysis(
         {result.get("bull", 0)}/100
     </b>
 </div>
-""",
-            unsafe_allow_html=True,
+"""
         )
 
         st.progress(
@@ -2704,13 +2291,12 @@ def display_analysis(
                     0,
                 ),
                 100,
-            )
-            / 100
+            ) / 100
         )
 
     with score_cols[1]:
 
-        st.markdown(
+        render_html(
             f"""
 <div class="score-box">
     <b>
@@ -2718,8 +2304,7 @@ def display_analysis(
         {result.get("bear", 0)}/100
     </b>
 </div>
-""",
-            unsafe_allow_html=True,
+"""
         )
 
         st.progress(
@@ -2734,27 +2319,28 @@ def display_analysis(
                     0,
                 ),
                 100,
-            )
-            / 100
+            ) / 100
         )
 
     # ========================================================
     # TRADE PLAN
     # ========================================================
 
-    st.markdown(
-        '<div class="section-title">Trade Plan</div>',
-        unsafe_allow_html=True,
+    render_html(
+        """
+<div class="section-title">
+    Trade Plan
+</div>
+"""
     )
 
-    st.markdown(
-        '<div class="trade-plan">',
-        unsafe_allow_html=True,
+    render_html(
+        """
+<div class="trade-plan">
+"""
     )
 
-    plan_cols = st.columns(
-        6
-    )
+    plan_cols = st.columns(6)
 
     plan_items = [
 
@@ -2766,47 +2352,27 @@ def display_analysis(
 
         (
             "ENTRY",
-            fmt_price(
-                trade.get(
-                    "entry"
-                )
-            ),
+            fmt_price(trade.get("entry")),
         ),
 
         (
             "STOP LOSS",
-            fmt_price(
-                trade.get(
-                    "sl"
-                )
-            ),
+            fmt_price(trade.get("sl")),
         ),
 
         (
             "TARGET 1",
-            fmt_price(
-                trade.get(
-                    "target1"
-                )
-            ),
+            fmt_price(trade.get("target1")),
         ),
 
         (
             "TARGET 2",
-            fmt_price(
-                trade.get(
-                    "target2"
-                )
-            ),
+            fmt_price(trade.get("target2")),
         ),
 
         (
             "PoP",
-            fmt_pct(
-                trade.get(
-                    "pop"
-                )
-            ),
+            fmt_pct(trade.get("pop")),
         ),
 
     ]
@@ -2818,7 +2384,7 @@ def display_analysis(
 
         with col:
 
-            st.markdown(
+            render_html(
                 f"""
 <div class="metric-card">
 
@@ -2831,23 +2397,19 @@ def display_analysis(
     </div>
 
 </div>
-""",
-                unsafe_allow_html=True,
+"""
             )
 
-    st.markdown(
-        "<div style='height:10px'></div>",
-        unsafe_allow_html=True,
+    render_html(
+        """
+<div style="height:10px"></div>
+"""
     )
 
-    detail_cols = st.columns(
-        5
-    )
+    detail_cols = st.columns(5)
 
     delta_value = sf(
-        trade.get(
-            "delta"
-        )
+        trade.get("delta")
     )
 
     detail_items = [
@@ -2864,36 +2426,28 @@ def display_analysis(
         (
             "IV",
             fmt_pct(
-                trade.get(
-                    "iv"
-                )
+                trade.get("iv")
             ),
         ),
 
         (
             "OI",
             fmt_number(
-                trade.get(
-                    "oi"
-                )
+                trade.get("oi")
             ),
         ),
 
         (
             "CHANGE OI",
             fmt_number(
-                trade.get(
-                    "chg_oi"
-                )
+                trade.get("chg_oi")
             ),
         ),
 
         (
             "VOLUME",
             fmt_number(
-                trade.get(
-                    "volume"
-                )
+                trade.get("volume")
             ),
         ),
 
@@ -2906,7 +2460,7 @@ def display_analysis(
 
         with col:
 
-            st.markdown(
+            render_html(
                 f"""
 <div class="metric-card">
 
@@ -2919,11 +2473,10 @@ def display_analysis(
     </div>
 
 </div>
-""",
-                unsafe_allow_html=True,
+"""
             )
 
-    st.markdown(
+    render_html(
         f"""
 <div style="
     margin-top:15px;
@@ -2933,75 +2486,70 @@ def display_analysis(
 
     Entry status:
     <b>
-        {trade.get(
-            "entry_status",
-            "WAIT"
-        )}
+        {trade.get("entry_status", "WAIT")}
     </b>
 
     &nbsp; • &nbsp;
 
     Trigger:
     <b>
-        {fmt_price(
-            trade.get(
-                "trigger"
-            )
-        )}
+        {fmt_price(trade.get("trigger"))}
     </b>
 
     &nbsp; • &nbsp;
 
     Bid:
     <b>
-        {fmt_price(
-            trade.get(
-                "bid"
-            )
-        )}
+        {fmt_price(trade.get("bid"))}
     </b>
 
     &nbsp; • &nbsp;
 
     Ask:
     <b>
-        {fmt_price(
-            trade.get(
-                "ask"
-            )
-        )}
+        {fmt_price(trade.get("ask"))}
     </b>
 
     &nbsp; • &nbsp;
 
     Spread:
     <b>
-        {fmt_pct(
-            trade.get(
-                "spread_pct"
-            )
-        )}
+        {fmt_pct(trade.get("spread_pct"))}
     </b>
 
 </div>
-""",
-        unsafe_allow_html=True,
+"""
     )
 
-    st.markdown(
-        "</div>",
-        unsafe_allow_html=True,
+    if market_status == "MARKET CLOSED":
+
+        render_html(
+            """
+<div class="trade-warning">
+    <b>NO LIVE ENTRY:</b>
+    Market is closed. Treat Entry / SL / Target as
+    an analytical reference only. Re-check the option
+    premium and market conditions after the market opens.
+</div>
+"""
+        )
+
+    render_html(
+        """
+</div>
+"""
     )
 
     # ========================================================
     # REASONS
     # ========================================================
 
-    st.markdown(
-        '<div class="section-title">'
-        'Why the Engine Reached This View'
-        '</div>',
-        unsafe_allow_html=True,
+    render_html(
+        """
+<div class="section-title">
+    Why the Engine Reached This View
+</div>
+"""
     )
 
     reasons = result.get(
@@ -3017,54 +2565,46 @@ def display_analysis(
 
     for reason in reasons:
 
-        st.markdown(
+        render_html(
             f"""
 <div class="reason-box">
     • {reason}
 </div>
-""",
-            unsafe_allow_html=True,
+"""
         )
 
     # ========================================================
     # SUPPORT / RESISTANCE
     # ========================================================
 
-    st.markdown(
-        '<div class="section-title">'
-        'OI Support / Resistance'
-        '</div>',
-        unsafe_allow_html=True,
+    render_html(
+        """
+<div class="section-title">
+    OI Support / Resistance
+</div>
+"""
     )
 
-    sr_cols = st.columns(
-        3
-    )
+    sr_cols = st.columns(3)
 
     sr_items = [
 
         (
             "CURRENT PRICE",
-            fmt_price(
-                spot
-            ),
+            fmt_price(spot),
         ),
 
         (
             "PUT SUPPORT",
             fmt_price(
-                result.get(
-                    "put_support"
-                )
+                result.get("put_support")
             ),
         ),
 
         (
             "CALL RESISTANCE",
             fmt_price(
-                result.get(
-                    "call_resistance"
-                )
+                result.get("call_resistance")
             ),
         ),
 
@@ -3077,7 +2617,7 @@ def display_analysis(
 
         with col:
 
-            st.markdown(
+            render_html(
                 f"""
 <div class="metric-card">
 
@@ -3090,19 +2630,19 @@ def display_analysis(
     </div>
 
 </div>
-""",
-                unsafe_allow_html=True,
+"""
             )
 
     # ========================================================
     # LIVE OPTION CHAIN
     # ========================================================
 
-    st.markdown(
-        '<div class="section-title">'
-        'Live Option Chain'
-        '</div>',
-        unsafe_allow_html=True,
+    render_html(
+        """
+<div class="section-title">
+    Live Option Chain
+</div>
+"""
     )
 
     if (
@@ -3116,38 +2656,26 @@ def display_analysis(
 
     else:
 
-        # ====================================================
-        # IMPORTANT FIX
-        # ====================================================
+        display_df = chain_df.copy()
 
-        display_df = (
-            chain_df.copy()
-        )
-
-        display_df = (
-            ensure_change_oi_columns(
-                display_df
-            )
+        display_df = ensure_change_oi_columns(
+            display_df
         )
 
         display_df["distance"] = (
-            display_df["strike"]
-            - spot
+            display_df["strike"] -
+            spot
         ).abs()
 
         display_df = (
             display_df
-            .sort_values(
-                "distance"
-            )
+            .sort_values("distance")
             .head(15)
         )
 
         display_df = (
             display_df
-            .sort_values(
-                "strike"
-            )
+            .sort_values("strike")
         )
 
         table_df = pd.DataFrame({
@@ -3156,32 +2684,28 @@ def display_analysis(
                 display_df[
                     "ce_ltp"
                 ].map(
-                    lambda x:
-                    fmt_price(x)
+                    fmt_price
                 ),
 
             "CALL OI":
                 display_df[
                     "ce_oi"
                 ].map(
-                    lambda x:
-                    fmt_number(x)
+                    fmt_number
                 ),
 
             "CALL Chg OI":
                 display_df[
                     "ce_chg_oi"
                 ].map(
-                    lambda x:
-                    fmt_number(x)
+                    fmt_number
                 ),
 
             "CALL IV":
                 display_df[
                     "ce_iv"
                 ].map(
-                    lambda x:
-                    fmt_pct(x)
+                    fmt_pct
                 ),
 
             "STRIKE":
@@ -3196,49 +2720,44 @@ def display_analysis(
                 display_df[
                     "pe_ltp"
                 ].map(
-                    lambda x:
-                    fmt_price(x)
+                    fmt_price
                 ),
 
             "PUT OI":
                 display_df[
                     "pe_oi"
                 ].map(
-                    lambda x:
-                    fmt_number(x)
+                    fmt_number
                 ),
 
             "PUT Chg OI":
                 display_df[
                     "pe_chg_oi"
                 ].map(
-                    lambda x:
-                    fmt_number(x)
+                    fmt_number
                 ),
 
             "PUT IV":
                 display_df[
                     "pe_iv"
                 ].map(
-                    lambda x:
-                    fmt_pct(x)
+                    fmt_pct
                 ),
 
             "CALL PoP":
                 display_df[
                     "ce_pop"
                 ].map(
-                    lambda x:
-                    fmt_pct(x)
+                    fmt_pct
                 ),
 
             "PUT PoP":
                 display_df[
                     "pe_pop"
                 ].map(
-                    lambda x:
-                    fmt_pct(x)
+                    fmt_pct
                 ),
+
         })
 
         st.dataframe(
@@ -3251,7 +2770,7 @@ def display_analysis(
     # INFO
     # ========================================================
 
-    st.markdown(
+    render_html(
         """
 <div class="info-bar">
 
@@ -3274,15 +2793,14 @@ def display_analysis(
     The app does not place automatic orders.
 
 </div>
-""",
-        unsafe_allow_html=True,
+"""
     )
 
     # ========================================================
     # FOOTER
     # ========================================================
 
-    st.markdown(
+    render_html(
         f"""
 <div class="footer">
 
@@ -3294,7 +2812,7 @@ def display_analysis(
     App refresh:
     {format_iso_ist(app_time)}
 
-    <br>
+    <br><br>
 
     Educational analysis only.
     Always verify the live option price,
@@ -3302,8 +2820,7 @@ def display_analysis(
     before taking any trade.
 
 </div>
-""",
-        unsafe_allow_html=True,
+"""
     )
 
 
@@ -3324,26 +2841,17 @@ def refresh_analysis():
     )
 
     if not symbol:
-
         return
 
     try:
 
-        result, chain = (
-            run_analysis(
-                symbol,
-                risk_profile
-            )
+        result, chain = run_analysis(
+            symbol,
+            risk_profile,
         )
 
-        st.session_state.active_result = (
-            result
-        )
-
-        st.session_state.active_chain = (
-            chain
-        )
-
+        st.session_state.active_result = result
+        st.session_state.active_chain = chain
         st.session_state.last_error = ""
 
         st.session_state.last_successful_refresh = (
@@ -3352,12 +2860,7 @@ def refresh_analysis():
 
     except Exception as e:
 
-        # Keep the last successful analysis
-        # visible if a temporary refresh fails.
-
-        st.session_state.last_error = (
-            str(e)
-        )
+        st.session_state.last_error = str(e)
 
 
 # ============================================================
@@ -3370,21 +2873,30 @@ with st.sidebar:
         "## 🔎 Analyze Instrument"
     )
 
-    st.markdown(
+    render_html(
         """
 <div class="sidebar-note">
 
 Enter an NSE stock or index available in F&O.
 
-Examples:
+<br><br>
 
-KOTAKBANK, HDFCBANK, RELIANCE,
-ICICIBANK, SBIN, INFY, TCS,
-NIFTY, BANKNIFTY.
+<b>Examples:</b>
+
+<br><br>
+
+KOTAKBANK<br>
+HDFCBANK<br>
+RELIANCE<br>
+ICICIBANK<br>
+SBIN<br>
+INFY<br>
+TCS<br>
+NIFTY<br>
+BANKNIFTY
 
 </div>
-""",
-        unsafe_allow_html=True,
+"""
     )
 
     symbol_input = st.text_input(
@@ -3395,9 +2907,7 @@ NIFTY, BANKNIFTY.
 
     risk_profile = st.selectbox(
         "Risk Profile",
-        list(
-            RISK_PROFILES.keys()
-        ),
+        list(RISK_PROFILES.keys()),
         index=list(
             RISK_PROFILES.keys()
         ).index(
@@ -3433,9 +2943,7 @@ NIFTY, BANKNIFTY.
 
     ]
 
-    quick_cols = st.columns(
-        2
-    )
+    quick_cols = st.columns(2)
 
     for index, quick_symbol in enumerate(
         quick_symbols
@@ -3459,35 +2967,28 @@ NIFTY, BANKNIFTY.
                     risk_profile
                 )
 
-                st.session_state.active_result = (
-                    None
-                )
-
-                st.session_state.active_chain = (
-                    None
-                )
-
+                st.session_state.active_result = None
+                st.session_state.active_chain = None
                 st.session_state.last_error = ""
 
                 st.rerun()
 
     st.markdown("---")
 
-    st.markdown(
+    render_html(
         """
 <div class="info-bar">
 
 <b>Live Upstox data</b>
 
-<br>
+<br><br>
 
 Market quote • Option chain •
 OI • Change OI • IV • Delta •
 PoP • Volume
 
 </div>
-""",
-        unsafe_allow_html=True,
+"""
     )
 
     st.caption(
@@ -3502,8 +3003,7 @@ PoP • Volume
 if analyze_clicked:
 
     cleaned_symbol = (
-        symbol_input
-        or ""
+        symbol_input or ""
     ).strip().upper()
 
     if not cleaned_symbol:
@@ -3524,21 +3024,13 @@ if analyze_clicked:
 
         try:
 
-            result, chain = (
-                run_analysis(
-                    cleaned_symbol,
-                    risk_profile
-                )
+            result, chain = run_analysis(
+                cleaned_symbol,
+                risk_profile,
             )
 
-            st.session_state.active_result = (
-                result
-            )
-
-            st.session_state.active_chain = (
-                chain
-            )
-
+            st.session_state.active_result = result
+            st.session_state.active_chain = chain
             st.session_state.last_error = ""
 
             st.session_state.last_successful_refresh = (
@@ -3547,9 +3039,7 @@ if analyze_clicked:
 
         except Exception as e:
 
-            st.session_state.last_error = (
-                str(e)
-            )
+            st.session_state.last_error = str(e)
 
 
 # ============================================================
@@ -3565,9 +3055,7 @@ fragment = getattr(
 
 if fragment:
 
-    @fragment(
-        run_every="30s"
-    )
+    @fragment(run_every="30s")
     def live_analysis_area():
 
         if st.session_state.active_symbol:
@@ -3600,7 +3088,7 @@ if fragment:
 
         else:
 
-            st.markdown(
+            render_html(
                 """
 <div class="stock-hero"
      style="
@@ -3633,12 +3121,10 @@ if fragment:
     </div>
 
 </div>
-""",
-                unsafe_allow_html=True,
+"""
             )
 
     live_analysis_area()
-
 
 else:
 
@@ -3672,7 +3158,7 @@ else:
 
     else:
 
-        st.markdown(
+        render_html(
             """
 <div class="stock-hero"
      style="
@@ -3705,6 +3191,5 @@ else:
     </div>
 
 </div>
-""",
-            unsafe_allow_html=True,
+"""
         )
