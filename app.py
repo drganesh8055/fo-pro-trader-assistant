@@ -848,31 +848,35 @@ with st.sidebar:
     analyze = st.button("🔍 Analyze", type="primary", use_container_width=True)
     refresh = st.button("↻ Refresh Live Data", use_container_width=True)
 
-    if st_autorefresh is not None:
-        auto_refresh = st.checkbox("Auto refresh every 5 seconds", value=True)
-        if auto_refresh:
-            st_autorefresh(interval=5_000, key="upstox_ws_refresh")
-
     st.divider()
     st.markdown("### 🔔 PoP Alert Monitor")
     monitor_enabled = st.toggle(
-        "Monitor this instrument",
+        "Monitor ON / OFF",
         value=st.session_state.get("pop_monitor_enabled", False),
-        help="While this app page is open, the live data will be checked repeatedly and an alert will appear when the selected option setup reaches the PoP threshold.",
+        help="When ON, the app refreshes the live option chain every 5 seconds and lists every option contract whose Upstox PoP meets the selected threshold.",
     )
     st.session_state["pop_monitor_enabled"] = monitor_enabled
 
     pop_threshold = st.slider(
-        "Minimum PoP for alert",
+        "Minimum PoP",
         min_value=50,
-        max_value=80,
+        max_value=90,
         value=60,
         step=5,
         format="%d%%",
     )
     st.session_state["pop_alert_threshold"] = float(pop_threshold)
 
-    st.caption("Checks the current instrument using the same live Upstox analysis. Alerts are generated only for CALL BUY / PUT BUY setups.")
+    # The monitor itself controls the refresh cycle. This keeps the right-hand
+    # dashboard unchanged while the left-side scanner continuously refreshes
+    # when the user turns monitoring ON.
+    if monitor_enabled and st_autorefresh is not None:
+        st_autorefresh(interval=5_000, key="pop_background_monitor")
+        st.caption("🟢 Monitoring every 5 seconds")
+    elif monitor_enabled:
+        st.caption("🟢 Monitoring ON — refresh the page manually if auto-refresh is unavailable")
+    else:
+        st.caption("⚪ Monitoring OFF")
 
     st.divider()
     st.caption("LIVE DATA • Upstox V3 WebSocket + REST")
@@ -985,66 +989,100 @@ else:
 # ============================================================
 # PoP ALERT MONITOR
 # ============================================================
-# This monitor runs during the normal Streamlit reruns. It does not change
-# the trade-selection logic above. It simply watches the already-calculated
-# live plan and raises one alert when a qualifying setup first crosses the
-# configured PoP threshold.
-
-if "pop_alerted_keys" not in st.session_state:
-    st.session_state["pop_alerted_keys"] = set()
-if "pop_alert_history" not in st.session_state:
-    st.session_state["pop_alert_history"] = []
+# This is a scanner only. It does not alter the existing trade decision or
+# Trade Plan shown on the right side. When enabled, every CE/PE contract in
+# the selected live option chain is checked against the configured PoP floor.
 
 monitor_enabled = bool(st.session_state.get("pop_monitor_enabled", False))
 pop_threshold = float(st.session_state.get("pop_alert_threshold", 60))
 
-current_alert_key = None
-if (
-    monitor_enabled
-    and decision in {"CALL BUY", "PUT BUY"}
-    and best_plan
-    and np.isfinite(best_plan.get("pop", np.nan))
-    and best_plan["pop"] >= pop_threshold
-):
-    current_alert_key = (
-        symbol,
-        selected_expiry,
-        best_plan["side"],
-        float(best_plan["strike"]),
-    )
+qualifying_pop_trades = []
 
-if current_alert_key is not None:
-    if current_alert_key not in st.session_state["pop_alerted_keys"]:
-        alert = {
-            "time": datetime.now().astimezone().strftime("%d-%b %H:%M:%S"),
-            "symbol": symbol,
-            "side": decision,
-            "strike": best_plan["strike"],
-            "pop": best_plan["pop"],
-            "entry": best_plan["entry"],
-            "sl": best_plan["sl"],
-            "target1": best_plan["target1"],
-            "target2": best_plan["target2"],
-        }
-        st.session_state["pop_alerted_keys"].add(current_alert_key)
-        st.session_state["pop_alert_history"].insert(0, alert)
-        st.session_state["pop_alert_history"] = st.session_state["pop_alert_history"][:10]
-        st.toast(
-            f"🔔 {decision} alert: {symbol} {best_plan['strike']:.0f} • PoP {best_plan['pop']:.1f}%",
-            icon="🔔",
+if monitor_enabled:
+    for _, row in chain.iterrows():
+        strike = safe_float(row.get("Strike"))
+        if not np.isfinite(strike):
+            continue
+
+        for side, action in (("CE", "CALL BUY"), ("PE", "PUT BUY")):
+            pop = safe_float(row.get(f"{side} PoP"))
+            ltp = safe_float(row.get(f"{side} LTP"))
+            ask = safe_float(row.get(f"{side} Ask"))
+            delta = safe_float(row.get(f"{side} Delta"))
+            iv = safe_float(row.get(f"{side} IV"))
+            volume = safe_float(row.get(f"{side} Volume"))
+
+            if not np.isfinite(pop) or pop < pop_threshold:
+                continue
+
+            entry = ask if np.isfinite(ask) and ask > 0 else ltp
+            if not np.isfinite(entry) or entry <= 0:
+                continue
+
+            plan = build_plan(
+                row, side, spot, support, resistance, pcr, tech, risk_profile
+            )
+            if plan is None:
+                continue
+
+            qualifying_pop_trades.append(
+                {
+                    "Action": action,
+                    "Strike": strike,
+                    "PoP": pop,
+                    "Entry": plan["entry"],
+                    "SL": plan["sl"],
+                    "T1": plan["target1"],
+                    "T2": plan["target2"],
+                    "Delta": delta,
+                    "IV": iv,
+                    "Volume": volume,
+                }
+            )
+
+    qualifying_pop_trades.sort(key=lambda x: (-x["PoP"], abs(x["Strike"] - spot)))
+
+# Render ONLY inside the sidebar so the main/right dashboard is untouched.
+with st.sidebar:
+    st.markdown("### 📋 Options Meeting PoP Criteria")
+
+    if not monitor_enabled:
+        st.caption("Turn Monitor ON to scan the live option chain.")
+    elif qualifying_pop_trades:
+        st.success(
+            f"{len(qualifying_pop_trades)} option trade(s) found with PoP ≥ {pop_threshold:.0f}%"
         )
-elif current_alert_key is None:
-    # Permit a fresh alert if the same contract falls below the threshold and
-    # later qualifies again.
-    active_contracts = {
-        (symbol, selected_expiry, best_plan["side"], float(best_plan["strike"]))
-        if best_plan and best_plan.get("side") and np.isfinite(best_plan.get("strike", np.nan))
-        else None
-    }
-    st.session_state["pop_alerted_keys"] = {
-        key for key in st.session_state["pop_alerted_keys"]
-        if key in active_contracts
-    }
+
+        pop_view = pd.DataFrame(qualifying_pop_trades)
+        pop_view["Strike"] = pop_view["Strike"].map(lambda x: f"{x:,.0f}")
+        pop_view["PoP"] = pop_view["PoP"].map(lambda x: f"{x:.1f}%")
+        pop_view["Entry"] = pop_view["Entry"].map(fmt_price)
+        pop_view["SL"] = pop_view["SL"].map(fmt_price)
+        pop_view["T1"] = pop_view["T1"].map(fmt_price)
+        pop_view["T2"] = pop_view["T2"].map(fmt_price)
+        pop_view["Delta"] = pop_view["Delta"].map(
+            lambda x: f"{x:.2f}" if np.isfinite(x) else "—"
+        )
+        pop_view["IV"] = pop_view["IV"].map(
+            lambda x: f"{x:.1f}%" if np.isfinite(x) else "—"
+        )
+
+        st.dataframe(
+            pop_view[
+                ["Action", "Strike", "PoP", "Entry", "SL", "T1", "T2", "Delta", "IV"]
+            ],
+            use_container_width=True,
+            hide_index=True,
+            height=min(520, 95 + len(pop_view) * 35),
+        )
+        st.caption(
+            "Sorted by highest PoP. These are qualifying option contracts from the current selected expiry. "
+            "PoP is an estimate from Upstox, not a guarantee of profit."
+        )
+    else:
+        st.info(
+            f"No option contract in the current expiry has PoP ≥ {pop_threshold:.0f}% right now."
+        )
 
 ws_last = stream_snapshot.get("last_message_at")
 ws_status = stream_snapshot.get("status", "NOT STARTED")
@@ -1088,57 +1126,6 @@ with h3:
         else:
             st.caption("WebSocket warming up")
     st.caption(f"Expiry: {selected_expiry}")
-
-# ============================================================
-# POP ALERT STATUS
-# ============================================================
-
-if monitor_enabled:
-    st.markdown('<div class="card">', unsafe_allow_html=True)
-    st.markdown('<div class="section-title">🔔 PoP Alert Monitor</div>', unsafe_allow_html=True)
-    if current_alert_key is not None and best_plan:
-        st.success(
-            f"ALERT CONDITION MET • {decision} • {symbol} • Strike {best_plan['strike']:.0f} • "
-            f"PoP {best_plan['pop']:.1f}%"
-        )
-        a1, a2, a3, a4 = st.columns(4)
-        a1.metric("PoP", f"{best_plan['pop']:.1f}%")
-        a2.metric("Entry", fmt_price(best_plan['entry']))
-        a3.metric("Stop Loss", fmt_price(best_plan['sl']))
-        a4.metric("Target 1", fmt_price(best_plan['target1']))
-    else:
-        st.info(
-            f"Monitoring {symbol}. No CALL BUY / PUT BUY setup has reached the "
-            f"{pop_threshold:.0f}% PoP threshold yet."
-        )
-
-    history = st.session_state.get("pop_alert_history", [])
-    if history:
-        st.markdown("**Recent alerts**")
-        alert_df = pd.DataFrame(history)
-        alert_df["pop"] = alert_df["pop"].map(lambda x: f"{x:.1f}%")
-        alert_df["strike"] = alert_df["strike"].map(lambda x: f"{x:.0f}")
-        alert_df["entry"] = alert_df["entry"].map(fmt_price)
-        alert_df["sl"] = alert_df["sl"].map(fmt_price)
-        alert_df["target1"] = alert_df["target1"].map(fmt_price)
-        alert_df["target2"] = alert_df["target2"].map(fmt_price)
-        alert_df = alert_df.rename(
-            columns={
-                "time": "Time", "symbol": "Symbol", "side": "Action",
-                "strike": "Strike", "pop": "PoP", "entry": "Entry",
-                "sl": "SL", "target1": "T1", "target2": "T2",
-            }
-        )
-        st.dataframe(
-            alert_df[["Time", "Symbol", "Action", "Strike", "PoP", "Entry", "SL", "T1", "T2"]],
-            use_container_width=True,
-            hide_index=True,
-        )
-    st.caption(
-        "The monitor uses the same live Upstox data and existing trade logic. PoP is an estimate, not a guarantee. "
-        "This in-app alert works while the Streamlit page is open and refreshing."
-    )
-    st.markdown('</div>', unsafe_allow_html=True)
 
 # ============================================================
 # MARKET SNAPSHOT
