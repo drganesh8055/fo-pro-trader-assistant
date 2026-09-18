@@ -739,11 +739,330 @@ def scan_full_fno_pop_market(min_pop=75.0):
     return candidates[:5], len(universe), scanned, failed
 
 
+
+# ============================================================
+# COMMODITY MARKET SUPPORT — SEPARATE FROM NSE EQUITY F&O
+# ============================================================
+
+COMMODITY_ALIASES = {
+    "GOLD": "GOLD",
+    "GOLDM": "GOLDM",
+    "SILVER": "SILVER",
+    "SILVERM": "SILVERM",
+    "CRUDE": "CRUDEOIL",
+    "CRUDEOIL": "CRUDEOIL",
+    "NATURALGAS": "NATURALGAS",
+    "NATGAS": "NATURALGAS",
+    "COPPER": "COPPER",
+    "ZINC": "ZINC",
+    "LEAD": "LEAD",
+    "ALUMINIUM": "ALUMINIUM",
+    "ALUMINUM": "ALUMINIUM",
+    "NICKEL": "NICKEL",
+    "COTTON": "COTTON",
+}
+
+
+def alias_commodity(symbol):
+    value = str(symbol or "GOLD").strip().upper().replace(" ", "")
+    return COMMODITY_ALIASES.get(value, value)
+
+
+@st.cache_data(ttl=60, show_spinner=False)
+def search_commodity_future(symbol):
+    """Find the nearest live MCX commodity futures contract via Upstox."""
+    symbol = alias_commodity(symbol)
+
+    payload = api_get(
+        "/v2/instruments/search",
+        params={
+            "query": symbol,
+            "exchanges": "MCX",
+            "segments": "COMM",
+            "page_number": 1,
+            "records": 30,
+        },
+        timeout=30,
+    )
+
+    results = payload.get("data", [])
+    futures = []
+    today = date.today().isoformat()
+
+    for item in results:
+        if not isinstance(item, dict):
+            continue
+        if item.get("exchange") != "MCX":
+            continue
+        if item.get("instrument_type") != "FUT":
+            continue
+
+        expiry = str(item.get("expiry", ""))
+        if not expiry or expiry < today:
+            continue
+
+        underlying_symbol = str(item.get("underlying_symbol", "")).upper()
+        trading_symbol = str(item.get("trading_symbol", "")).upper()
+
+        if symbol not in underlying_symbol and symbol not in trading_symbol:
+            continue
+
+        futures.append(item)
+
+    if not futures:
+        raise UpstoxError(
+            f"No upcoming MCX futures contract found for '{symbol}'. "
+            "Try GOLD, GOLDM, SILVER, SILVERM, CRUDEOIL, NATURALGAS, "
+            "COPPER, ZINC, LEAD, ALUMINIUM or NICKEL."
+        )
+
+    futures.sort(key=lambda x: str(x.get("expiry", "9999-99-99")))
+    return futures[0]
+
+
+def build_commodity_plan(entry, tech, risk_profile, side):
+    """Build a futures trade plan without touching the equity-option logic."""
+    if not np.isfinite(entry) or entry <= 0:
+        return None
+
+    atr = tech.get("atr", entry * 0.01)
+    if not np.isfinite(atr) or atr <= 0:
+        atr = entry * 0.01
+
+    # Commodity futures use an ATR-based risk model because Upstox's
+    # MCX option-chain endpoint does not currently provide option-chain data.
+    atr_settings = {
+        "Conservative": (1.00, 1.50, 2.25),
+        "Balanced": (1.25, 2.00, 3.00),
+        "Aggressive": (1.50, 2.50, 3.75),
+    }
+    sl_atr, t1_atr, t2_atr = atr_settings[risk_profile]
+
+    if side == "BUY FUTURE":
+        sl = round(entry - atr * sl_atr, 2)
+        target1 = round(entry + atr * t1_atr, 2)
+        target2 = round(entry + atr * t2_atr, 2)
+        trigger = f"Enter only if price sustains above {fmt_price(entry)} with {tech['trend']} confirmation."
+        exit_rule = (
+            f"Exit if price falls below {fmt_price(sl)}. After Target 1, "
+            "book partial profit and trail the balance using the latest swing/ATR."
+        )
+    else:
+        sl = round(entry + atr * sl_atr, 2)
+        target1 = round(entry - atr * t1_atr, 2)
+        target2 = round(entry - atr * t2_atr, 2)
+        trigger = f"Enter only if price sustains below {fmt_price(entry)} with {tech['trend']} confirmation."
+        exit_rule = (
+            f"Exit if price rises above {fmt_price(sl)}. After Target 1, "
+            "book partial profit and trail the balance using the latest swing/ATR."
+        )
+
+    risk = abs(entry - sl)
+    rr1 = abs(target1 - entry) / max(risk, 0.01)
+    rr2 = abs(target2 - entry) / max(risk, 0.01)
+
+    return {
+        "side": side,
+        "entry": float(entry),
+        "sl": sl,
+        "target1": target1,
+        "target2": target2,
+        "rr1": rr1,
+        "rr2": rr2,
+        "trigger": trigger,
+        "exit": exit_rule,
+    }
+
+
+def render_commodity_market(symbol, risk_profile):
+    """Render an isolated MCX futures dashboard and stop before NSE logic runs."""
+    commodity = alias_commodity(symbol)
+
+    try:
+        with st.spinner(f"Fetching live MCX data for {commodity}..."):
+            contract = search_commodity_future(commodity)
+            instrument_key = contract["instrument_key"]
+            quote_data = get_quote(instrument_key)
+
+            spot = safe_float(quote_data.get("last_price"))
+            previous_close = safe_float(
+                quote_data.get("prev_close_price"),
+                spot,
+            )
+            net_change = safe_float(
+                quote_data.get("net_change"),
+                spot - previous_close,
+            )
+            change_pct = (
+                net_change / previous_close * 100
+                if previous_close
+                else 0
+            )
+
+            candles = get_daily_candles(instrument_key)
+            tech = technicals(candles, spot)
+
+    except UpstoxError as exc:
+        st.error(str(exc))
+        st.stop()
+    except Exception as exc:
+        st.error(f"Unexpected error while loading MCX data: {exc}")
+        st.stop()
+
+    if tech["trend"] == "Bullish" and tech["rsi"] < 70:
+        commodity_decision = "BUY FUTURE"
+        commodity_plan = build_commodity_plan(
+            spot, tech, risk_profile, "BUY FUTURE"
+        )
+    elif tech["trend"] == "Bearish" and tech["rsi"] > 30:
+        commodity_decision = "SELL FUTURE"
+        commodity_plan = build_commodity_plan(
+            spot, tech, risk_profile, "SELL FUTURE"
+        )
+    else:
+        commodity_decision = "NO TRADE"
+        commodity_plan = None
+
+    selected_expiry = str(contract.get("expiry", "—"))
+    trading_symbol = contract.get("trading_symbol", commodity)
+    updated = quote_data.get(
+        "timestamp",
+        datetime.now().astimezone().isoformat(),
+    )
+
+    st.markdown(
+        """
+<div class="topbar">
+    <div class="topbar-title">📊 FO PRO Trader Assistant</div>
+    <div class="topbar-sub">
+        Commodity Futures Analysis • Powered by Upstox • Live MCX data
+    </div>
+</div>
+""",
+        unsafe_allow_html=True,
+    )
+
+    h1, h2, h3 = st.columns([2.2, 1.2, 1.0])
+
+    with h1:
+        st.markdown(f"## {commodity} — MCX Commodity Analysis")
+        st.caption(f"Contract: {trading_symbol}")
+
+    with h2:
+        st.markdown("**Last Traded**")
+        st.markdown(
+            f"<span style='font-size:25px;font-weight:800'>{fmt_price(spot)}</span>",
+            unsafe_allow_html=True,
+        )
+        st.caption(f"{net_change:+.2f} ({change_pct:+.2f}%)")
+
+    with h3:
+        st.markdown("**Data Status**")
+        st.markdown("**● LIVE DATA**")
+        st.caption(f"Expiry: {selected_expiry}")
+
+    st.markdown('<div class="card">', unsafe_allow_html=True)
+    st.markdown(
+        '<div class="section-title">📊 Commodity Market Snapshot</div>',
+        unsafe_allow_html=True,
+    )
+
+    m1, m2, m3, m4, m5 = st.columns(5)
+    m1.metric("Live Price", fmt_price(spot), f"{net_change:+.2f} ({change_pct:+.2f}%)")
+    m2.metric("Bias", tech["trend"])
+    m3.metric("RSI", f"{tech['rsi']:.1f}")
+    m4.metric("EMA 20", fmt_price(tech["ema20"]))
+    m5.metric("ATR 14", fmt_price(tech["atr"]))
+    st.markdown('</div>', unsafe_allow_html=True)
+
+    st.markdown('<div class="card">', unsafe_allow_html=True)
+    st.markdown(
+        '<div class="section-title">🎯 Commodity Trade Decision</div>',
+        unsafe_allow_html=True,
+    )
+
+    if commodity_decision == "BUY FUTURE":
+        decision_class = "trade-call"
+    elif commodity_decision == "SELL FUTURE":
+        decision_class = "trade-put"
+    else:
+        decision_class = "trade-neutral"
+
+    st.markdown(
+        f'<div class="{decision_class}">Decision: {commodity_decision}</div>',
+        unsafe_allow_html=True,
+    )
+
+    if commodity_plan:
+        p1, p2, p3, p4, p5 = st.columns(5)
+        p1.metric("Entry", fmt_price(commodity_plan["entry"]))
+        p2.metric("Stop Loss", fmt_price(commodity_plan["sl"]))
+        p3.metric("Target 1", fmt_price(commodity_plan["target1"]))
+        p4.metric("Target 2", fmt_price(commodity_plan["target2"]))
+        p5.metric("R:R T2", f"1:{commodity_plan['rr2']:.2f}")
+
+        st.markdown("### Entry / Exit Rules")
+        e1, e2 = st.columns(2)
+        with e1:
+            st.markdown("**Entry Trigger**")
+            st.write(commodity_plan["trigger"])
+        with e2:
+            st.markdown("**Exit Rule**")
+            st.write(commodity_plan["exit"])
+    else:
+        st.info(
+            "NO TRADE: the commodity trend and momentum conditions are not aligned. "
+            "Wait for a clearer setup instead of forcing a futures position."
+        )
+
+    st.markdown('</div>', unsafe_allow_html=True)
+
+    st.markdown('<div class="card">', unsafe_allow_html=True)
+    st.markdown(
+        '<div class="section-title">📈 Commodity Market Analysis</div>',
+        unsafe_allow_html=True,
+    )
+
+    a1, a2, a3, a4 = st.columns(4)
+    a1.metric("EMA 20", fmt_price(tech["ema20"]))
+    a2.metric("EMA 50", fmt_price(tech["ema50"]))
+    a3.metric("RSI", f"{tech['rsi']:.1f}")
+    a4.metric("ATR 14", fmt_price(tech["atr"]))
+
+    if not candles.empty:
+        chart = candles.set_index("timestamp")["close"].tail(80)
+        st.line_chart(chart, use_container_width=True)
+
+    st.caption(
+        "MCX commodity option-chain/PoP analysis is not included here because "
+        "Upstox currently documents its Put/Call Option Chain API as unavailable "
+        "for MCX. This section therefore analyzes MCX futures only."
+    )
+    st.markdown('</div>', unsafe_allow_html=True)
+
+    st.divider()
+    st.caption(
+        f"Live Upstox snapshot • MCX {trading_symbol} • Expiry {selected_expiry} • "
+        f"Updated {updated}. For educational/decision-support use."
+    )
+
+    st.stop()
+
 # ============================================================
 # SIDEBAR
 # ============================================================
 
 with st.sidebar:
+    st.markdown("### 📊 Market")
+    market_type = st.radio(
+        "Select Market",
+        ["Equity F&O", "Commodity (MCX)"],
+        index=0,
+        key="market_type",
+    )
+
+    st.divider()
+
     st.markdown("### 🔥 Top 5 F&O PoP Scanner")
     st.caption("Scans the full NSE equity F&O market for trades with PoP > 75%.")
 
@@ -805,10 +1124,19 @@ with st.sidebar:
     st.divider()
     st.markdown("### 🔎 Analyze Instrument")
 
+    if market_type == "Commodity (MCX)":
+        symbol_label = "Commodity"
+        symbol_default = st.session_state.get("commodity_symbol", "GOLD")
+        symbol_placeholder = "e.g. GOLD, SILVER, CRUDEOIL, NATURALGAS"
+    else:
+        symbol_label = "Stock / Index"
+        symbol_default = st.session_state.get("symbol", "KOTAKBANK")
+        symbol_placeholder = "e.g. KOTAKBANK, HDFCBANK, NIFTY"
+
     symbol_input = st.text_input(
-        "Stock / Index",
-        value=st.session_state.get("symbol", "KOTAKBANK"),
-        placeholder="e.g. KOTAKBANK, HDFCBANK, NIFTY",
+        symbol_label,
+        value=symbol_default,
+        placeholder=symbol_placeholder,
         label_visibility="collapsed",
     )
 
@@ -842,8 +1170,17 @@ with st.sidebar:
     st.caption("No simulated market values are used.")
 
 if analyze:
-    st.session_state["symbol"] = alias_symbol(symbol_input)
+    if market_type == "Commodity (MCX)":
+        st.session_state["commodity_symbol"] = alias_commodity(symbol_input)
+    else:
+        st.session_state["symbol"] = alias_symbol(symbol_input)
     st.rerun()
+
+if market_type == "Commodity (MCX)":
+    commodity_symbol = alias_commodity(
+        st.session_state.get("commodity_symbol", symbol_input or "GOLD")
+    )
+    render_commodity_market(commodity_symbol, risk_profile)
 
 if refresh:
     st.cache_data.clear()
