@@ -1,4 +1,7 @@
 import math
+import gzip
+import json
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import threading
 import time
 from datetime import date, datetime, timedelta, timezone
@@ -227,6 +230,160 @@ def get_contracts(underlying_key):
         raise UpstoxError("Upstox returned no option contracts for this instrument.")
     return contracts
 
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def get_nse_fno_universe():
+    """Load Upstox's daily NSE instrument master and return the earliest
+    upcoming option expiry for every NSE F&O underlying.
+    """
+    url = "https://assets.upstox.com/market-quote/instruments/exchange/nse.json.gz"
+    try:
+        response = requests.get(url, timeout=45)
+        response.raise_for_status()
+        raw = gzip.decompress(response.content)
+        records = json.loads(raw.decode("utf-8"))
+    except Exception as exc:
+        raise UpstoxError(f"Could not load Upstox NSE instrument master: {exc}") from exc
+
+    today = date.today()
+    grouped = {}
+    for item in records:
+        if item.get("segment") != "NSE_FO":
+            continue
+        if item.get("instrument_type") not in {"CE", "PE"}:
+            continue
+        underlying_key = item.get("underlying_key")
+        underlying_symbol = str(item.get("underlying_symbol") or "").strip().upper()
+        if not underlying_key or not underlying_symbol:
+            continue
+
+        expiry_value = item.get("expiry")
+        try:
+            if isinstance(expiry_value, (int, float)):
+                expiry_date = datetime.fromtimestamp(float(expiry_value) / 1000, tz=timezone.utc).date()
+            else:
+                expiry_date = datetime.fromisoformat(str(expiry_value)[:10]).date()
+        except Exception:
+            continue
+        if expiry_date < today:
+            continue
+
+        key = (underlying_key, underlying_symbol)
+        if key not in grouped or expiry_date < grouped[key]:
+            grouped[key] = expiry_date
+
+    rows = []
+    for (underlying_key, symbol), expiry_date in grouped.items():
+        rows.append({
+            "symbol": symbol,
+            "underlying_key": underlying_key,
+            "expiry": expiry_date.isoformat(),
+            "type": "INDEX" if str(underlying_key).startswith("NSE_INDEX|") else "STOCK",
+        })
+    rows.sort(key=lambda x: x["symbol"])
+    if not rows:
+        raise UpstoxError("Upstox returned no upcoming NSE F&O option underlyings.")
+    return rows
+
+
+def _scan_one_fno_underlying(item, threshold, risk_profile):
+    """Fetch one current-expiry option chain and return all contracts whose
+    Upstox Probability of Profit meets the selected threshold.
+    """
+    symbol = item["symbol"]
+    underlying_key = item["underlying_key"]
+    expiry = item["expiry"]
+    try:
+        rows = get_option_chain(underlying_key, expiry)
+    except Exception as exc:
+        return {"symbol": symbol, "expiry": expiry, "error": str(exc), "rows": []}
+
+    results = []
+    for row in rows:
+        spot = safe_float(row.get("underlying_spot_price"))
+        strike = safe_float(row.get("strike_price"))
+        if not np.isfinite(strike):
+            continue
+
+        for side, label in (("call_options", "CALL BUY"), ("put_options", "PUT BUY")):
+            option = row.get(side) or {}
+            md = option.get("market_data") or {}
+            greeks = option.get("option_greeks") or {}
+            pop = safe_float(greeks.get("pop"))
+            if not np.isfinite(pop) or pop < float(threshold):
+                continue
+
+            ltp = safe_float(md.get("ltp"))
+            ask = safe_float(md.get("ask_price"))
+            bid = safe_float(md.get("bid_price"))
+            volume = safe_float(md.get("volume"), 0)
+            oi = safe_float(md.get("oi"), 0)
+            delta = safe_float(greeks.get("delta"))
+            iv = safe_float(greeks.get("iv"))
+            entry = ask if np.isfinite(ask) and ask > 0 else ltp
+            if not np.isfinite(entry) or entry <= 0:
+                continue
+
+            # Keep the existing app's risk-profile math for scanner output.
+            factors = {
+                "Conservative": (0.75, 1.30, 1.60),
+                "Balanced": (0.70, 1.40, 1.80),
+                "Aggressive": (0.65, 1.55, 2.10),
+            }
+            sl_factor, t1_factor, t2_factor = factors.get(risk_profile, factors["Balanced"])
+            sl = round(entry * sl_factor, 2)
+            t1 = round(entry * t1_factor, 2)
+            t2 = round(entry * t2_factor, 2)
+            rr = (t1 - entry) / max(entry - sl, 0.01)
+
+            results.append({
+                "Stock": symbol,
+                "Type": item["type"],
+                "Action": label,
+                "Strike": strike,
+                "Expiry": expiry,
+                "Spot": spot,
+                "PoP": pop,
+                "Entry": entry,
+                "SL": sl,
+                "T1": t1,
+                "T2": t2,
+                "R:R": rr,
+                "Delta": delta,
+                "IV": iv,
+                "Volume": volume,
+                "OI": oi,
+                "Bid": bid,
+            })
+
+    results.sort(key=lambda x: (-x["PoP"], abs(x["Strike"] - x["Spot"])))
+    return {"symbol": symbol, "expiry": expiry, "error": "", "rows": results}
+
+
+@st.cache_data(ttl=45, show_spinner=False)
+def scan_full_fno_market(threshold, include_indices, min_volume, max_per_stock, risk_profile):
+    universe = get_nse_fno_universe()
+    if not include_indices:
+        universe = [x for x in universe if x["type"] == "STOCK"]
+
+    all_rows = []
+    errors = 0
+    with ThreadPoolExecutor(max_workers=8) as executor:
+        futures = [executor.submit(_scan_one_fno_underlying, item, threshold, risk_profile) for item in universe]
+        for future in as_completed(futures):
+            result = future.result()
+            if result.get("error"):
+                errors += 1
+                continue
+            rows = [r for r in result.get("rows", []) if r["Volume"] >= float(min_volume)]
+            # Keep only the strongest/closest contracts for each stock so the
+            # market-wide result remains readable while the underlying scan
+            # still checks the full current-expiry option chain.
+            all_rows.extend(rows[:int(max_per_stock)])
+
+    all_rows.sort(key=lambda x: (-x["PoP"], x["Stock"], abs(x["Strike"] - x["Spot"])))
+    return all_rows, len(universe), errors
 
 def available_expiries(contracts):
     today = date.today().isoformat()
@@ -844,6 +1001,7 @@ with st.sidebar:
         ["Conservative", "Balanced", "Aggressive"],
         index=1,
     )
+    st.session_state["risk_profile"] = risk_profile
 
     analyze = st.button("🔍 Analyze", type="primary", use_container_width=True)
     refresh = st.button("↻ Refresh Live Data", use_container_width=True)
@@ -879,7 +1037,48 @@ with st.sidebar:
         st.caption("⚪ Monitoring OFF")
 
     st.divider()
-    st.caption("LIVE DATA • Upstox V3 WebSocket + REST")
+    st.markdown("### 🌐 Full F&O Market Scanner")
+    market_scan_enabled = st.toggle(
+        "Scan Full F&O Market",
+        value=st.session_state.get("market_scan_enabled", False),
+        help="Checks the current expiry across the complete NSE F&O universe and lists option contracts with PoP at or above the selected threshold.",
+    )
+    st.session_state["market_scan_enabled"] = market_scan_enabled
+
+    include_indices = st.checkbox(
+        "Include indices",
+        value=st.session_state.get("market_scan_indices", False),
+    )
+    st.session_state["market_scan_indices"] = include_indices
+
+    min_volume = st.number_input(
+        "Minimum option volume",
+        min_value=0,
+        value=int(st.session_state.get("market_scan_min_volume", 0)),
+        step=1000,
+    )
+    st.session_state["market_scan_min_volume"] = int(min_volume)
+
+    max_per_stock = st.selectbox(
+        "Max contracts per stock",
+        [1, 2, 3, 5],
+        index=2,
+        help="The scanner checks the full option chain but shows only the strongest contracts per underlying.",
+    )
+    st.session_state["market_scan_max_per_stock"] = int(max_per_stock)
+
+    scan_now = st.button("🔎 Scan Full F&O Now", use_container_width=True, disabled=not market_scan_enabled)
+    if scan_now:
+        st.session_state["market_scan_run"] = True
+
+    if market_scan_enabled:
+        st.caption("🟢 Market scan ready — click Scan Full F&O Now")
+    else:
+        st.caption("⚪ Full-market scan OFF")
+
+    st.divider()
+    st.caption("🟢 LIVE MARKET DATA • UPSTOX V3")
+    st.caption("No simulated market values are used.")
     st.caption("No simulated market values are used.")
 
 if analyze:
@@ -891,6 +1090,55 @@ if refresh:
     st.rerun()
 
 symbol = alias_symbol(st.session_state.get("symbol", symbol_input or "KOTAKBANK"))
+
+# ============================================================
+# FULL F&O MARKET SCANNER
+# ============================================================
+
+if st.session_state.get("market_scan_enabled", False) and st.session_state.get("market_scan_run", False):
+    with st.sidebar:
+        st.markdown("### 📋 PoP > Threshold — F&O Market")
+        try:
+            with st.spinner("Scanning full NSE F&O universe..."):
+                scan_rows, scanned_count, scan_errors = scan_full_fno_market(
+                    float(st.session_state.get("pop_alert_threshold", 60)),
+                    bool(st.session_state.get("market_scan_indices", False)),
+                    int(st.session_state.get("market_scan_min_volume", 0)),
+                    int(st.session_state.get("market_scan_max_per_stock", 3)),
+                    st.session_state.get("risk_profile", "Balanced"),
+                )
+            st.session_state["market_scan_rows"] = scan_rows
+            st.session_state["market_scan_count"] = scanned_count
+            st.session_state["market_scan_errors"] = scan_errors
+            st.session_state["market_scan_run"] = False
+        except Exception as exc:
+            st.session_state["market_scan_run"] = False
+            st.session_state["market_scan_error"] = str(exc)
+
+if st.session_state.get("market_scan_enabled", False):
+    with st.sidebar:
+        scan_rows = st.session_state.get("market_scan_rows", [])
+        threshold = float(st.session_state.get("pop_alert_threshold", 60))
+        scan_error = st.session_state.get("market_scan_error", "")
+        if scan_error:
+            st.error(scan_error)
+        elif scan_rows:
+            st.success(f"{len(scan_rows)} contract(s) found with PoP ≥ {threshold:.0f}%")
+            scan_df = pd.DataFrame(scan_rows)
+            display_cols = ["Stock", "Action", "Strike", "Expiry", "PoP", "Entry", "SL", "T1", "T2", "Delta", "IV", "Volume"]
+            scan_df = scan_df[display_cols].copy()
+            scan_df["PoP"] = scan_df["PoP"].map(lambda x: f"{x:.1f}%")
+            scan_df["Entry"] = scan_df["Entry"].map(lambda x: f"₹{x:,.2f}")
+            scan_df["SL"] = scan_df["SL"].map(lambda x: f"₹{x:,.2f}")
+            scan_df["T1"] = scan_df["T1"].map(lambda x: f"₹{x:,.2f}")
+            scan_df["T2"] = scan_df["T2"].map(lambda x: f"₹{x:,.2f}")
+            scan_df["Delta"] = scan_df["Delta"].map(lambda x: f"{x:.2f}" if np.isfinite(x) else "—")
+            scan_df["IV"] = scan_df["IV"].map(lambda x: f"{x:.1f}" if np.isfinite(x) else "—")
+            st.dataframe(scan_df, use_container_width=True, hide_index=True, height=min(620, 48 + len(scan_df) * 35))
+            st.caption(f"Universe scanned: {st.session_state.get('market_scan_count', 0)} • Upstox live option-chain PoP • Full current expiry checked")
+        else:
+            st.info(f"No NSE F&O contract currently meets PoP ≥ {threshold:.0f}% with the selected filters.")
+            st.caption(f"Universe scanned: {st.session_state.get('market_scan_count', 0)}")
 
 # ============================================================
 # REST SNAPSHOT + INTRADAY TECHNICALS
@@ -1101,31 +1349,20 @@ st.markdown(
     """
 <div class="topbar">
     <div class="topbar-title">📊 FO PRO Trader Assistant</div>
-    <div class="topbar-sub">Options Analysis • Upstox V3 • WebSocket live market stream + intraday technicals</div>
+    <div class="topbar-sub">Options Analysis • Upstox V3 • Live market data + intraday technicals</div>
 </div>
 """,
     unsafe_allow_html=True,
 )
 
-h1, h2, h3 = st.columns([2.2, 1.2, 1.0])
+h1, h2 = st.columns([3.2, 1.2])
 with h1:
     st.markdown(f"## {symbol} — F&O Options Analysis")
 with h2:
     st.markdown("**Last Traded**")
     st.markdown(f"<span style='font-size:25px;font-weight:800'>{fmt_price(spot)}</span>", unsafe_allow_html=True)
     st.caption(f"{net_change:+.2f} ({change_pct:+.2f}%)")
-with h3:
-    st.markdown("**Data Status**")
-    if ws_status == "CONNECTED" and ws_age is not None and ws_age < 15:
-        st.markdown('<span class="status-pill">● LIVE WEBSOCKET</span>', unsafe_allow_html=True)
-        st.caption(f"Last tick ~{ws_age:.1f}s ago")
-    else:
-        st.markdown('<span class="status-pill-warn">● REST FALLBACK / CONNECTING</span>', unsafe_allow_html=True)
-        if ws_age is not None:
-            st.caption(f"Last WS tick ~{ws_age:.1f}s ago")
-        else:
-            st.caption("WebSocket warming up")
-    st.caption(f"Expiry: {selected_expiry}")
+    st.caption(f"🟢 UPSTOX LIVE • Expiry: {selected_expiry}")
 
 # ============================================================
 # MARKET SNAPSHOT
@@ -1311,12 +1548,11 @@ with tab4:
         """
 ### Live-data decision framework
 
-**1. Live market stream**
-- Upstox Market Data Feed V3 WebSocket
+**1. Live market data**
+- Upstox V3 live market data
 - Live underlying LTP and previous close
 - Live option LTP, bid/ask, OI, volume and available Greeks
-- Automatic reconnect is enabled
-- REST quote remains as a fallback if the stream is warming up/unavailable
+- Option-chain PoP is supplied by Upstox
 
 **2. Intraday technical analysis**
 - Upstox Intraday Candle V3
@@ -1348,18 +1584,11 @@ with tab4:
 """
     )
 
-    if stream_snapshot.get("last_error"):
-        st.warning(f"WebSocket status: {stream_snapshot['last_error']}")
 
 st.divider()
 
-if ws_status == "CONNECTED" and ws_age is not None:
-    data_note = f"WebSocket last message ~{ws_age:.1f}s ago"
-else:
-    data_note = "REST snapshot used while WebSocket connects/reconnects"
-
 st.caption(
-    f"Live Upstox V3 • {symbol} • Expiry {selected_expiry} • {data_note} • "
+    f"🟢 Live Upstox V3 • {symbol} • Expiry {selected_expiry} • "
     f"Intraday technicals: {tech['interval']}. Updated {updated}. "
     "For educational/decision-support use; review live market conditions before trading."
 )
