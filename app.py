@@ -1031,10 +1031,48 @@ with h3:
         and (market_now.hour, market_now.minute) >= (9, 15)
         and (market_now.hour, market_now.minute) < (15, 30)
     )
+
     if market_open:
-        st.markdown("**● LIVE DATA**")
+        st.markdown(
+            """
+            <div style="
+                background:#16a34a;
+                color:#ffffff;
+                padding:10px 16px;
+                border-radius:8px;
+                font-weight:700;
+                font-size:15px;
+                text-align:center;
+                width:100%;
+                box-sizing:border-box;
+                margin:6px 0 10px 0;
+            ">
+                ● LIVE DATA
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
     else:
-        st.markdown("**● MARKET CLOSED**")
+        st.markdown(
+            """
+            <div style="
+                background:#dc2626;
+                color:#ffffff;
+                padding:10px 16px;
+                border-radius:8px;
+                font-weight:700;
+                font-size:15px;
+                text-align:center;
+                width:100%;
+                box-sizing:border-box;
+                margin:6px 0 10px 0;
+            ">
+                ● MARKET CLOSED
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+
     st.caption(f"Expiry: {selected_expiry}")
 
 # ============================================================
