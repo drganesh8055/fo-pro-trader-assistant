@@ -741,7 +741,7 @@ def scan_full_fno_pop_market(min_pop=75.0):
 
 
 # ============================================================
-# COMMODITY MARKET SUPPORT — SEPARATE FROM NSE EQUITY F&O
+# MCX OPTIONS SUPPORT — SEPARATE FROM NSE EQUITY F&O
 # ============================================================
 
 COMMODITY_ALIASES = {
@@ -751,8 +751,11 @@ COMMODITY_ALIASES = {
     "SILVERM": "SILVERM",
     "CRUDE": "CRUDEOIL",
     "CRUDEOIL": "CRUDEOIL",
+    "CRUDEMINI": "CRUDEOILMINI",
+    "CRUDEOILMINI": "CRUDEOILMINI",
     "NATURALGAS": "NATURALGAS",
     "NATGAS": "NATURALGAS",
+    "NATURALGASMINI": "NATURALGASMINI",
     "COPPER": "COPPER",
     "ZINC": "ZINC",
     "LEAD": "LEAD",
@@ -769,284 +772,505 @@ def alias_commodity(symbol):
 
 
 @st.cache_data(ttl=60, show_spinner=False)
-def search_commodity_future(symbol):
-    """Find the nearest live MCX commodity futures contract via Upstox."""
+def search_commodity_options(symbol):
+    """Find the nearest active MCX commodity option series and its underlying key."""
     symbol = alias_commodity(symbol)
-
     payload = api_get(
         "/v2/instruments/search",
         params={
             "query": symbol,
             "exchanges": "MCX",
             "segments": "COMM",
+            "instrument_types": "CE,PE",
             "page_number": 1,
             "records": 30,
         },
         timeout=30,
     )
 
-    results = payload.get("data", [])
-    futures = []
+    results = [x for x in payload.get("data", []) if isinstance(x, dict)]
     today = date.today().isoformat()
+    options = []
 
     for item in results:
-        if not isinstance(item, dict):
-            continue
         if item.get("exchange") != "MCX":
             continue
-        if item.get("instrument_type") != "FUT":
+        if item.get("segment") != "MCX_FO":
             continue
-
+        if item.get("instrument_type") not in {"CE", "PE"}:
+            continue
         expiry = str(item.get("expiry", ""))
         if not expiry or expiry < today:
             continue
-
-        underlying_symbol = str(item.get("underlying_symbol", "")).upper()
-        trading_symbol = str(item.get("trading_symbol", "")).upper()
-
-        if symbol not in underlying_symbol and symbol not in trading_symbol:
+        underlying = str(item.get("underlying_symbol", "")).upper()
+        name = str(item.get("name", "")).upper()
+        trading = str(item.get("trading_symbol", "")).upper()
+        if symbol not in {underlying, name} and symbol not in trading:
             continue
+        options.append(item)
 
-        futures.append(item)
-
-    if not futures:
+    if not options:
         raise UpstoxError(
-            f"No upcoming MCX futures contract found for '{symbol}'. "
-            "Try GOLD, GOLDM, SILVER, SILVERM, CRUDEOIL, NATURALGAS, "
-            "COPPER, ZINC, LEAD, ALUMINIUM or NICKEL."
+            f"No active MCX option contracts found for '{symbol}'. "
+            "Try GOLD, GOLDM, SILVER, SILVERM, CRUDEOIL, "
+            "CRUDEOILMINI, NATURALGAS, COPPER, ZINC, LEAD, ALUMINIUM or NICKEL."
         )
 
-    futures.sort(key=lambda x: str(x.get("expiry", "9999-99-99")))
-    return futures[0]
+    nearest_expiry = min(str(x.get("expiry")) for x in options)
+    expiry_options = [x for x in options if str(x.get("expiry")) == nearest_expiry]
+    underlying_keys = [str(x.get("underlying_key", "")) for x in expiry_options if x.get("underlying_key")]
+    underlying_key = underlying_keys[0] if underlying_keys else ""
 
-
-def build_commodity_plan(entry, tech, risk_profile, side):
-    """Build a futures trade plan without touching the equity-option logic."""
-    if not np.isfinite(entry) or entry <= 0:
-        return None
-
-    atr = tech.get("atr", entry * 0.01)
-    if not np.isfinite(atr) or atr <= 0:
-        atr = entry * 0.01
-
-    # Commodity futures use an ATR-based risk model because Upstox's
-    # MCX option-chain endpoint does not currently provide option-chain data.
-    atr_settings = {
-        "Conservative": (1.00, 1.50, 2.25),
-        "Balanced": (1.25, 2.00, 3.00),
-        "Aggressive": (1.50, 2.50, 3.75),
-    }
-    sl_atr, t1_atr, t2_atr = atr_settings[risk_profile]
-
-    if side == "BUY FUTURE":
-        sl = round(entry - atr * sl_atr, 2)
-        target1 = round(entry + atr * t1_atr, 2)
-        target2 = round(entry + atr * t2_atr, 2)
-        trigger = f"Enter only if price sustains above {fmt_price(entry)} with {tech['trend']} confirmation."
-        exit_rule = (
-            f"Exit if price falls below {fmt_price(sl)}. After Target 1, "
-            "book partial profit and trail the balance using the latest swing/ATR."
-        )
-    else:
-        sl = round(entry + atr * sl_atr, 2)
-        target1 = round(entry - atr * t1_atr, 2)
-        target2 = round(entry - atr * t2_atr, 2)
-        trigger = f"Enter only if price sustains below {fmt_price(entry)} with {tech['trend']} confirmation."
-        exit_rule = (
-            f"Exit if price rises above {fmt_price(sl)}. After Target 1, "
-            "book partial profit and trail the balance using the latest swing/ATR."
-        )
-
-    risk = abs(entry - sl)
-    rr1 = abs(target1 - entry) / max(risk, 0.01)
-    rr2 = abs(target2 - entry) / max(risk, 0.01)
+    # Prefer the option-contract endpoint once the MCX underlying key is known.
+    if underlying_key:
+        try:
+            contract_payload = api_get(
+                "/v2/option/contract",
+                params={
+                    "instrument_key": underlying_key,
+                    "expiry_date": nearest_expiry,
+                },
+                timeout=30,
+            )
+            contract_rows = [x for x in contract_payload.get("data", []) if isinstance(x, dict)]
+            contract_rows = [
+                x for x in contract_rows
+                if x.get("segment") == "MCX_FO"
+                and x.get("instrument_type") in {"CE", "PE"}
+                and str(x.get("expiry", "")) == nearest_expiry
+            ]
+            if contract_rows:
+                expiry_options = contract_rows
+        except Exception:
+            # The search result is still usable if the contract endpoint rejects
+            # an instrument-key format for a particular MCX series.
+            pass
 
     return {
+        "symbol": symbol,
+        "expiry": nearest_expiry,
+        "underlying_key": underlying_key,
+        "contracts": expiry_options,
+    }
+
+
+@st.cache_data(ttl=20, show_spinner=False)
+def get_quotes_batch(instrument_keys):
+    keys = [str(x) for x in instrument_keys if x]
+    result = {}
+    if not keys:
+        return result
+
+    # Keep requests small and deterministic.
+    for start in range(0, len(keys), 25):
+        chunk = keys[start:start + 25]
+        payload = api_get(
+            "/v3/market-quote/quotes",
+            params={"instrument_key": ",".join(chunk)},
+            timeout=30,
+        )
+        data = payload.get("data", {}) or {}
+        for key, value in data.items():
+            result[str(key)] = value
+    return result
+
+
+def normal_cdf(x):
+    return 0.5 * (1.0 + math.erf(float(x) / math.sqrt(2.0)))
+
+
+def black76_price(fwd, strike, time_years, vol, rate, call=True):
+    if min(fwd, strike, time_years, vol) <= 0:
+        return np.nan
+    sigma_sqrt_t = vol * math.sqrt(time_years)
+    d1 = (math.log(fwd / strike) + 0.5 * vol * vol * time_years) / sigma_sqrt_t
+    d2 = d1 - sigma_sqrt_t
+    discount = math.exp(-rate * time_years)
+    if call:
+        return discount * (fwd * normal_cdf(d1) - strike * normal_cdf(d2))
+    return discount * (strike * normal_cdf(-d2) - fwd * normal_cdf(-d1))
+
+
+def implied_vol_black76(fwd, strike, time_years, premium, rate, call=True):
+    if min(fwd, strike, time_years, premium) <= 0:
+        return np.nan
+
+    intrinsic = max(fwd - strike, 0.0) if call else max(strike - fwd, 0.0)
+    if premium <= intrinsic * math.exp(-rate * time_years):
+        return np.nan
+
+    lo, hi = 1e-4, 5.0
+    for _ in range(60):
+        mid = (lo + hi) / 2.0
+        price = black76_price(fwd, strike, time_years, mid, rate, call)
+        if np.isnan(price):
+            return np.nan
+        if price > premium:
+            hi = mid
+        else:
+            lo = mid
+    return (lo + hi) / 2.0
+
+
+def commodity_option_pop(fwd, strike, premium, expiry, iv, side, rate=0.06):
+    """Estimated probability that a long option finishes profitable at expiry."""
+    try:
+        expiry_dt = datetime.strptime(str(expiry), "%Y-%m-%d").replace(tzinfo=ZoneInfo("Asia/Kolkata"))
+        seconds = (expiry_dt - datetime.now(ZoneInfo("Asia/Kolkata"))).total_seconds()
+        t = max(seconds / (365.0 * 24 * 3600), 1.0 / (365.0 * 24 * 3600))
+        if not np.isfinite(iv) or iv <= 0:
+            return np.nan
+        breakeven = strike + premium if side == "CE" else strike - premium
+        if breakeven <= 0:
+            return np.nan
+        sigma_sqrt_t = iv * math.sqrt(t)
+        d2 = (math.log(fwd / breakeven) - 0.5 * iv * iv * t) / sigma_sqrt_t
+        return normal_cdf(d2) * 100.0 if side == "CE" else normal_cdf(-d2) * 100.0
+    except Exception:
+        return np.nan
+
+
+def normalize_mcx_option_chain(contracts, quotes, underlying_price):
+    rows = []
+    if not contracts or not np.isfinite(underlying_price):
+        return pd.DataFrame()
+
+    # MCX options are options on commodity futures. Use the live option quote,
+    # then estimate IV/PoP when Upstox does not return those fields in the quote.
+    for contract in contracts:
+        key = str(contract.get("instrument_key", ""))
+        q = quotes.get(key) or {}
+        strike = safe_float(contract.get("strike_price"))
+        if not np.isfinite(strike):
+            continue
+
+        side = str(contract.get("instrument_type", "")).upper()
+        if side not in {"CE", "PE"}:
+            continue
+
+        ltp = safe_float(q.get("last_price"))
+        bid = safe_float(q.get("bid_price"))
+        ask = safe_float(q.get("ask_price"))
+        volume = safe_float(q.get("volume"), 0)
+        oi = safe_float(q.get("oi"), 0)
+        prev_oi = safe_float(q.get("prev_oi"), 0)
+        greeks = q.get("option_greeks") or {}
+        iv = safe_float(greeks.get("iv"))
+        delta = safe_float(greeks.get("delta"))
+
+        expiry = str(contract.get("expiry", ""))
+        try:
+            expiry_dt = datetime.strptime(expiry, "%Y-%m-%d").replace(tzinfo=ZoneInfo("Asia/Kolkata"))
+            t = max((expiry_dt - datetime.now(ZoneInfo("Asia/Kolkata"))).total_seconds() / (365.0 * 24 * 3600), 1 / 365)
+        except Exception:
+            t = 1 / 365
+
+        premium_for_iv = ask if np.isfinite(ask) and ask > 0 else ltp
+        if (not np.isfinite(iv) or iv <= 0) and np.isfinite(premium_for_iv) and premium_for_iv > 0:
+            iv = implied_vol_black76(
+                underlying_price, strike, t, premium_for_iv, 0.06, side == "CE"
+            )
+        if np.isfinite(iv) and iv < 1:
+            iv_pct = iv * 100.0
+        else:
+            iv_pct = iv
+            iv = iv / 100.0 if np.isfinite(iv) and iv > 1 else iv
+
+        premium_for_pop = ask if np.isfinite(ask) and ask > 0 else ltp
+        pop = commodity_option_pop(
+            underlying_price, strike, premium_for_pop, expiry, iv, side
+        ) if np.isfinite(premium_for_pop) and premium_for_pop > 0 else np.nan
+
+        if not np.isfinite(delta) and np.isfinite(iv) and iv > 0:
+            sigma_sqrt_t = iv * math.sqrt(t)
+            d1 = (math.log(underlying_price / strike) + 0.5 * iv * iv * t) / sigma_sqrt_t
+            delta = math.exp(-0.06 * t) * normal_cdf(d1) if side == "CE" else -math.exp(-0.06 * t) * normal_cdf(-d1)
+
+        rows.append({
+            "Strike": strike,
+            "Side": side,
+            "Key": key,
+            "LTP": ltp,
+            "Bid": bid,
+            "Ask": ask,
+            "OI": oi,
+            "Chg OI": oi - prev_oi,
+            "Volume": volume,
+            "IV": iv_pct,
+            "Delta": delta,
+            "PoP": pop,
+            "Expiry": expiry,
+            "Trading Symbol": contract.get("trading_symbol", ""),
+            "Lot Size": safe_float(contract.get("lot_size"), 0),
+        })
+
+    return pd.DataFrame(rows).sort_values(["Strike", "Side"]).reset_index(drop=True) if rows else pd.DataFrame()
+
+
+def mcx_oi_levels(chain, spot):
+    if chain.empty:
+        return np.nan, np.nan, np.nan
+    ce = chain[chain["Side"] == "CE"]
+    pe = chain[chain["Side"] == "PE"]
+    support = np.nan
+    resistance = np.nan
+    if not pe.empty and pe["OI"].max() > 0:
+        below = pe[pe["Strike"] <= spot]
+        support = float((below if not below.empty else pe).loc[(below if not below.empty else pe)["OI"].idxmax(), "Strike"])
+    if not ce.empty and ce["OI"].max() > 0:
+        above = ce[ce["Strike"] >= spot]
+        resistance = float((above if not above.empty else ce).loc[(above if not above.empty else ce)["OI"].idxmax(), "Strike"])
+    call_oi = ce["OI"].sum()
+    put_oi = pe["OI"].sum()
+    pcr = put_oi / call_oi if call_oi else np.nan
+    return support, resistance, pcr
+
+
+def build_mcx_option_plan(row, spot, support, resistance, risk_profile):
+    if row is None or not np.isfinite(row.get("Entry", np.nan)):
+        return None
+    entry = float(row["Entry"])
+    risk_settings = {
+        "Conservative": (0.75, 1.30, 1.60),
+        "Balanced": (0.70, 1.40, 1.80),
+        "Aggressive": (0.65, 1.55, 2.10),
+    }
+    sl_factor, t1_factor, t2_factor = risk_settings[risk_profile]
+    sl = round(entry * sl_factor, 2)
+    target1 = round(entry * t1_factor, 2)
+    target2 = round(entry * t2_factor, 2)
+    risk = max(entry - sl, 0.01)
+    rr1 = (target1 - entry) / risk
+    rr2 = (target2 - entry) / risk
+    side = row["Side"]
+    if side == "CE":
+        trigger = f"Enter only after the MCX underlying sustains above resistance/trigger around {fmt_price(resistance)}."
+        exit_rule = f"Exit if underlying falls below support {fmt_price(support)} or option premium hits {fmt_price(sl)}. After Target 1, book partial profit and trail."
+        trade = "CALL BUY"
+    else:
+        trigger = f"Enter only after the MCX underlying breaks and sustains below support/trigger around {fmt_price(support)}."
+        exit_rule = f"Exit if underlying rises above resistance {fmt_price(resistance)} or option premium hits {fmt_price(sl)}. After Target 1, book partial profit and trail."
+        trade = "PUT BUY"
+    return {
+        "trade": trade,
         "side": side,
-        "entry": float(entry),
+        "strike": float(row["Strike"]),
+        "entry": entry,
         "sl": sl,
         "target1": target1,
         "target2": target2,
+        "pop": safe_float(row["PoP"]),
+        "iv": safe_float(row["IV"]),
+        "delta": safe_float(row["Delta"]),
+        "oi": safe_float(row["OI"], 0),
+        "volume": safe_float(row["Volume"], 0),
         "rr1": rr1,
         "rr2": rr2,
         "trigger": trigger,
         "exit": exit_rule,
+        "trading_symbol": row["Trading Symbol"],
+        "lot_size": row["Lot Size"],
     }
 
 
-def render_commodity_market(symbol, risk_profile):
-    """Render an isolated MCX futures dashboard and stop before NSE logic runs."""
+def render_mcx_options_market(symbol, risk_profile):
     commodity = alias_commodity(symbol)
-
     try:
-        with st.spinner(f"Fetching live MCX data for {commodity}..."):
-            contract = search_commodity_future(commodity)
-            instrument_key = contract["instrument_key"]
-            quote_data = get_quote(instrument_key)
-
-            spot = safe_float(quote_data.get("last_price"))
-            previous_close = safe_float(
-                quote_data.get("prev_close_price"),
-                spot,
-            )
-            net_change = safe_float(
-                quote_data.get("net_change"),
-                spot - previous_close,
-            )
-            change_pct = (
-                net_change / previous_close * 100
-                if previous_close
-                else 0
-            )
-
-            candles = get_daily_candles(instrument_key)
+        with st.spinner(f"Fetching live MCX options data for {commodity}..."):
+            series = search_commodity_options(commodity)
+            contracts = series["contracts"]
+            underlying_key = series["underlying_key"]
+            if not underlying_key:
+                raise UpstoxError("Upstox did not return the MCX underlying key for this option series.")
+            underlying_quote = get_quote(underlying_key)
+            spot = safe_float(underlying_quote.get("last_price"))
+            if not np.isfinite(spot) or spot <= 0:
+                raise UpstoxError("No valid live MCX underlying price was returned by Upstox.")
+            option_keys = [x.get("instrument_key") for x in contracts if x.get("instrument_key")]
+            quotes = get_quotes_batch(option_keys)
+            chain = normalize_mcx_option_chain(contracts, quotes, spot)
+            if chain.empty:
+                raise UpstoxError("No live MCX option quotes were returned for the selected expiry.")
+            candles = get_daily_candles(underlying_key)
             tech = technicals(candles, spot)
-
     except UpstoxError as exc:
         st.error(str(exc))
         st.stop()
     except Exception as exc:
-        st.error(f"Unexpected error while loading MCX data: {exc}")
+        st.error(f"Unexpected error while loading MCX option data: {exc}")
         st.stop()
 
-    if tech["trend"] == "Bullish" and tech["rsi"] < 70:
-        commodity_decision = "BUY FUTURE"
-        commodity_plan = build_commodity_plan(
-            spot, tech, risk_profile, "BUY FUTURE"
-        )
-    elif tech["trend"] == "Bearish" and tech["rsi"] > 30:
-        commodity_decision = "SELL FUTURE"
-        commodity_plan = build_commodity_plan(
-            spot, tech, risk_profile, "SELL FUTURE"
-        )
-    else:
-        commodity_decision = "NO TRADE"
-        commodity_plan = None
-
-    selected_expiry = str(contract.get("expiry", "—"))
-    trading_symbol = contract.get("trading_symbol", commodity)
-    updated = quote_data.get(
-        "timestamp",
-        datetime.now().astimezone().isoformat(),
+    support, resistance, pcr = mcx_oi_levels(chain, spot)
+    atm_distance = (chain["Strike"] - spot).abs()
+    candidates = chain.copy()
+    candidates["Entry"] = np.where(
+        candidates["Ask"].notna() & (candidates["Ask"] > 0),
+        candidates["Ask"], candidates["LTP"]
     )
+    candidates = candidates[candidates["Entry"] > 0].copy()
+    candidates["distance"] = (candidates["Strike"] - spot).abs() / max(spot, 1)
+    candidates["direction"] = np.where(
+        candidates["Side"] == "CE", tech["trend"] == "Bullish", tech["trend"] == "Bearish"
+    )
+    candidates["score"] = (
+        candidates["PoP"].fillna(0).clip(0, 100) * 0.55
+        + candidates["Volume"].clip(lower=0).rank(pct=True) * 20
+        + candidates["direction"].astype(float) * 15
+        + (1 - candidates["distance"].clip(0, 0.10) / 0.10) * 10
+    )
+
+    valid = candidates[candidates["PoP"].notna()].copy()
+    best_call = valid[valid["Side"] == "CE"].sort_values(["score", "PoP"], ascending=False).head(1)
+    best_put = valid[valid["Side"] == "PE"].sort_values(["score", "PoP"], ascending=False).head(1)
+
+    call_row = best_call.iloc[0].to_dict() if not best_call.empty else None
+    put_row = best_put.iloc[0].to_dict() if not best_put.empty else None
+    call_plan = build_mcx_option_plan(call_row, spot, support, resistance, risk_profile) if call_row else None
+    put_plan = build_mcx_option_plan(put_row, spot, support, resistance, risk_profile) if put_row else None
+
+    if call_plan and put_plan:
+        best_plan = call_plan if call_plan["pop"] >= put_plan["pop"] else put_plan
+    else:
+        best_plan = call_plan or put_plan
+
+    if best_plan is None:
+        decision = "NO TRADE"
+    else:
+        decision = best_plan["trade"]
+
+    selected_expiry = series["expiry"]
+    updated = datetime.now(ZoneInfo("Asia/Kolkata")).strftime("%Y-%m-%d %H:%M:%S IST")
+    change = safe_float(underlying_quote.get("net_change"), 0)
+    prev_close = safe_float(underlying_quote.get("prev_close_price"), spot - change)
+    change_pct = change / prev_close * 100 if prev_close else 0
 
     st.markdown(
         """
 <div class="topbar">
     <div class="topbar-title">📊 FO PRO Trader Assistant</div>
-    <div class="topbar-sub">
-        Commodity Futures Analysis • Powered by Upstox • Live MCX data
-    </div>
+    <div class="topbar-sub">MCX Options Analysis • Upstox REST API • Live commodity option data</div>
 </div>
 """,
         unsafe_allow_html=True,
     )
 
     h1, h2, h3 = st.columns([2.2, 1.2, 1.0])
-
     with h1:
-        st.markdown(f"## {commodity} — MCX Commodity Analysis")
-        st.caption(f"Contract: {trading_symbol}")
-
+        st.markdown(f"## {commodity} — MCX Options Analysis")
+        st.caption(f"Nearest active expiry: {selected_expiry}")
     with h2:
-        st.markdown("**Last Traded**")
-        st.markdown(
-            f"<span style='font-size:25px;font-weight:800'>{fmt_price(spot)}</span>",
-            unsafe_allow_html=True,
-        )
-        st.caption(f"{net_change:+.2f} ({change_pct:+.2f}%)")
-
+        st.markdown("**Underlying**")
+        st.markdown(f"<span style='font-size:25px;font-weight:800'>{fmt_price(spot)}</span>", unsafe_allow_html=True)
+        st.caption(f"{change:+.2f} ({change_pct:+.2f}%)")
     with h3:
         st.markdown("**Data Status**")
         st.markdown("**● LIVE DATA**")
-        st.caption(f"Expiry: {selected_expiry}")
+        st.caption(f"Updated {updated}")
 
     st.markdown('<div class="card">', unsafe_allow_html=True)
-    st.markdown(
-        '<div class="section-title">📊 Commodity Market Snapshot</div>',
-        unsafe_allow_html=True,
-    )
-
+    st.markdown('<div class="section-title">📊 MCX Options Market Snapshot</div>', unsafe_allow_html=True)
     m1, m2, m3, m4, m5 = st.columns(5)
-    m1.metric("Live Price", fmt_price(spot), f"{net_change:+.2f} ({change_pct:+.2f}%)")
+    m1.metric("Underlying", fmt_price(spot))
     m2.metric("Bias", tech["trend"])
-    m3.metric("RSI", f"{tech['rsi']:.1f}")
-    m4.metric("EMA 20", fmt_price(tech["ema20"]))
-    m5.metric("ATR 14", fmt_price(tech["atr"]))
+    m3.metric("PCR", f"{pcr:.2f}" if np.isfinite(pcr) else "—")
+    m4.metric("Support", fmt_price(support))
+    m5.metric("Resistance", fmt_price(resistance))
     st.markdown('</div>', unsafe_allow_html=True)
 
     st.markdown('<div class="card">', unsafe_allow_html=True)
-    st.markdown(
-        '<div class="section-title">🎯 Commodity Trade Decision</div>',
-        unsafe_allow_html=True,
-    )
-
-    if commodity_decision == "BUY FUTURE":
+    st.markdown('<div class="section-title">🎯 MCX Option Trade Decision</div>', unsafe_allow_html=True)
+    if decision == "CALL BUY":
         decision_class = "trade-call"
-    elif commodity_decision == "SELL FUTURE":
+    elif decision == "PUT BUY":
         decision_class = "trade-put"
     else:
         decision_class = "trade-neutral"
+    st.markdown(f'<div class="{decision_class}">Decision: {decision}</div>', unsafe_allow_html=True)
 
-    st.markdown(
-        f'<div class="{decision_class}">Decision: {commodity_decision}</div>',
-        unsafe_allow_html=True,
-    )
+    if best_plan:
+        p1, p2, p3, p4, p5, p6 = st.columns(6)
+        p1.metric("Strike", f"{best_plan['strike']:.0f}")
+        p2.metric("Entry", fmt_price(best_plan["entry"]))
+        p3.metric("Stop Loss", fmt_price(best_plan["sl"]))
+        p4.metric("Target 1", fmt_price(best_plan["target1"]))
+        p5.metric("Target 2", fmt_price(best_plan["target2"]))
+        p6.metric("PoP", f"{best_plan['pop']:.1f}%" if np.isfinite(best_plan["pop"]) else "—")
 
-    if commodity_plan:
-        p1, p2, p3, p4, p5 = st.columns(5)
-        p1.metric("Entry", fmt_price(commodity_plan["entry"]))
-        p2.metric("Stop Loss", fmt_price(commodity_plan["sl"]))
-        p3.metric("Target 1", fmt_price(commodity_plan["target1"]))
-        p4.metric("Target 2", fmt_price(commodity_plan["target2"]))
-        p5.metric("R:R T2", f"1:{commodity_plan['rr2']:.2f}")
-
-        st.markdown("### Entry / Exit Rules")
-        e1, e2 = st.columns(2)
-        with e1:
-            st.markdown("**Entry Trigger**")
-            st.write(commodity_plan["trigger"])
-        with e2:
-            st.markdown("**Exit Rule**")
-            st.write(commodity_plan["exit"])
-    else:
-        st.info(
-            "NO TRADE: the commodity trend and momentum conditions are not aligned. "
-            "Wait for a clearer setup instead of forcing a futures position."
+        st.markdown("**Entry Trigger**")
+        st.write(best_plan["trigger"])
+        st.markdown("**Exit Rule**")
+        st.write(best_plan["exit"])
+        st.caption(
+            f"Contract: {best_plan['trading_symbol']} • Lot size: {best_plan['lot_size']:.0f} • "
+            f"R:R T1 1:{best_plan['rr1']:.2f} • T2 1:{best_plan['rr2']:.2f}"
         )
-
+    else:
+        st.info("NO TRADE: live MCX option conditions do not currently produce a usable setup.")
     st.markdown('</div>', unsafe_allow_html=True)
 
-    st.markdown('<div class="card">', unsafe_allow_html=True)
-    st.markdown(
-        '<div class="section-title">📈 Commodity Market Analysis</div>',
-        unsafe_allow_html=True,
-    )
+    tab1, tab2, tab3 = st.tabs(["🏆 Best Trade", "🔎 MCX Option Chain", "📊 Market Analysis"])
+    with tab1:
+        if best_plan:
+            st.success(
+                f"{decision} | {best_plan['trading_symbol']} | Entry {fmt_price(best_plan['entry'])} | "
+                f"SL {fmt_price(best_plan['sl'])} | T1 {fmt_price(best_plan['target1'])} | "
+                f"T2 {fmt_price(best_plan['target2'])} | PoP {best_plan['pop']:.1f}%"
+            )
+        st.markdown("### Candidate Calls / Puts")
+        candidate_rows = []
+        for plan in [call_plan, put_plan]:
+            if plan:
+                candidate_rows.append({
+                    "Trade": plan["trade"],
+                    "Strike": int(plan["strike"]),
+                    "Entry": fmt_price(plan["entry"]),
+                    "SL": fmt_price(plan["sl"]),
+                    "Target1": fmt_price(plan["target1"]),
+                    "Target2": fmt_price(plan["target2"]),
+                    "PoP": f"{plan['pop']:.1f}%" if np.isfinite(plan["pop"]) else "—",
+                    "Volume": fmt_num(plan["volume"]),
+                    "OI": fmt_num(plan["oi"]),
+                })
+        if candidate_rows:
+            st.dataframe(pd.DataFrame(candidate_rows), use_container_width=True, hide_index=True)
+        st.caption("PoP is an estimated probability of finishing profitable at expiry, calculated from the live option premium and implied volatility when available; it is not a guarantee.")
 
-    a1, a2, a3, a4 = st.columns(4)
-    a1.metric("EMA 20", fmt_price(tech["ema20"]))
-    a2.metric("EMA 50", fmt_price(tech["ema50"]))
-    a3.metric("RSI", f"{tech['rsi']:.1f}")
-    a4.metric("ATR 14", fmt_price(tech["atr"]))
+    with tab2:
+        view = chain.copy()
+        view["Distance"] = (view["Strike"] - spot).abs()
+        view = view.sort_values("Distance").head(15).drop(columns="Distance")
+        display = view[["Strike", "Side", "LTP", "Bid", "Ask", "OI", "Chg OI", "Volume", "IV", "Delta", "PoP", "Trading Symbol"]].copy()
+        for col in ["LTP", "Bid", "Ask"]:
+            display[col] = display[col].round(2)
+        for col in ["OI", "Chg OI", "Volume"]:
+            display[col] = display[col].round(0).astype("int64")
+        display["IV"] = display["IV"].round(1)
+        display["Delta"] = display["Delta"].round(3)
+        display["PoP"] = display["PoP"].round(1)
+        st.dataframe(display, use_container_width=True, hide_index=True)
 
-    if not candles.empty:
-        chart = candles.set_index("timestamp")["close"].tail(80)
-        st.line_chart(chart, use_container_width=True)
-
-    st.caption(
-        "MCX commodity option-chain/PoP analysis is not included here because "
-        "Upstox currently documents its Put/Call Option Chain API as unavailable "
-        "for MCX. This section therefore analyzes MCX futures only."
-    )
-    st.markdown('</div>', unsafe_allow_html=True)
+    with tab3:
+        a1, a2, a3, a4 = st.columns(4)
+        a1.metric("EMA 20", fmt_price(tech["ema20"]))
+        a2.metric("EMA 50", fmt_price(tech["ema50"]))
+        a3.metric("RSI", f"{tech['rsi']:.1f}")
+        a4.metric("ATR 14", fmt_price(tech["atr"]))
+        l, r = st.columns(2)
+        with l:
+            st.markdown("### 🟢 Support / Put OI")
+            st.write(f"Major support: **{fmt_price(support)}**")
+        with r:
+            st.markdown("### 🔴 Resistance / Call OI")
+            st.write(f"Major resistance: **{fmt_price(resistance)}**")
+        if not candles.empty:
+            st.line_chart(candles.set_index("timestamp")[["close"]].tail(80), use_container_width=True)
 
     st.divider()
     st.caption(
-        f"Live Upstox snapshot • MCX {trading_symbol} • Expiry {selected_expiry} • "
-        f"Updated {updated}. For educational/decision-support use."
+        "MCX options use Upstox MCX option contracts and live quotes. Estimated PoP is model-based and should not be treated as guaranteed profit. "
+        "MCX option expiry/settlement rules can differ by commodity."
     )
 
-    st.stop()
 
 # ============================================================
 # SIDEBAR
@@ -1056,7 +1280,7 @@ with st.sidebar:
     st.markdown("### 📊 Market")
     market_type = st.radio(
         "Select Market",
-        ["Equity F&O", "Commodity (MCX)"],
+        ["Equity F&O", "MCX Options"],
         index=0,
         key="market_type",
     )
@@ -1124,7 +1348,7 @@ with st.sidebar:
     st.divider()
     st.markdown("### 🔎 Analyze Instrument")
 
-    if market_type == "Commodity (MCX)":
+    if market_type == "MCX Options":
         symbol_label = "Commodity"
         symbol_default = st.session_state.get("commodity_symbol", "GOLD")
         symbol_placeholder = "e.g. GOLD, SILVER, CRUDEOIL, NATURALGAS"
@@ -1170,17 +1394,17 @@ with st.sidebar:
     st.caption("No simulated market values are used.")
 
 if analyze:
-    if market_type == "Commodity (MCX)":
+    if market_type == "MCX Options":
         st.session_state["commodity_symbol"] = alias_commodity(symbol_input)
     else:
         st.session_state["symbol"] = alias_symbol(symbol_input)
     st.rerun()
 
-if market_type == "Commodity (MCX)":
+if market_type == "MCX Options":
     commodity_symbol = alias_commodity(
         st.session_state.get("commodity_symbol", symbol_input or "GOLD")
     )
-    render_commodity_market(commodity_symbol, risk_profile)
+    render_mcx_options_market(commodity_symbol, risk_profile)
 
 if refresh:
     st.cache_data.clear()
