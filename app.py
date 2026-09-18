@@ -1,122 +1,744 @@
-import streamlit as st
-import pandas as pd
+import math
+from datetime import date, datetime, timedelta
+from urllib.parse import quote
+
 import numpy as np
+import pandas as pd
+import requests
+import streamlit as st
+
+try:
+    from streamlit_autorefresh import st_autorefresh
+except Exception:
+    st_autorefresh = None
 
 # ============================================================
-# PAGE CONFIG
+# FO PRO TRADER ASSISTANT — LIVE UPSTOX VERSION
+# Restored fuller trade-plan design:
+# PoP, Entry, SL, Target 1, Target 2, Exit, Delta, IV,
+# PCR, OI support/resistance, live option chain and analysis.
 # ============================================================
 
 st.set_page_config(
-    page_title="F&O Pro Trader Assistant",
-    page_icon="📈",
+    page_title="FO PRO Trader Assistant",
+    page_icon="📊",
     layout="wide",
-    initial_sidebar_state="expanded"
+    initial_sidebar_state="expanded",
 )
 
-# ============================================================
-# CSS
-# ============================================================
+API_BASE = "https://api.upstox.com"
 
 st.markdown(
     """
-    <style>
+<style>
+.stApp { background:#f6f8fb; }
+.block-container { padding-top:1rem; padding-bottom:2rem; max-width:1500px; }
+.topbar {
+    background:linear-gradient(100deg,#102a43,#1f4b73);
+    padding:18px 24px; border-radius:14px; color:white; margin-bottom:18px;
+}
+.topbar-title {font-size:27px;font-weight:800;}
+.topbar-sub {font-size:13px;opacity:.82;margin-top:3px;}
+.status-pill {
+    display:inline-block;padding:7px 12px;border-radius:20px;
+    background:#1f9d55;color:white;font-size:12px;font-weight:700;
+}
+.card {
+    background:white;border:1px solid #e7ebf0;border-radius:14px;
+    padding:18px;margin-bottom:16px;box-shadow:0 2px 8px rgba(16,42,67,.04);
+}
+.section-title {font-size:20px;font-weight:800;color:#182230;margin-bottom:12px;}
+.trade-call {
+    background:#eaf8ef;border:1px solid #bde5c9;border-radius:12px;
+    padding:14px 16px;font-weight:800;color:#147a3d;
+}
+.trade-put {
+    background:#fff0f1;border:1px solid #f2c5c8;border-radius:12px;
+    padding:14px 16px;font-weight:800;color:#b4232f;
+}
+.trade-neutral {
+    background:#f2f4f7;border:1px solid #dfe3e8;border-radius:12px;
+    padding:14px 16px;font-weight:800;color:#475467;
+}
+</style>
+""",
+    unsafe_allow_html=True,
+)
 
-    .block-container {
-        padding-top: 1.5rem;
-        padding-bottom: 2rem;
-        max-width: 1450px;
+
+class UpstoxError(RuntimeError):
+    pass
+
+
+def get_token():
+    try:
+        return str(st.secrets.get("UPSTOX_ACCESS_TOKEN", "")).strip()
+    except Exception:
+        return ""
+
+
+TOKEN = get_token()
+
+if not TOKEN:
+    st.error(
+        "Upstox access token is not configured. Add UPSTOX_ACCESS_TOKEN "
+        "under Streamlit → App settings → Secrets, then reload the app."
+    )
+    st.stop()
+
+HEADERS = {
+    "Accept": "application/json",
+    "Content-Type": "application/json",
+    "Authorization": f"Bearer {TOKEN}",
+}
+
+
+def api_get(path, params=None, timeout=20):
+    try:
+        response = requests.get(
+            f"{API_BASE}{path}",
+            headers=HEADERS,
+            params=params,
+            timeout=timeout,
+        )
+    except requests.RequestException as exc:
+        raise UpstoxError(f"Network error while contacting Upstox: {exc}") from exc
+
+    if response.status_code != 200:
+        try:
+            body = response.json()
+            message = body.get("errors") or body.get("message") or body
+        except Exception:
+            message = response.text[:500]
+        raise UpstoxError(f"Upstox API {response.status_code}: {message}")
+
+    try:
+        return response.json()
+    except Exception as exc:
+        raise UpstoxError("Upstox returned invalid JSON.") from exc
+
+
+def fmt_price(value):
+    try:
+        x = float(value)
+    except Exception:
+        return "—"
+    if np.isnan(x):
+        return "—"
+    return f"₹{x:,.2f}" if abs(x) < 1000 else f"₹{x:,.0f}"
+
+
+def fmt_num(value):
+    try:
+        x = float(value)
+    except Exception:
+        return "—"
+    if np.isnan(x):
+        return "—"
+    return f"{x:,.0f}"
+
+
+def safe_float(value, default=np.nan):
+    try:
+        return float(value)
+    except Exception:
+        return default
+
+
+def alias_symbol(symbol):
+    s = symbol.strip().upper().replace(" ", "")
+    aliases = {
+        "NIFTY50": "NIFTY",
+        "NIFTYBANK": "BANKNIFTY",
+        "NIFTYFIN": "FINNIFTY",
+        "MIDCAPNIFTY": "MIDCPNIFTY",
+    }
+    return aliases.get(s, s)
+
+
+@st.cache_data(ttl=30, show_spinner=False)
+def search_underlying(symbol):
+    symbol = alias_symbol(symbol)
+    results = []
+
+    for segment in ["EQ", "INDEX"]:
+        payload = api_get(
+            "/v2/instruments/search",
+            params={
+                "query": symbol,
+                "exchanges": "NSE",
+                "segments": segment,
+                "page_number": 1,
+                "records": 30,
+            },
+        )
+        results.extend(payload.get("data", []))
+
+    if not results:
+        raise UpstoxError(
+            f"No NSE instrument found for '{symbol}'. "
+            "Enter an NSE F&O stock symbol such as HDFCBANK or an index such as NIFTY."
+        )
+
+    exact = [
+        item for item in results
+        if str(item.get("trading_symbol", "")).upper() == symbol
+    ]
+    if exact:
+        return exact[0]
+
+    if symbol in {"NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY"}:
+        indexes = [x for x in results if x.get("segment") == "NSE_INDEX"]
+        if indexes:
+            return indexes[0]
+
+    equities = [x for x in results if x.get("segment") == "NSE_EQ"]
+    return equities[0] if equities else results[0]
+
+
+@st.cache_data(ttl=120, show_spinner=False)
+def get_contracts(underlying_key):
+    payload = api_get(
+        "/v2/option/contract",
+        params={"instrument_key": underlying_key},
+        timeout=30,
+    )
+    contracts = payload.get("data", [])
+    if not contracts:
+        raise UpstoxError("Upstox returned no option contracts for this instrument.")
+    return contracts
+
+
+def available_expiries(contracts):
+    today = date.today().isoformat()
+    return sorted(
+        {
+            str(item.get("expiry"))
+            for item in contracts
+            if item.get("expiry") and str(item.get("expiry")) >= today
+        }
+    )
+
+
+@st.cache_data(ttl=20, show_spinner=False)
+def get_option_chain(underlying_key, expiry):
+    payload = api_get(
+        "/v2/option/chain",
+        params={
+            "instrument_key": underlying_key,
+            "expiry_date": expiry,
+        },
+        timeout=30,
+    )
+    rows = payload.get("data", [])
+    if not rows:
+        raise UpstoxError(f"No option-chain data returned for expiry {expiry}.")
+    return rows
+
+
+@st.cache_data(ttl=20, show_spinner=False)
+def get_quote(instrument_key):
+    payload = api_get(
+        "/v3/market-quote/quotes",
+        params={"instrument_key": instrument_key},
+    )
+    data = payload.get("data", {})
+    if not data:
+        raise UpstoxError("No live quote returned by Upstox.")
+    return next(iter(data.values()))
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def get_daily_candles(instrument_key):
+    end_date = date.today()
+    start_date = end_date - timedelta(days=160)
+
+    path = (
+        f"/v3/historical-candle/{quote(instrument_key, safe='')}"
+        f"/days/1/{end_date.isoformat()}/{start_date.isoformat()}"
+    )
+
+    payload = api_get(path, timeout=30)
+    candles = payload.get("data", {}).get("candles", [])
+
+    if not candles:
+        return pd.DataFrame()
+
+    df = pd.DataFrame(
+        candles,
+        columns=["timestamp", "open", "high", "low", "close", "volume", "oi"],
+    )
+
+    for column in ["open", "high", "low", "close", "volume", "oi"]:
+        df[column] = pd.to_numeric(df[column], errors="coerce")
+
+    df["timestamp"] = pd.to_datetime(df["timestamp"], errors="coerce")
+    return df.sort_values("timestamp").reset_index(drop=True)
+
+
+def technicals(df, spot):
+    if df.empty or len(df) < 20:
+        return {
+            "rsi": 50.0,
+            "ema20": spot,
+            "ema50": spot,
+            "atr": spot * 0.01,
+            "trend": "Unavailable",
+        }
+
+    close = df["close"]
+    delta = close.diff()
+
+    gain = delta.clip(lower=0).rolling(14).mean()
+    loss = (-delta.clip(upper=0)).rolling(14).mean()
+
+    rs = gain / loss.replace(0, np.nan)
+    rsi = 100 - (100 / (1 + rs))
+
+    ema20 = close.ewm(span=20, adjust=False).mean()
+    ema50 = close.ewm(span=50, adjust=False).mean()
+
+    previous_close = close.shift(1)
+    true_range = pd.concat(
+        [
+            df["high"] - df["low"],
+            (df["high"] - previous_close).abs(),
+            (df["low"] - previous_close).abs(),
+        ],
+        axis=1,
+    ).max(axis=1)
+
+    atr = true_range.rolling(14).mean()
+
+    latest_rsi = safe_float(rsi.iloc[-1], 50.0)
+    latest_ema20 = safe_float(ema20.iloc[-1], spot)
+    latest_ema50 = safe_float(ema50.iloc[-1], spot)
+    latest_atr = safe_float(atr.iloc[-1], spot * 0.01)
+
+    if spot > latest_ema20 > latest_ema50:
+        trend = "Bullish"
+    elif spot < latest_ema20 < latest_ema50:
+        trend = "Bearish"
+    else:
+        trend = "Sideways"
+
+    return {
+        "rsi": latest_rsi,
+        "ema20": latest_ema20,
+        "ema50": latest_ema50,
+        "atr": latest_atr,
+        "trend": trend,
     }
 
-    .app-header {
-        background: white;
-        padding: 20px 24px;
-        border-radius: 14px;
-        border: 1px solid #e5e7eb;
-        margin-bottom: 20px;
+
+def normalize_chain(rows):
+    records = []
+
+    for item in rows:
+        strike = safe_float(item.get("strike_price"))
+
+        call = item.get("call_options") or {}
+        put = item.get("put_options") or {}
+
+        call_market = call.get("market_data") or {}
+        call_greeks = call.get("option_greeks") or {}
+        put_market = put.get("market_data") or {}
+        put_greeks = put.get("option_greeks") or {}
+
+        call_oi = safe_float(call_market.get("oi"), 0)
+        put_oi = safe_float(put_market.get("oi"), 0)
+
+        call_prev_oi = safe_float(call_market.get("prev_oi"), 0)
+        put_prev_oi = safe_float(put_market.get("prev_oi"), 0)
+
+        records.append(
+            {
+                "Strike": strike,
+                "CE Key": call.get("instrument_key"),
+                "CE LTP": safe_float(call_market.get("ltp")),
+                "CE Bid": safe_float(call_market.get("bid_price")),
+                "CE Ask": safe_float(call_market.get("ask_price")),
+                "CE OI": call_oi,
+                "CE Chg OI": call_oi - call_prev_oi,
+                "CE Volume": safe_float(call_market.get("volume"), 0),
+                "CE IV": safe_float(call_greeks.get("iv")),
+                "CE Delta": safe_float(call_greeks.get("delta")),
+                "CE PoP": safe_float(call_greeks.get("pop")),
+                "PE Key": put.get("instrument_key"),
+                "PE LTP": safe_float(put_market.get("ltp")),
+                "PE Bid": safe_float(put_market.get("bid_price")),
+                "PE Ask": safe_float(put_market.get("ask_price")),
+                "PE OI": put_oi,
+                "PE Chg OI": put_oi - put_prev_oi,
+                "PE Volume": safe_float(put_market.get("volume"), 0),
+                "PE IV": safe_float(put_greeks.get("iv")),
+                "PE Delta": safe_float(put_greeks.get("delta")),
+                "PE PoP": safe_float(put_greeks.get("pop")),
+            }
+        )
+
+    return pd.DataFrame(records).sort_values("Strike").reset_index(drop=True)
+
+
+def oi_levels(chain, spot):
+    valid = chain.dropna(subset=["Strike"]).copy()
+
+    below = valid[valid["Strike"] <= spot]
+    above = valid[valid["Strike"] >= spot]
+
+    support_row = (
+        below.loc[below["PE OI"].idxmax()]
+        if not below.empty
+        else valid.loc[valid["PE OI"].idxmax()]
+    )
+
+    resistance_row = (
+        above.loc[above["CE OI"].idxmax()]
+        if not above.empty
+        else valid.loc[valid["CE OI"].idxmax()]
+    )
+
+    total_call_oi = valid["CE OI"].sum()
+    total_put_oi = valid["PE OI"].sum()
+    pcr = total_put_oi / total_call_oi if total_call_oi else np.nan
+
+    return (
+        float(support_row["Strike"]),
+        float(resistance_row["Strike"]),
+        pcr,
+    )
+
+
+def nearest_row(chain, strike):
+    if chain.empty:
+        return None
+    index = (chain["Strike"] - strike).abs().idxmin()
+    return chain.loc[index]
+
+
+def score_option(row, side, spot, pcr, tech):
+    if side == "CE":
+        premium = row["CE LTP"]
+        delta = row["CE Delta"]
+        iv = row["CE IV"]
+        pop = row["CE PoP"]
+        chg_oi = row["CE Chg OI"]
+        volume = row["CE Volume"]
+
+        directional = 25 if tech["trend"] == "Bullish" else 10 if tech["trend"] == "Sideways" else 0
+        pcr_score = 10 if pcr >= 0.90 else 5 if pcr >= 0.75 else 0
+    else:
+        premium = row["PE LTP"]
+        delta = row["PE Delta"]
+        iv = row["PE IV"]
+        pop = row["PE PoP"]
+        chg_oi = row["PE Chg OI"]
+        volume = row["PE Volume"]
+
+        directional = 25 if tech["trend"] == "Bearish" else 10 if tech["trend"] == "Sideways" else 0
+        pcr_score = 10 if pcr <= 1.10 else 5 if pcr <= 1.30 else 0
+
+    distance_pct = abs(float(row["Strike"]) - spot) / max(spot, 1)
+    distance_score = max(0, 15 - distance_pct * 500)
+
+    delta_score = (
+        np.clip((abs(delta) - 0.30) / 0.45 * 20, 0, 20)
+        if not np.isnan(delta) else 0
+    )
+
+    pop_score = (
+        np.clip((pop - 40) / 30 * 20, 0, 20)
+        if not np.isnan(pop) else 0
+    )
+
+    liquidity_score = 10 if volume > 0 else 0
+    oi_score = 5 if chg_oi < 0 else 2
+
+    score = float(
+        np.clip(
+            directional
+            + pcr_score
+            + distance_score
+            + delta_score
+            + pop_score
+            + liquidity_score
+            + oi_score,
+            0,
+            100,
+        )
+    )
+
+    return {
+        "score": score,
+        "premium": premium,
+        "delta": delta,
+        "iv": iv,
+        "pop": pop,
+        "chg_oi": chg_oi,
+        "volume": volume,
     }
 
-    .app-title {
-        font-size: 30px;
-        font-weight: 800;
-        color: #111827;
-        line-height: 1.2;
+
+def build_plan(row, side, spot, support, resistance, pcr, tech, risk_profile):
+    if row is None:
+        return None
+
+    scored = score_option(row, side, spot, pcr, tech)
+
+    entry = row[f"{side} Ask"]
+    if np.isnan(entry) or entry <= 0:
+        entry = row[f"{side} LTP"]
+
+    if np.isnan(entry) or entry <= 0:
+        return None
+
+    risk_settings = {
+        "Conservative": (0.75, 1.30, 1.60),
+        "Balanced": (0.70, 1.40, 1.80),
+        "Aggressive": (0.65, 1.55, 2.10),
     }
 
-    .app-subtitle {
-        font-size: 14px;
-        color: #6b7280;
-        margin-top: 6px;
+    sl_factor, target1_factor, target2_factor = risk_settings[risk_profile]
+
+    sl = round(entry * sl_factor, 2)
+    target1 = round(entry * target1_factor, 2)
+    target2 = round(entry * target2_factor, 2)
+
+    rr1 = (target1 - entry) / max(entry - sl, 0.01)
+    rr2 = (target2 - entry) / max(entry - sl, 0.01)
+
+    if side == "CE":
+        trigger = (
+            f"Enter only after spot sustains above resistance/trigger "
+            f"around {fmt_price(resistance)}."
+        )
+        exit_rule = (
+            f"Exit if spot closes below support {fmt_price(support)} "
+            f"or option premium hits {fmt_price(sl)}. "
+            f"After Target 1, book partial profit and trail the balance."
+        )
+    else:
+        trigger = (
+            f"Enter only after spot breaks and sustains below support/trigger "
+            f"around {fmt_price(support)}."
+        )
+        exit_rule = (
+            f"Exit if spot closes above resistance {fmt_price(resistance)} "
+            f"or option premium hits {fmt_price(sl)}. "
+            f"After Target 1, book partial profit and trail the balance."
+        )
+
+    return {
+        "side": side,
+        "strike": float(row["Strike"]),
+        "entry": float(entry),
+        "sl": sl,
+        "target1": target1,
+        "target2": target2,
+        "pop": scored["pop"],
+        "delta": scored["delta"],
+        "iv": scored["iv"],
+        "score": scored["score"],
+        "rr1": rr1,
+        "rr2": rr2,
+        "trigger": trigger,
+        "exit": exit_rule,
+        "oi": row[f"{side} OI"],
+        "chg_oi": scored["chg_oi"],
+        "volume": scored["volume"],
     }
 
-    .ready-box {
-        background: white;
-        border: 1px solid #e5e7eb;
-        border-radius: 18px;
-        padding: 100px 30px;
-        text-align: center;
-        min-height: 500px;
-    }
 
-    .ready-icon {
-        font-size: 65px;
-    }
+# ============================================================
+# SIDEBAR
+# ============================================================
 
-    .ready-title {
-        font-size: 30px;
-        font-weight: 800;
-        margin-top: 15px;
-        color: #111827;
-    }
+with st.sidebar:
+    st.markdown("### 🔎 Analyze Instrument")
 
-    .ready-text {
-        color: #6b7280;
-        font-size: 16px;
-        margin-top: 10px;
-    }
+    symbol_input = st.text_input(
+        "Stock / Index",
+        value=st.session_state.get("symbol", "KOTAKBANK"),
+        placeholder="e.g. KOTAKBANK, HDFCBANK, NIFTY",
+        label_visibility="collapsed",
+    )
 
-    .card {
-        background: white;
-        border: 1px solid #e5e7eb;
-        border-radius: 14px;
-        padding: 20px;
-        margin-bottom: 15px;
-    }
+    risk_profile = st.selectbox(
+        "Risk Profile",
+        ["Conservative", "Balanced", "Aggressive"],
+        index=1,
+    )
 
-    .card-title {
-        font-size: 20px;
-        font-weight: 800;
-        color: #111827;
-    }
+    analyze = st.button(
+        "🔍 Analyze",
+        type="primary",
+        use_container_width=True,
+    )
 
-    .card-subtitle {
-        font-size: 14px;
-        color: #6b7280;
-        margin-top: 5px;
-    }
+    refresh = st.button(
+        "↻ Refresh Live Data",
+        use_container_width=True,
+    )
 
-    .signal {
-        font-size: 28px;
-        font-weight: 800;
-        color: #111827;
-    }
+    if st_autorefresh is not None:
+        auto_refresh = st.checkbox(
+            "Auto refresh every 30 seconds",
+            value=True,
+        )
+        if auto_refresh:
+            st_autorefresh(interval=30_000, key="upstox_live_refresh")
 
-    .signal-description {
-        font-size: 14px;
-        color: #6b7280;
-        margin-top: 5px;
-    }
+    st.divider()
+    st.caption("LIVE DATA • Powered by Upstox")
+    st.caption("No simulated market values are used.")
 
-    .section-heading {
-        font-size: 21px;
-        font-weight: 800;
-        color: #111827;
-        margin-top: 10px;
-        margin-bottom: 10px;
-    }
+if analyze:
+    st.session_state["symbol"] = alias_symbol(symbol_input)
+    st.rerun()
 
-    </style>
-    """,
-    unsafe_allow_html=True
+if refresh:
+    st.cache_data.clear()
+    st.rerun()
+
+symbol = alias_symbol(
+    st.session_state.get("symbol", symbol_input or "KOTAKBANK")
+)
+
+# ============================================================
+# LIVE DATA
+# ============================================================
+
+try:
+    with st.spinner(f"Fetching live Upstox data for {symbol}..."):
+        underlying = search_underlying(symbol)
+        underlying_key = underlying["instrument_key"]
+
+        contracts = get_contracts(underlying_key)
+        expiries = available_expiries(contracts)
+
+        if not expiries:
+            raise UpstoxError(
+                "Upstox did not return an upcoming F&O expiry for this instrument."
+            )
+
+        selected_expiry = expiries[0]
+
+        raw_chain = get_option_chain(
+            underlying_key,
+            selected_expiry,
+        )
+
+        chain = normalize_chain(raw_chain)
+
+        quote_data = get_quote(underlying_key)
+
+        spot = safe_float(quote_data.get("last_price"))
+        previous_close = safe_float(
+            quote_data.get("prev_close_price"),
+            spot,
+        )
+
+        net_change = safe_float(
+            quote_data.get("net_change"),
+            spot - previous_close,
+        )
+
+        change_pct = (
+            net_change / previous_close * 100
+            if previous_close
+            else 0
+        )
+
+        candles = get_daily_candles(underlying_key)
+        tech = technicals(candles, spot)
+
+except UpstoxError as exc:
+    st.error(str(exc))
+    st.stop()
+except Exception as exc:
+    st.error(f"Unexpected error while loading live data: {exc}")
+    st.stop()
+
+support, resistance, pcr = oi_levels(chain, spot)
+
+atm_index = (chain["Strike"] - spot).abs().idxmin()
+atm_strike = float(chain.loc[atm_index, "Strike"])
+
+candidate_rows = chain.iloc[
+    max(0, atm_index - 3): min(len(chain), atm_index + 4)
+]
+
+ce_scores = []
+pe_scores = []
+
+for _, row in candidate_rows.iterrows():
+    ce_scores.append(
+        (
+            score_option(row, "CE", spot, pcr, tech)["score"],
+            float(row["Strike"]),
+        )
+    )
+    pe_scores.append(
+        (
+            score_option(row, "PE", spot, pcr, tech)["score"],
+            float(row["Strike"]),
+        )
+    )
+
+best_ce_strike = max(ce_scores, default=(0, atm_strike))[1]
+best_pe_strike = max(pe_scores, default=(0, atm_strike))[1]
+
+ce_plan = build_plan(
+    nearest_row(chain, best_ce_strike),
+    "CE",
+    spot,
+    support,
+    resistance,
+    pcr,
+    tech,
+    risk_profile,
+)
+
+pe_plan = build_plan(
+    nearest_row(chain, best_pe_strike),
+    "PE",
+    spot,
+    support,
+    resistance,
+    pcr,
+    tech,
+    risk_profile,
+)
+
+ce_score = ce_plan["score"] if ce_plan else 0
+pe_score = pe_plan["score"] if pe_plan else 0
+
+if (
+    ce_plan
+    and ce_score >= 60
+    and ce_score >= pe_score + 5
+    and tech["trend"] == "Bullish"
+):
+    decision = "CALL BUY"
+    decision_class = "trade-call"
+    best_plan = ce_plan
+elif (
+    pe_plan
+    and pe_score >= 60
+    and pe_score >= ce_score + 5
+    and tech["trend"] == "Bearish"
+):
+    decision = "PUT BUY"
+    decision_class = "trade-put"
+    best_plan = pe_plan
+else:
+    decision = "NO TRADE"
+    decision_class = "trade-neutral"
+    best_plan = ce_plan if ce_score >= pe_score else pe_plan
+
+updated = quote_data.get(
+    "timestamp",
+    datetime.now().astimezone().isoformat(),
 )
 
 # ============================================================
@@ -125,595 +747,187 @@ st.markdown(
 
 st.markdown(
     """
-    <div class="app-header">
-        <div class="app-title">📈 F&O Pro Trader Assistant</div>
-        <div class="app-subtitle">
-            Options market analysis • Entry • Stop Loss • Target • Exit
-        </div>
+<div class="topbar">
+    <div class="topbar-title">📊 FO PRO Trader Assistant</div>
+    <div class="topbar-sub">
+        Options Analysis • Powered by Upstox • Live market data
     </div>
-    """,
-    unsafe_allow_html=True
+</div>
+""",
+    unsafe_allow_html=True,
 )
 
-# ============================================================
-# SESSION STATE
-# ============================================================
+h1, h2, h3 = st.columns([2.2, 1.2, 1.0])
 
-if "analyzed" not in st.session_state:
-    st.session_state.analyzed = False
+with h1:
+    st.markdown(f"## {symbol} — F&O Options Analysis")
 
-if "symbol" not in st.session_state:
-    st.session_state.symbol = ""
-
-if "risk" not in st.session_state:
-    st.session_state.risk = "Balanced"
-
-
-# ============================================================
-# SYMBOL NORMALIZATION
-# ============================================================
-
-symbol_aliases = {
-    "HDFC": "HDFCBANK",
-    "HDFC BANK": "HDFCBANK",
-    "HDFC BANK LTD": "HDFCBANK",
-    "KOTAK": "KOTAKBANK",
-    "KOTAK BANK": "KOTAKBANK",
-    "ICICI": "ICICIBANK",
-    "SBI": "SBIN",
-    "BHARTI": "BHARTIARTL",
-    "AIRTEL": "BHARTIARTL",
-    "NIFTY 50": "NIFTY",
-    "NIFTY50": "NIFTY",
-    "BANK NIFTY": "BANKNIFTY",
-    "BANKNIFTY": "BANKNIFTY"
-}
-
-
-def normalize_symbol(value):
-    value = value.strip().upper()
-
-    if value in symbol_aliases:
-        return symbol_aliases[value]
-
-    return value
-
-
-# ============================================================
-# MARKET DATA
-# ============================================================
-
-market_data = {
-
-    "NIFTY": {
-        "spot": 25200,
-        "pcr": 1.08,
-        "rsi": 58,
-        "trend": "Bullish",
-        "momentum": "Positive",
-        "volume": "Above Normal",
-        "call_wall": 25300,
-        "put_wall": 25000
-    },
-
-    "BANKNIFTY": {
-        "spot": 57500,
-        "pcr": 1.02,
-        "rsi": 55,
-        "trend": "Bullish",
-        "momentum": "Positive",
-        "volume": "Normal",
-        "call_wall": 58000,
-        "put_wall": 57000
-    },
-
-    "HDFCBANK": {
-        "spot": 1950,
-        "pcr": 1.06,
-        "rsi": 55,
-        "trend": "Bullish",
-        "momentum": "Positive",
-        "volume": "Normal",
-        "call_wall": 2000,
-        "put_wall": 1900
-    },
-
-    "KOTAKBANK": {
-        "spot": 420,
-        "pcr": 0.96,
-        "rsi": 56,
-        "trend": "Bullish",
-        "momentum": "Positive",
-        "volume": "Above Normal",
-        "call_wall": 430,
-        "put_wall": 410
-    },
-
-    "RELIANCE": {
-        "spot": 1400,
-        "pcr": 1.10,
-        "rsi": 57,
-        "trend": "Bullish",
-        "momentum": "Positive",
-        "volume": "Above Normal",
-        "call_wall": 1450,
-        "put_wall": 1380
-    },
-
-    "ICICIBANK": {
-        "spot": 1450,
-        "pcr": 1.03,
-        "rsi": 54,
-        "trend": "Bullish",
-        "momentum": "Positive",
-        "volume": "Normal",
-        "call_wall": 1500,
-        "put_wall": 1400
-    },
-
-    "SBIN": {
-        "spot": 900,
-        "pcr": 1.00,
-        "rsi": 53,
-        "trend": "Sideways",
-        "momentum": "Neutral",
-        "volume": "Normal",
-        "call_wall": 920,
-        "put_wall": 880
-    },
-
-    "INFY": {
-        "spot": 1500,
-        "pcr": 0.98,
-        "rsi": 52,
-        "trend": "Sideways",
-        "momentum": "Neutral",
-        "volume": "Normal",
-        "call_wall": 1550,
-        "put_wall": 1470
-    },
-
-    "TCS": {
-        "spot": 3100,
-        "pcr": 1.01,
-        "rsi": 51,
-        "trend": "Sideways",
-        "momentum": "Neutral",
-        "volume": "Normal",
-        "call_wall": 3200,
-        "put_wall": 3050
-    },
-
-    "BHARTIARTL": {
-        "spot": 1850,
-        "pcr": 1.07,
-        "rsi": 56,
-        "trend": "Bullish",
-        "momentum": "Positive",
-        "volume": "Above Normal",
-        "call_wall": 1900,
-        "put_wall": 1800
-    },
-
-    "INDUSTOWER": {
-        "spot": 382,
-        "pcr": 1.04,
-        "rsi": 54,
-        "trend": "Bullish",
-        "momentum": "Positive",
-        "volume": "Normal",
-        "call_wall": 390,
-        "put_wall": 375
-    }
-}
-
-
-# ============================================================
-# SIDEBAR
-# ============================================================
-
-with st.sidebar:
-
-    st.markdown("### 🔎 Analyze Instrument")
-
-    st.caption(
-        "Enter an NSE stock or index available in F&O."
+with h2:
+    st.markdown("**Last Traded**")
+    st.markdown(
+        f"<span style='font-size:25px;font-weight:800'>{fmt_price(spot)}</span>",
+        unsafe_allow_html=True,
     )
+    st.caption(f"{net_change:+.2f} ({change_pct:+.2f}%)")
 
-    entered_symbol = st.text_input(
-        "Stock / Index",
-        value=st.session_state.symbol,
-        placeholder="Enter symbol e.g. HDFCBANK",
-        label_visibility="visible"
+with h3:
+    st.markdown("**Data Status**")
+    st.markdown(
+        '<span class="status-pill">● LIVE UPSTOX</span>',
+        unsafe_allow_html=True,
     )
-
-    risk = st.selectbox(
-        "Risk Profile",
-        [
-            "Conservative",
-            "Balanced",
-            "Aggressive"
-        ],
-        index=[
-            "Conservative",
-            "Balanced",
-            "Aggressive"
-        ].index(st.session_state.risk)
-    )
-
-    analyze = st.button(
-        "🔍 Analyze",
-        type="primary",
-        use_container_width=True
-    )
-
-    st.markdown("---")
-
-    st.markdown("### ⚡ Quick Select")
-
-    quick_symbols = [
-        "NIFTY",
-        "BANKNIFTY",
-        "HDFCBANK",
-        "KOTAKBANK",
-        "RELIANCE",
-        "ICICIBANK",
-        "SBIN",
-        "INFY",
-        "TCS",
-        "BHARTIARTL"
-    ]
-
-    for item in quick_symbols:
-
-        if st.button(
-            item,
-            key="quick_" + item,
-            use_container_width=True
-        ):
-
-            st.session_state.symbol = item
-            st.session_state.risk = risk
-            st.session_state.analyzed = True
-            st.rerun()
-
+    st.caption(f"Expiry: {selected_expiry}")
 
 # ============================================================
-# ANALYZE BUTTON
+# MARKET SNAPSHOT
 # ============================================================
 
-if analyze:
+st.markdown('<div class="card">', unsafe_allow_html=True)
+st.markdown(
+    '<div class="section-title">📊 Market Snapshot</div>',
+    unsafe_allow_html=True,
+)
 
-    if not entered_symbol.strip():
+m1, m2, m3, m4, m5, m6 = st.columns(6)
 
-        st.warning("Please enter a stock or index.")
+m1.metric(
+    "Live Price",
+    fmt_price(spot),
+    f"{net_change:+.2f} ({change_pct:+.2f}%)",
+)
 
-    else:
+m2.metric("Bias", tech["trend"])
+m3.metric(
+    "PCR",
+    f"{pcr:.2f}" if not np.isnan(pcr) else "—",
+)
+m4.metric("Support", fmt_price(support))
+m5.metric("Resistance", fmt_price(resistance))
+m6.metric("RSI", f"{tech['rsi']:.1f}")
 
-        st.session_state.symbol = normalize_symbol(
-            entered_symbol
+st.markdown('</div>', unsafe_allow_html=True)
+
+# ============================================================
+# TRADE DECISION
+# ============================================================
+
+st.markdown('<div class="card">', unsafe_allow_html=True)
+
+st.markdown(
+    '<div class="section-title">🎯 Trade Decision</div>',
+    unsafe_allow_html=True,
+)
+
+st.markdown(
+    f'<div class="{decision_class}">Decision: {decision}</div>',
+    unsafe_allow_html=True,
+)
+
+d1, d2, d3, d4 = st.columns(4)
+
+d1.metric("Bull Score", f"{ce_score:.0f}/100")
+d2.metric("Bear Score", f"{pe_score:.0f}/100")
+d3.metric("Trend", tech["trend"])
+d4.metric("ATR", fmt_price(tech["atr"]))
+
+st.markdown('</div>', unsafe_allow_html=True)
+
+# ============================================================
+# TRADE PLAN
+# ============================================================
+
+st.markdown('<div class="card">', unsafe_allow_html=True)
+
+st.markdown(
+    '<div class="section-title">🎯 Trade Plan</div>',
+    unsafe_allow_html=True,
+)
+
+plan_rows = []
+
+for label, plan in [
+    ("CALL", ce_plan),
+    ("PUT", pe_plan),
+]:
+    if plan:
+        plan_rows.append(
+            {
+                "Side": label,
+                "Strike": int(plan["strike"]),
+                "Entry (₹)": round(plan["entry"], 2),
+                "SL (₹)": round(plan["sl"], 2),
+                "Target 1 (₹)": round(plan["target1"], 2),
+                "Target 2 (₹)": round(plan["target2"], 2),
+                "PoP": (
+                    f"{plan['pop']:.1f}%"
+                    if not np.isnan(plan["pop"])
+                    else "—"
+                ),
+                "Delta": (
+                    round(plan["delta"], 3)
+                    if not np.isnan(plan["delta"])
+                    else "—"
+                ),
+                "IV": (
+                    f"{plan['iv']:.1f}%"
+                    if not np.isnan(plan["iv"])
+                    else "—"
+                ),
+                "R:R T1": f"1:{plan['rr1']:.2f}",
+            }
         )
 
-        st.session_state.risk = risk
-        st.session_state.analyzed = True
-
-        st.rerun()
-
-
-# ============================================================
-# READY SCREEN
-# ============================================================
-
-if not st.session_state.analyzed:
-
-    st.markdown(
-        """
-        <div class="ready-box">
-
-            <div class="ready-icon">📈</div>
-
-            <div class="ready-title">
-                READY FOR ANALYSIS
-            </div>
-
-            <div class="ready-text">
-                Enter a stock or index on the left
-                and click Analyze.
-            </div>
-
-        </div>
-        """,
-        unsafe_allow_html=True
+if plan_rows:
+    st.dataframe(
+        pd.DataFrame(plan_rows),
+        use_container_width=True,
+        hide_index=True,
     )
 
-    st.stop()
+if best_plan:
+    st.markdown("### Entry / Exit Rules")
 
+    e1, e2 = st.columns(2)
 
-# ============================================================
-# GET SYMBOL
-# ============================================================
+    with e1:
+        st.markdown("**Entry Trigger**")
+        st.write(best_plan["trigger"])
 
-symbol = normalize_symbol(
-    st.session_state.symbol
+        st.markdown("**Entry**")
+        st.write(fmt_price(best_plan["entry"]))
+
+        st.markdown("**Stop Loss**")
+        st.write(fmt_price(best_plan["sl"]))
+
+        st.markdown("**Target 1 / Target 2**")
+        st.write(
+            f"{fmt_price(best_plan['target1'])} / "
+            f"{fmt_price(best_plan['target2'])}"
+        )
+
+    with e2:
+        st.markdown("**Exit Rule**")
+        st.write(best_plan["exit"])
+
+        st.markdown("**PoP**")
+        st.write(
+            f"{best_plan['pop']:.1f}%"
+            if not np.isnan(best_plan["pop"])
+            else "Not returned by Upstox"
+        )
+
+        st.markdown("**Risk / Reward**")
+        st.write(
+            f"Target 1: 1:{best_plan['rr1']:.2f} | "
+            f"Target 2: 1:{best_plan['rr2']:.2f}"
+        )
+
+st.caption(
+    "PoP is the Probability of Profit returned by Upstox for the option contract; "
+    "it is not a guarantee of profit."
 )
 
-risk = st.session_state.risk
-
-
-# ============================================================
-# CHECK SYMBOL
-# ============================================================
-
-if symbol not in market_data:
-
-    st.error(
-        f"'{symbol}' is not currently available in the analysis list."
-    )
-
-    st.info(
-        "Try HDFCBANK, KOTAKBANK, RELIANCE, ICICIBANK, "
-        "SBIN, INFY, TCS, BHARTIARTL, NIFTY or BANKNIFTY."
-    )
-
-    st.stop()
-
-
-# ============================================================
-# LOAD DATA
-# ============================================================
-
-data = market_data[symbol]
-
-spot = float(data["spot"])
-pcr = float(data["pcr"])
-rsi = float(data["rsi"])
-
-
-# ============================================================
-# ANALYSIS ENGINE
-# ============================================================
-
-score = 0
-
-if data["trend"] == "Bullish":
-    score += 2
-
-elif data["trend"] == "Bearish":
-    score -= 2
-
-
-if data["momentum"] == "Positive":
-    score += 1
-
-elif data["momentum"] == "Negative":
-    score -= 1
-
-
-if pcr >= 1.05:
-    score += 1
-
-elif pcr <= 0.95:
-    score -= 1
-
-
-if rsi >= 55:
-    score += 1
-
-elif rsi <= 45:
-    score -= 1
-
-
-# ============================================================
-# SIGNAL
-# ============================================================
-
-if score >= 3:
-
-    action = "CALL BUY"
-    bias = "Bullish"
-
-elif score <= -3:
-
-    action = "PUT BUY"
-    bias = "Bearish"
-
-else:
-
-    action = "NO TRADE"
-    bias = "Neutral"
-
-
-# ============================================================
-# TRADE PLAN
-# ============================================================
-
-if action == "CALL BUY":
-
-    strike = round(spot / 50) * 50
-
-    entry = spot
-    stop_loss = spot * 0.985
-    target = spot * 1.03
-
-    option_type = "CE"
-
-
-elif action == "PUT BUY":
-
-    strike = round(spot / 50) * 50
-
-    entry = spot
-    stop_loss = spot * 1.015
-    target = spot * 0.97
-
-    option_type = "PE"
-
-
-else:
-
-    strike = round(spot / 50) * 50
-
-    entry = spot
-    stop_loss = None
-    target = None
-
-    option_type = "-"
-
-
-# ============================================================
-# PAGE TITLE
-# ============================================================
-
-st.markdown(
-    f"## 📊 {symbol} — F&O Analysis"
-)
-
-
-# ============================================================
-# MARKET STATUS
-# ============================================================
-
-if action == "CALL BUY":
-
-    st.success(
-        f"Market Bias: {bias}  |  Signal: CALL BUY"
-    )
-
-elif action == "PUT BUY":
-
-    st.error(
-        f"Market Bias: {bias}  |  Signal: PUT BUY"
-    )
-
-else:
-
-    st.warning(
-        "Market Bias: Neutral  |  "
-        "Signal: Market conditions are not strong enough for a trade"
-    )
-
-
-# ============================================================
-# TRADE SIGNAL
-# ============================================================
-
-st.markdown(
-    '<div class="card">',
-    unsafe_allow_html=True
-)
-
-st.markdown(
-    f'<div class="signal">{action}</div>',
-    unsafe_allow_html=True
-)
-
-st.markdown(
-    """
-    <div class="signal-description">
-        Suggested setup based on the available market factors.
-    </div>
-    """,
-    unsafe_allow_html=True
-)
-
-st.markdown("</div>", unsafe_allow_html=True)
-
-
-# ============================================================
-# KEY METRICS
-# ============================================================
-
-st.markdown(
-    '<div class="section-heading">📊 Market Snapshot</div>',
-    unsafe_allow_html=True
-)
-
-c1, c2, c3, c4, c5 = st.columns(5)
-
-with c1:
-    st.metric(
-        "SPOT PRICE",
-        f"₹{spot:,.2f}"
-    )
-
-with c2:
-    st.metric(
-        "PCR",
-        f"{pcr:.2f}"
-    )
-
-with c3:
-    st.metric(
-        "RSI",
-        f"{rsi:.1f}"
-    )
-
-with c4:
-    st.metric(
-        "TREND",
-        data["trend"]
-    )
-
-with c5:
-    st.metric(
-        "VOLUME",
-        data["volume"]
-    )
-
-
-# ============================================================
-# TRADE PLAN
-# ============================================================
-
-st.markdown(
-    '<div class="section-heading">🎯 Trade Plan</div>',
-    unsafe_allow_html=True
-)
-
-t1, t2, t3, t4, t5 = st.columns(5)
-
-with t1:
-    st.metric(
-        "Action",
-        action
-    )
-
-with t2:
-    st.metric(
-        "Strike",
-        f"{strike:.0f}"
-    )
-
-with t3:
-    st.metric(
-        "Entry",
-        f"₹{entry:,.2f}"
-    )
-
-with t4:
-
-    if stop_loss is None:
-        sl_text = "—"
-    else:
-        sl_text = f"₹{stop_loss:,.2f}"
-
-    st.metric(
-        "Stop Loss",
-        sl_text
-    )
-
-with t5:
-
-    if target is None:
-        target_text = "—"
-    else:
-        target_text = f"₹{target:,.2f}"
-
-    st.metric(
-        "Target",
-        target_text
-    )
-
+st.markdown('</div>', unsafe_allow_html=True)
 
 # ============================================================
 # TABS
@@ -721,222 +935,180 @@ with t5:
 
 tab1, tab2, tab3, tab4 = st.tabs(
     [
-        "📌 Best Trade",
-        "⛓️ Option Chain",
+        "🏆 Best Trade",
+        "🔎 Live Option Chain",
         "📊 Market Analysis",
-        "🧠 How Engine Thinks"
+        "🧠 How Engine Thinks",
     ]
 )
 
-
-# ============================================================
-# TAB 1
-# ============================================================
-
 with tab1:
-
-    st.subheader("Suggested Setup")
-
-    if action == "NO TRADE":
-
-        st.warning(
-            "NO TRADE — Current conditions do not provide enough confirmation."
+    if decision == "NO TRADE":
+        st.info(
+            "NO TRADE: the live conditions do not currently meet the "
+            "directional quality gate. Wait for the entry trigger instead "
+            "of forcing an option position."
         )
-
-        st.write(
-            "Wait for stronger alignment between trend, momentum, "
-            "PCR, RSI and volume."
-        )
-
-    else:
-
+    elif best_plan:
         st.success(
-            f"Potential setup: {symbol} {strike} {option_type}"
+            f"{decision} | Strike {best_plan['strike']:.0f} | "
+            f"Entry {fmt_price(best_plan['entry'])} | "
+            f"SL {fmt_price(best_plan['sl'])} | "
+            f"T1 {fmt_price(best_plan['target1'])} | "
+            f"T2 {fmt_price(best_plan['target2'])}"
         )
 
-        trade_table = pd.DataFrame(
-            {
-                "Parameter": [
-                    "Instrument",
-                    "Direction",
-                    "Option Type",
-                    "Strike",
-                    "Entry",
-                    "Stop Loss",
-                    "Target",
-                    "Risk Profile"
-                ],
+    st.markdown("### Why the Engine Says This")
 
-                "Value": [
-                    symbol,
-                    action,
-                    option_type,
-                    strike,
-                    f"₹{entry:,.2f}",
-                    f"₹{stop_loss:,.2f}",
-                    f"₹{target:,.2f}",
-                    risk
-                ]
-            }
-        )
-
-        st.dataframe(
-            trade_table,
-            use_container_width=True,
-            hide_index=True
-        )
-
-
-# ============================================================
-# TAB 2 — OPTION CHAIN
-# ============================================================
-
-with tab2:
-
-    st.subheader("Option Chain Snapshot")
-
-    strikes = [
-        strike - 100,
-        strike - 50,
-        strike,
-        strike + 50,
-        strike + 100
+    reasons = [
+        f"Live spot is {fmt_price(spot)}; nearest ATM strike is {atm_strike:.0f}.",
+        f"Trend from live historical candles: {tech['trend']}.",
+        f"RSI is {tech['rsi']:.1f}.",
+        f"PCR is {pcr:.2f}.",
+        f"OI support is {fmt_price(support)} and resistance is {fmt_price(resistance)}.",
     ]
 
-    option_chain = pd.DataFrame(
+    if best_plan and not np.isnan(best_plan["pop"]):
+        reasons.append(
+            f"Selected option PoP from Upstox is {best_plan['pop']:.1f}%."
+        )
+
+    for reason in reasons:
+        st.write("✓", reason)
+
+with tab2:
+    st.markdown(
+        f"### Live Option Chain — {selected_expiry}"
+    )
+
+    view = chain.copy()
+
+    display = pd.DataFrame(
         {
-            "Strike": strikes,
-
-            "Call OI": [
-                "Low",
-                "Medium",
-                "High",
-                "High",
-                "Very High"
-            ],
-
-            "Call Chg OI": [
-                "Low",
-                "Rising",
-                "Rising",
-                "Rising",
-                "High"
-            ],
-
-            "Put OI": [
-                "Very High",
-                "High",
-                "High",
-                "Medium",
-                "Low"
-            ],
-
-            "Put Chg OI": [
-                "High",
-                "Rising",
-                "Rising",
-                "Low",
-                "Low"
-            ]
+            "Strike": view["Strike"].round(0).astype(int),
+            "CE LTP": view["CE LTP"].round(2),
+            "CE OI": view["CE OI"].round(0).astype("int64"),
+            "CE Chg OI": view["CE Chg OI"].round(0).astype("int64"),
+            "CE IV": view["CE IV"].round(1),
+            "CE Delta": view["CE Delta"].round(3),
+            "CE PoP": view["CE PoP"].round(1),
+            "PE LTP": view["PE LTP"].round(2),
+            "PE OI": view["PE OI"].round(0).astype("int64"),
+            "PE Chg OI": view["PE Chg OI"].round(0).astype("int64"),
+            "PE IV": view["PE IV"].round(1),
+            "PE Delta": view["PE Delta"].round(3),
+            "PE PoP": view["PE PoP"].round(1),
         }
     )
 
+    display["_distance"] = (
+        display["Strike"] - spot
+    ).abs()
+
+    display = (
+        display
+        .sort_values("_distance")
+        .drop(columns="_distance")
+        .head(11)
+    )
+
     st.dataframe(
-        option_chain,
+        display,
         use_container_width=True,
-        hide_index=True
+        hide_index=True,
     )
-
-    st.caption(
-        "Option-chain values will be replaced with live market data "
-        "when the live data connection is enabled."
-    )
-
-
-# ============================================================
-# TAB 3 — MARKET ANALYSIS
-# ============================================================
 
 with tab3:
+    a1, a2, a3 = st.columns(3)
 
-    st.subheader("Market Analysis")
+    a1.metric("EMA 20", fmt_price(tech["ema20"]))
+    a2.metric("EMA 50", fmt_price(tech["ema50"]))
+    a3.metric("ATR 14", fmt_price(tech["atr"]))
 
-    analysis_table = pd.DataFrame(
-        {
-            "Factor": [
-                "Trend",
-                "Momentum",
-                "PCR",
-                "RSI",
-                "Volume",
-                "Call OI Wall",
-                "Put OI Wall"
-            ],
+    left, right = st.columns(2)
 
-            "Observation": [
-                data["trend"],
-                data["momentum"],
-                f"{pcr:.2f}",
-                f"{rsi:.1f}",
-                data["volume"],
-                data["call_wall"],
-                data["put_wall"]
-            ]
-        }
-    )
+    with left:
+        st.markdown("### 🟢 Support / Put OI")
 
-    st.dataframe(
-        analysis_table,
-        use_container_width=True,
-        hide_index=True
-    )
+        st.write(
+            f"Major support from Put OI: **{fmt_price(support)}**"
+        )
 
+        support_row = nearest_row(chain, support)
 
-# ============================================================
-# TAB 4 — ENGINE
-# ============================================================
+        if support_row is not None:
+            st.write(
+                f"Put OI: **{fmt_num(support_row['PE OI'])}**"
+            )
+            st.write(
+                f"Put Chg OI: **{fmt_num(support_row['PE Chg OI'])}**"
+            )
+
+    with right:
+        st.markdown("### 🔴 Resistance / Call OI")
+
+        st.write(
+            f"Major resistance from Call OI: **{fmt_price(resistance)}**"
+        )
+
+        resistance_row = nearest_row(chain, resistance)
+
+        if resistance_row is not None:
+            st.write(
+                f"Call OI: **{fmt_num(resistance_row['CE OI'])}**"
+            )
+            st.write(
+                f"Call Chg OI: **{fmt_num(resistance_row['CE Chg OI'])}**"
+            )
+
+    if not candles.empty:
+        chart = candles.set_index("timestamp")[["close"]].tail(80)
+        st.line_chart(chart, use_container_width=True)
 
 with tab4:
-
-    st.subheader("How the Engine Thinks")
-
-    st.write(
-        "The analysis uses multiple factors rather than relying on "
-        "a single indicator."
-    )
-
     st.markdown(
         """
-        **Factors considered**
+### Live-data decision framework
 
-        • Trend direction  
-        • Momentum  
-        • Put/Call Ratio (PCR)  
-        • RSI  
-        • Volume  
-        • Call Open Interest  
-        • Put Open Interest  
-        • Overall market bias
-        """
+**1. Market direction**
+- Live spot
+- Daily EMA20 / EMA50
+- RSI
+- ATR
+
+**2. Option-chain structure**
+- Put OI / Change in OI
+- Call OI / Change in OI
+- PCR
+- OI-derived support and resistance
+
+**3. Option quality**
+- LTP
+- Bid / Ask
+- Volume
+- IV
+- Delta
+- Upstox PoP
+
+**4. Trade plan**
+- Entry trigger
+- Entry price
+- Stop Loss
+- Target 1
+- Target 2
+- Exit / invalidation rule
+- Risk / Reward
+
+**5. Quality gate**
+- The app can return **NO TRADE** when live evidence is mixed.
+- It does not manufacture a trade simply because an instrument was entered.
+"""
     )
 
-    st.info(
-        f"Current analysis score: {score}"
-    )
-
-    st.caption(
-        "A stronger combination of aligned factors is required before "
-        "the engine produces a trade signal."
-    )
-
-
-# ============================================================
-# FOOTER
-# ============================================================
-
-st.markdown("---")
+st.divider()
 
 st.caption(
-    "F&O Pro Trader Assistant • Analysis tool only • "
-    "Verify live market conditions before taking any trade."
+    f"Live Upstox snapshot • {symbol} • Expiry {selected_expiry} • "
+    f"Updated {updated}. "
+    "For educational/decision-support use; review live market conditions before trading."
 )
