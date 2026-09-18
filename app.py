@@ -1,5 +1,6 @@
 import math
 from datetime import date, datetime, timedelta
+from zoneinfo import ZoneInfo
 from urllib.parse import quote
 
 import numpy as np
@@ -772,10 +773,16 @@ with h2:
 
 with h3:
     st.markdown("**Data Status**")
-    st.markdown(
-        '<span class="status-pill">● LIVE UPSTOX</span>',
-        unsafe_allow_html=True,
+    market_now = datetime.now(ZoneInfo("Asia/Kolkata"))
+    market_open = (
+        market_now.weekday() < 5
+        and (market_now.hour, market_now.minute) >= (9, 15)
+        and (market_now.hour, market_now.minute) < (15, 30)
     )
+    if market_open:
+        st.markdown("**● LIVE DATA**")
+    else:
+        st.markdown("**● MARKET CLOSED**")
     st.caption(f"Expiry: {selected_expiry}")
 
 # ============================================================
