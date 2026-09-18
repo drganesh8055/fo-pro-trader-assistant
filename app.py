@@ -1,4 +1,6 @@
 import math
+import gzip
+import json
 from datetime import date, datetime, timedelta
 from zoneinfo import ZoneInfo
 from urllib.parse import quote
@@ -550,11 +552,244 @@ def build_plan(row, side, spot, support, resistance, pcr, tech, risk_profile):
     }
 
 
+
+# ============================================================
+# FULL F&O MARKET PoP SCANNER — SIDEBAR ONLY
+# ============================================================
+
+FNO_MASTER_URL = "https://assets.upstox.com/market-quote/instruments/exchange/NSE.json.gz"
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def get_fno_underlyings():
+    """Build the current NSE equity F&O universe from Upstox's BOD master."""
+    try:
+        response = requests.get(FNO_MASTER_URL, timeout=30)
+        response.raise_for_status()
+        raw = gzip.decompress(response.content)
+        payload = json.loads(raw.decode("utf-8"))
+    except Exception as exc:
+        raise UpstoxError(f"Unable to load the Upstox NSE F&O instrument list: {exc}") from exc
+
+    if isinstance(payload, dict):
+        records = payload.get("data", payload.get("instruments", []))
+    else:
+        records = payload
+
+    today = date.today().isoformat()
+    universe = {}
+
+    for item in records:
+        if not isinstance(item, dict):
+            continue
+        if item.get("segment") != "NSE_FO":
+            continue
+        if item.get("instrument_type") not in {"CE", "PE", "FUT"}:
+            continue
+        if item.get("underlying_type") != "EQUITY":
+            continue
+
+        expiry = str(item.get("expiry", ""))
+        if not expiry:
+            continue
+
+        # Upstox BOD JSON normally supplies expiry as an epoch-millisecond value
+        # for NSE_FO. Handle both epoch and YYYY-MM-DD formats safely.
+        if expiry.isdigit():
+            try:
+                expiry_date = datetime.fromtimestamp(
+                    int(expiry) / 1000, tz=ZoneInfo("Asia/Kolkata")
+                ).date().isoformat()
+            except Exception:
+                continue
+        else:
+            expiry_date = expiry[:10]
+
+        if expiry_date < today:
+            continue
+
+        underlying_key = item.get("underlying_key")
+        symbol = str(item.get("underlying_symbol") or "").strip().upper()
+        if not underlying_key or not symbol:
+            continue
+
+        current = universe.get(underlying_key)
+        if current is None or expiry_date < current["expiry"]:
+            universe[underlying_key] = {
+                "symbol": symbol,
+                "underlying_key": underlying_key,
+                "expiry": expiry_date,
+            }
+
+    return sorted(universe.values(), key=lambda x: x["symbol"])
+
+
+def scan_full_fno_pop_market(min_pop=75.0):
+    """Scan the nearest expiry of every NSE equity F&O underlying and return top 5 unique stocks."""
+    universe = get_fno_underlyings()
+    candidates = []
+    scanned = 0
+    failed = 0
+
+    progress = st.progress(0, text="Starting full F&O market scan...")
+
+    for idx, item in enumerate(universe, start=1):
+        try:
+            rows = get_option_chain(item["underlying_key"], item["expiry"])
+            if not rows:
+                failed += 1
+                continue
+
+            # The option-chain response carries the underlying spot in its rows.
+            spot_values = [
+                safe_float(row.get("underlying_spot_price"))
+                for row in rows
+                if np.isfinite(safe_float(row.get("underlying_spot_price")))
+            ]
+            spot_value = spot_values[0] if spot_values else np.nan
+
+            best_for_stock = None
+
+            for raw in rows:
+                strike = safe_float(raw.get("strike_price"))
+                if not np.isfinite(strike):
+                    continue
+
+                for side, action in (("CE", "CALL BUY"), ("PE", "PUT BUY")):
+                    option = raw.get("call_options" if side == "CE" else "put_options") or {}
+                    market = option.get("market_data") or {}
+                    greeks = option.get("option_greeks") or {}
+
+                    pop = safe_float(greeks.get("pop"))
+                    if not np.isfinite(pop) or pop <= min_pop:
+                        continue
+
+                    ltp = safe_float(market.get("ltp"))
+                    ask = safe_float(market.get("ask_price"))
+                    bid = safe_float(market.get("bid_price"))
+                    volume = safe_float(market.get("volume"), 0)
+                    oi = safe_float(market.get("oi"), 0)
+                    delta = safe_float(greeks.get("delta"))
+                    iv = safe_float(greeks.get("iv"))
+
+                    entry = ask if np.isfinite(ask) and ask > 0 else ltp
+                    if not np.isfinite(entry) or entry <= 0:
+                        continue
+
+                    distance = (
+                        abs(strike - spot_value) / max(spot_value, 1)
+                        if np.isfinite(spot_value)
+                        else 999
+                    )
+
+                    candidate = {
+                        "Stock": item["symbol"],
+                        "Trade": action,
+                        "Strike": strike,
+                        "Expiry": item["expiry"],
+                        "PoP": pop,
+                        "Entry": entry,
+                        "LTP": ltp,
+                        "Bid": bid,
+                        "Ask": ask,
+                        "Delta": delta,
+                        "IV": iv,
+                        "Volume": volume,
+                        "OI": oi,
+                        "distance": distance,
+                    }
+
+                    # One highest-PoP opportunity per stock keeps the Top 5 diversified.
+                    if best_for_stock is None or (
+                        candidate["PoP"], candidate["Volume"], -candidate["distance"]
+                    ) > (
+                        best_for_stock["PoP"], best_for_stock["Volume"], -best_for_stock["distance"]
+                    ):
+                        best_for_stock = candidate
+
+            if best_for_stock is not None:
+                candidates.append(best_for_stock)
+            scanned += 1
+
+        except Exception:
+            failed += 1
+
+        progress.progress(
+            idx / max(len(universe), 1),
+            text=f"Scanning F&O market: {idx}/{len(universe)} stocks",
+        )
+
+    progress.empty()
+
+    candidates.sort(
+        key=lambda x: (-x["PoP"], -x["Volume"], x["distance"])
+    )
+
+    return candidates[:5], len(universe), scanned, failed
+
+
 # ============================================================
 # SIDEBAR
 # ============================================================
 
 with st.sidebar:
+    st.markdown("### 🔥 Top 5 F&O PoP Scanner")
+    st.caption("Scans the full NSE equity F&O market for trades with PoP > 75%.")
+
+    scan_market = st.button(
+        "🔎 Scan Full F&O Market",
+        use_container_width=True,
+        type="primary",
+    )
+
+    if scan_market:
+        try:
+            with st.spinner("Scanning the full F&O market..."):
+                results, total, scanned, failed = scan_full_fno_pop_market(75.0)
+            st.session_state["fno_pop_results"] = results
+            st.session_state["fno_pop_scan_info"] = (total, scanned, failed)
+            st.session_state["fno_pop_scan_time"] = datetime.now(ZoneInfo("Asia/Kolkata")).strftime("%H:%M:%S")
+        except UpstoxError as exc:
+            st.session_state["fno_pop_results"] = []
+            st.error(str(exc))
+        except Exception as exc:
+            st.session_state["fno_pop_results"] = []
+            st.error(f"F&O scan failed: {exc}")
+
+    pop_results = st.session_state.get("fno_pop_results", [])
+    scan_info = st.session_state.get("fno_pop_scan_info")
+    scan_time = st.session_state.get("fno_pop_scan_time")
+
+    if pop_results:
+        st.success(f"Top {len(pop_results)} trades with PoP > 75%")
+        if scan_info:
+            total, scanned, failed = scan_info
+            st.caption(f"Scanned {scanned}/{total} F&O stocks • {failed} unavailable")
+        if scan_time:
+            st.caption(f"Last scan: {scan_time} IST")
+
+        scanner_display = pd.DataFrame([
+            {
+                "Stock": row["Stock"],
+                "Trade": row["Trade"],
+                "Strike": int(row["Strike"]),
+                "PoP": f"{row['PoP']:.1f}%",
+                "Entry": fmt_price(row["Entry"]),
+                "Delta": f"{row['Delta']:.2f}" if np.isfinite(row["Delta"]) else "—",
+                "IV": f"{row['IV']:.1f}%" if np.isfinite(row["IV"]) else "—",
+            }
+            for row in pop_results
+        ])
+        st.dataframe(
+            scanner_display,
+            use_container_width=True,
+            hide_index=True,
+            height=min(360, 58 + len(scanner_display) * 52),
+        )
+    elif "fno_pop_results" in st.session_state:
+        st.info("No F&O stock currently has an option trade with PoP > 75%.")
+
+    st.divider()
     st.markdown("### 🔎 Analyze Instrument")
 
     symbol_input = st.text_input(
