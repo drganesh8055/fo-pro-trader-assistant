@@ -682,6 +682,13 @@ def scan_full_fno_pop_market(min_pop=75.0):
                         else 999
                     )
 
+                    # Use the same Balanced risk levels as the main analyzer
+                    # so the scanner's SL/targets are consistent with the app.
+                    sl = round(entry * 0.70, 2)
+                    target1 = round(entry * 1.40, 2)
+                    target2 = round(entry * 1.80, 2)
+                    exit_rule = "Exit at SL or Target 2; trail after Target 1"
+
                     candidate = {
                         "Stock": item["symbol"],
                         "Trade": action,
@@ -689,6 +696,10 @@ def scan_full_fno_pop_market(min_pop=75.0):
                         "Expiry": item["expiry"],
                         "PoP": pop,
                         "Entry": entry,
+                        "SL": sl,
+                        "Target1": target1,
+                        "Target2": target2,
+                        "Exit": exit_rule,
                         "LTP": ltp,
                         "Bid": bid,
                         "Ask": ask,
@@ -775,8 +786,10 @@ with st.sidebar:
                 "Strike": int(row["Strike"]),
                 "PoP": f"{row['PoP']:.1f}%",
                 "Entry": fmt_price(row["Entry"]),
-                "Delta": f"{row['Delta']:.2f}" if np.isfinite(row["Delta"]) else "—",
-                "IV": f"{row['IV']:.1f}%" if np.isfinite(row["IV"]) else "—",
+                "SL": fmt_price(row["SL"]),
+                "Target1": fmt_price(row["Target1"]),
+                "Target2": fmt_price(row["Target2"]),
+                "Exit": row["Exit"],
             }
             for row in pop_results
         ])
