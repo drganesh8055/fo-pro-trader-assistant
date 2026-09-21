@@ -250,88 +250,229 @@ def get_quote(instrument_key):
     return next(iter(data.values()))
 
 
-@st.cache_data(ttl=300, show_spinner=False)
-def get_daily_candles(instrument_key):
-    end_date = date.today()
-    start_date = end_date - timedelta(days=160)
 
+@st.cache_data(ttl=60, show_spinner=False)
+def get_intraday_candles(instrument_key, interval=5):
+    """Current-session intraday candles used for entry timing."""
     path = (
-        f"/v3/historical-candle/{quote(instrument_key, safe='')}"
-        f"/days/1/{end_date.isoformat()}/{start_date.isoformat()}"
+        f"/v3/historical-candle/intraday/{quote(instrument_key, safe='')}"
+        f"/minutes/{interval}"
     )
-
     payload = api_get(path, timeout=30)
     candles = payload.get("data", {}).get("candles", [])
-
     if not candles:
         return pd.DataFrame()
-
     df = pd.DataFrame(
         candles,
         columns=["timestamp", "open", "high", "low", "close", "volume", "oi"],
     )
-
     for column in ["open", "high", "low", "close", "volume", "oi"]:
         df[column] = pd.to_numeric(df[column], errors="coerce")
-
     df["timestamp"] = pd.to_datetime(df["timestamp"], errors="coerce")
     return df.sort_values("timestamp").reset_index(drop=True)
 
 
+@st.cache_data(ttl=180, show_spinner=False)
+def get_30m_candles(instrument_key):
+    end_date = date.today()
+    start_date = end_date - timedelta(days=90)
+    path = (
+        f"/v3/historical-candle/{quote(instrument_key, safe='')}"
+        f"/minutes/30/{end_date.isoformat()}/{start_date.isoformat()}"
+    )
+    payload = api_get(path, timeout=30)
+    candles = payload.get("data", {}).get("candles", [])
+    if not candles:
+        return pd.DataFrame()
+    df = pd.DataFrame(
+        candles,
+        columns=["timestamp", "open", "high", "low", "close", "volume", "oi"],
+    )
+    for column in ["open", "high", "low", "close", "volume", "oi"]:
+        df[column] = pd.to_numeric(df[column], errors="coerce")
+    df["timestamp"] = pd.to_datetime(df["timestamp"], errors="coerce")
+    return df.sort_values("timestamp").reset_index(drop=True)
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def get_daily_candles(instrument_key):
+    end_date = date.today()
+    start_date = end_date - timedelta(days=220)
+    path = (
+        f"/v3/historical-candle/{quote(instrument_key, safe='')}"
+        f"/days/1/{end_date.isoformat()}/{start_date.isoformat()}"
+    )
+    payload = api_get(path, timeout=30)
+    candles = payload.get("data", {}).get("candles", [])
+    if not candles:
+        return pd.DataFrame()
+    df = pd.DataFrame(
+        candles,
+        columns=["timestamp", "open", "high", "low", "close", "volume", "oi"],
+    )
+    for column in ["open", "high", "low", "close", "volume", "oi"]:
+        df[column] = pd.to_numeric(df[column], errors="coerce")
+    df["timestamp"] = pd.to_datetime(df["timestamp"], errors="coerce")
+    return df.sort_values("timestamp").reset_index(drop=True)
+
+
+def _rsi(close, period=14):
+    delta = close.diff()
+    gain = delta.clip(lower=0).ewm(alpha=1/period, adjust=False).mean()
+    loss = (-delta.clip(upper=0)).ewm(alpha=1/period, adjust=False).mean()
+    rs = gain / loss.replace(0, np.nan)
+    return 100 - (100 / (1 + rs))
+
+
 def technicals(df, spot):
+    """Trend/volatility features for one timeframe."""
     if df.empty or len(df) < 20:
         return {
-            "rsi": 50.0,
-            "ema20": spot,
-            "ema50": spot,
-            "atr": spot * 0.01,
-            "trend": "Unavailable",
+            "rsi": 50.0, "ema20": spot, "ema50": spot, "atr": spot * 0.01,
+            "trend": "Unavailable", "adx": 0.0, "momentum": 0.0,
+            "volume_ratio": 1.0, "vwap": spot
         }
 
-    close = df["close"]
-    delta = close.diff()
+    close = df["close"].astype(float)
+    high = df["high"].astype(float)
+    low = df["low"].astype(float)
+    volume = df["volume"].fillna(0).astype(float)
 
-    gain = delta.clip(lower=0).rolling(14).mean()
-    loss = (-delta.clip(upper=0)).rolling(14).mean()
-
-    rs = gain / loss.replace(0, np.nan)
-    rsi = 100 - (100 / (1 + rs))
-
+    rsi = _rsi(close)
     ema20 = close.ewm(span=20, adjust=False).mean()
     ema50 = close.ewm(span=50, adjust=False).mean()
 
-    previous_close = close.shift(1)
-    true_range = pd.concat(
-        [
-            df["high"] - df["low"],
-            (df["high"] - previous_close).abs(),
-            (df["low"] - previous_close).abs(),
-        ],
-        axis=1,
+    prev_close = close.shift(1)
+    tr = pd.concat(
+        [(high-low), (high-prev_close).abs(), (low-prev_close).abs()], axis=1
     ).max(axis=1)
+    atr = tr.ewm(alpha=1/14, adjust=False).mean()
 
-    atr = true_range.rolling(14).mean()
+    up_move = high.diff()
+    down_move = -low.diff()
+    plus_dm = pd.Series(
+        np.where((up_move > down_move) & (up_move > 0), up_move, 0.0), index=df.index
+    )
+    minus_dm = pd.Series(
+        np.where((down_move > up_move) & (down_move > 0), down_move, 0.0), index=df.index
+    )
+    atr_safe = atr.replace(0, np.nan)
+    plus_di = 100 * plus_dm.ewm(alpha=1/14, adjust=False).mean() / atr_safe
+    minus_di = 100 * minus_dm.ewm(alpha=1/14, adjust=False).mean() / atr_safe
+    dx = 100 * (plus_di - minus_di).abs() / (plus_di + minus_di).replace(0, np.nan)
+    adx = dx.ewm(alpha=1/14, adjust=False).mean()
 
-    latest_rsi = safe_float(rsi.iloc[-1], 50.0)
-    latest_ema20 = safe_float(ema20.iloc[-1], spot)
-    latest_ema50 = safe_float(ema50.iloc[-1], spot)
-    latest_atr = safe_float(atr.iloc[-1], spot * 0.01)
+    typical = (high + low + close) / 3
+    if volume.sum() > 0:
+        vwap = (typical * volume).cumsum() / volume.cumsum().replace(0, np.nan)
+        latest_vwap = safe_float(vwap.iloc[-1], spot)
+    else:
+        latest_vwap = spot
 
-    if spot > latest_ema20 > latest_ema50:
+    lookback = min(10, len(close)-1)
+    momentum = (
+        (close.iloc[-1] / close.iloc[-1-lookback] - 1) * 100
+        if lookback > 0 and close.iloc[-1-lookback] else 0.0
+    )
+    vol_base = volume.rolling(20).median().iloc[-1]
+    volume_ratio = volume.iloc[-1] / vol_base if vol_base and np.isfinite(vol_base) else 1.0
+
+    e20 = safe_float(ema20.iloc[-1], spot)
+    e50 = safe_float(ema50.iloc[-1], spot)
+    r = safe_float(rsi.iloc[-1], 50.0)
+    a = safe_float(atr.iloc[-1], spot * 0.01)
+    adx_v = safe_float(adx.iloc[-1], 0.0)
+
+    bullish = spot > e20 > e50
+    bearish = spot < e20 < e50
+
+    if bullish:
         trend = "Bullish"
-    elif spot < latest_ema20 < latest_ema50:
+    elif bearish:
         trend = "Bearish"
     else:
         trend = "Sideways"
 
     return {
-        "rsi": latest_rsi,
-        "ema20": latest_ema20,
-        "ema50": latest_ema50,
-        "atr": latest_atr,
-        "trend": trend,
+        "rsi": r, "ema20": e20, "ema50": e50, "atr": max(a, spot*0.001),
+        "trend": trend, "adx": adx_v, "momentum": momentum,
+        "volume_ratio": volume_ratio, "vwap": latest_vwap
     }
 
+
+def overall_trend(tf5, tf30, daily):
+    trends = [tf5.get("trend"), tf30.get("trend"), daily.get("trend")]
+    bullish = trends.count("Bullish")
+    bearish = trends.count("Bearish")
+    if bullish >= 2 and bearish == 0:
+        return "Bullish", bullish
+    if bearish >= 2 and bullish == 0:
+        return "Bearish", bearish
+    return "Mixed", max(bullish, bearish)
+
+
+def timeframe_score(side, tf5, tf30, daily):
+    desired = "Bullish" if side == "CE" else "Bearish"
+    opposite = "Bearish" if side == "CE" else "Bullish"
+    values = [tf5, tf30, daily]
+    score = 0
+    alignment = 0
+    for tf in values:
+        if tf.get("trend") == desired:
+            score += 10
+            alignment += 1
+        elif tf.get("trend") == "Sideways":
+            score += 3
+        elif tf.get("trend") == opposite:
+            score -= 8
+    return float(np.clip(score, 0, 30)), alignment
+
+
+def oi_levels(chain, spot):
+    valid = chain.dropna(subset=["Strike"]).copy()
+    if valid.empty:
+        return spot, spot, np.nan, {"put_walls": [], "call_walls": []}
+
+    # Do not allow a distant strike to become a misleading support/resistance.
+    band = valid[
+        (valid["Strike"] >= spot * 0.90) &
+        (valid["Strike"] <= spot * 1.10)
+    ].copy()
+    if band.empty:
+        band = valid
+
+    below = band[band["Strike"] <= spot]
+    above = band[band["Strike"] >= spot]
+
+    support_row = (
+        below.loc[below["PE OI"].fillna(0).idxmax()]
+        if not below.empty else band.loc[band["PE OI"].fillna(0).idxmax()]
+    )
+    resistance_row = (
+        above.loc[above["CE OI"].fillna(0).idxmax()]
+        if not above.empty else band.loc[band["CE OI"].fillna(0).idxmax()]
+    )
+
+    total_call_oi = band["CE OI"].fillna(0).sum()
+    total_put_oi = band["PE OI"].fillna(0).sum()
+    pcr = total_put_oi / total_call_oi if total_call_oi else np.nan
+
+    put_walls = band.nlargest(3, "PE OI")[["Strike", "PE OI", "PE Chg OI"]].to_dict("records")
+    call_walls = band.nlargest(3, "CE OI")[["Strike", "CE OI", "CE Chg OI"]].to_dict("records")
+
+    return (
+        float(support_row["Strike"]),
+        float(resistance_row["Strike"]),
+        pcr,
+        {"put_walls": put_walls, "call_walls": call_walls},
+    )
+
+
+def nearest_row(chain, strike):
+    if chain.empty:
+        return None
+    index = (chain["Strike"] - strike).abs().idxmin()
+    return chain.loc[index]
 
 def normalize_chain(rows):
     records = []
@@ -418,57 +559,121 @@ def nearest_row(chain, strike):
     return chain.loc[index]
 
 
-def score_option(row, side, spot, pcr, tech):
+def score_option(row, side, spot, pcr, tf5, tf30, daily, chain):
+    """Conservative 100-point option-quality score.
+
+    This is a decision-support score, not a statistical probability of winning.
+    """
     if side == "CE":
-        premium = row["CE LTP"]
-        delta = row["CE Delta"]
-        iv = row["CE IV"]
-        pop = row["CE PoP"]
-        chg_oi = row["CE Chg OI"]
-        volume = row["CE Volume"]
-
-        directional = 25 if tech["trend"] == "Bullish" else 10 if tech["trend"] == "Sideways" else 0
-        pcr_score = 10 if pcr >= 0.90 else 5 if pcr >= 0.75 else 0
+        premium = safe_float(row["CE LTP"])
+        delta = safe_float(row["CE Delta"])
+        iv = safe_float(row["CE IV"])
+        pop = safe_float(row["CE PoP"])
+        chg_oi = safe_float(row["CE Chg OI"], 0)
+        volume = safe_float(row["CE Volume"], 0)
+        bid = safe_float(row["CE Bid"])
+        ask = safe_float(row["CE Ask"])
     else:
-        premium = row["PE LTP"]
-        delta = row["PE Delta"]
-        iv = row["PE IV"]
-        pop = row["PE PoP"]
-        chg_oi = row["PE Chg OI"]
-        volume = row["PE Volume"]
+        premium = safe_float(row["PE LTP"])
+        delta = safe_float(row["PE Delta"])
+        iv = safe_float(row["PE IV"])
+        pop = safe_float(row["PE PoP"])
+        chg_oi = safe_float(row["PE Chg OI"], 0)
+        volume = safe_float(row["PE Volume"], 0)
+        bid = safe_float(row["PE Bid"])
+        ask = safe_float(row["PE Ask"])
 
-        directional = 25 if tech["trend"] == "Bearish" else 10 if tech["trend"] == "Sideways" else 0
-        pcr_score = 10 if pcr <= 1.10 else 5 if pcr <= 1.30 else 0
+    desired = "Bullish" if side == "CE" else "Bearish"
+    opposite = "Bearish" if side == "CE" else "Bullish"
 
+    # 30 points: multi-timeframe agreement.
+    tf_points, alignment = timeframe_score(side, tf5, tf30, daily)
+
+    # 15 points: price/momentum confirmation.
+    tf = tf5
+    momentum_points = 0
+    if tf.get("trend") == desired:
+        momentum_points += 6
+    if tf.get("rsi", 50) >= 52 and side == "CE":
+        momentum_points += 3
+    if tf.get("rsi", 50) <= 48 and side == "PE":
+        momentum_points += 3
+    if side == "CE" and tf.get("momentum", 0) > 0:
+        momentum_points += 3
+    if side == "PE" and tf.get("momentum", 0) < 0:
+        momentum_points += 3
+    if tf.get("adx", 0) >= 20:
+        momentum_points += 3
+    momentum_points = min(momentum_points, 15)
+
+    # 15 points: PCR is confirmation only, never the main signal.
+    pcr_points = 0
+    if np.isfinite(pcr):
+        if side == "CE":
+            pcr_points = 7 if 0.90 <= pcr <= 1.35 else 3 if 0.75 <= pcr < 0.90 else 0
+        else:
+            pcr_points = 7 if 0.65 <= pcr <= 1.10 else 3 if 1.10 < pcr <= 1.30 else 0
+
+    # OI change is deliberately a small component because this endpoint exposes
+    # current OI versus previous OI, not a full intraday OI history.
+    if side == "CE":
+        oi_points = 4 if chg_oi <= 0 else 2
+    else:
+        oi_points = 4 if chg_oi <= 0 else 2
+
+    # Option quality: 25 points.
+    quality = 0
+    abs_delta = abs(delta) if np.isfinite(delta) else np.nan
+    if np.isfinite(abs_delta):
+        if 0.45 <= abs_delta <= 0.70:
+            quality += 8
+        elif 0.35 <= abs_delta < 0.45 or 0.70 < abs_delta <= 0.80:
+            quality += 5
+
+    spread_pct = (
+        max(ask - bid, 0) / max((ask + bid) / 2, 0.01) * 100
+        if np.isfinite(ask) and np.isfinite(bid) and ask > 0 and bid > 0
+        else 999
+    )
+    if spread_pct <= 1.5:
+        quality += 6
+    elif spread_pct <= 2.5:
+        quality += 4
+    elif spread_pct <= 4:
+        quality += 2
+
+    if volume > 0:
+        quality += 4
+    if np.isfinite(iv):
+        iv_values = chain[f"{side} IV"].replace([np.inf, -np.inf], np.nan).dropna()
+        if len(iv_values) >= 5:
+            iv_rank = float((iv_values <= iv).mean())
+            if 0.15 <= iv_rank <= 0.75:
+                quality += 4
+            elif iv_rank < 0.90:
+                quality += 2
+        else:
+            quality += 2
+
+    # Near-ATM strikes are preferred; avoid deep OTM lottery tickets.
     distance_pct = abs(float(row["Strike"]) - spot) / max(spot, 1)
-    distance_score = max(0, 15 - distance_pct * 500)
+    if distance_pct <= 0.015:
+        distance_points = 5
+    elif distance_pct <= 0.03:
+        distance_points = 3
+    else:
+        distance_points = 0
 
-    delta_score = (
-        np.clip((abs(delta) - 0.30) / 0.45 * 20, 0, 20)
-        if not np.isnan(delta) else 0
+    pop_points = (
+        float(np.clip((pop - 50) / 2.5, 0, 10))
+        if np.isfinite(pop) else 0
     )
 
-    pop_score = (
-        np.clip((pop - 40) / 30 * 20, 0, 20)
-        if not np.isnan(pop) else 0
-    )
-
-    liquidity_score = 10 if volume > 0 else 0
-    oi_score = 5 if chg_oi < 0 else 2
-
-    score = float(
-        np.clip(
-            directional
-            + pcr_score
-            + distance_score
-            + delta_score
-            + pop_score
-            + liquidity_score
-            + oi_score,
-            0,
-            100,
-        )
-    )
+    score = float(np.clip(
+        tf_points + momentum_points + pcr_points + oi_points +
+        quality + distance_points + pop_points,
+        0, 100
+    ))
 
     return {
         "score": score,
@@ -478,57 +683,89 @@ def score_option(row, side, spot, pcr, tech):
         "pop": pop,
         "chg_oi": chg_oi,
         "volume": volume,
+        "spread_pct": spread_pct,
+        "alignment": alignment,
+        "distance_pct": distance_pct,
+        "quality": quality,
     }
 
 
-def build_plan(row, side, spot, support, resistance, pcr, tech, risk_profile):
+def build_plan(row, side, spot, support, resistance, pcr, tf5, tf30, daily,
+               risk_profile, chain):
     if row is None:
         return None
 
-    scored = score_option(row, side, spot, pcr, tech)
+    scored = score_option(row, side, spot, pcr, tf5, tf30, daily, chain)
 
-    entry = row[f"{side} Ask"]
-    if np.isnan(entry) or entry <= 0:
-        entry = row[f"{side} LTP"]
-
-    if np.isnan(entry) or entry <= 0:
+    ask = safe_float(row[f"{side} Ask"])
+    ltp = safe_float(row[f"{side} LTP"])
+    entry = ask if np.isfinite(ask) and ask > 0 else ltp
+    if not np.isfinite(entry) or entry <= 0:
         return None
 
+    # Conservative premium-risk model. Underlying invalidation remains the
+    # primary exit condition; premium SL is a secondary protection.
     risk_settings = {
-        "Conservative": (0.75, 1.30, 1.60),
-        "Balanced": (0.70, 1.40, 1.80),
-        "Aggressive": (0.65, 1.55, 2.10),
+        "Conservative": (0.72, 1.25, 1.55),
+        "Balanced": (0.70, 1.35, 1.75),
+        "Aggressive": (0.65, 1.50, 2.00),
     }
-
     sl_factor, target1_factor, target2_factor = risk_settings[risk_profile]
-
     sl = round(entry * sl_factor, 2)
     target1 = round(entry * target1_factor, 2)
     target2 = round(entry * target2_factor, 2)
-
     rr1 = (target1 - entry) / max(entry - sl, 0.01)
     rr2 = (target2 - entry) / max(entry - sl, 0.01)
 
+    atr = max(tf5.get("atr", spot*0.01), spot*0.001)
+    trigger_buffer = max(atr * 0.15, spot * 0.0015)
+
     if side == "CE":
+        trigger_level = resistance + trigger_buffer
+        trigger_hit = spot >= trigger_level
         trigger = (
-            f"Enter only after spot sustains above resistance/trigger "
-            f"around {fmt_price(resistance)}."
+            f"Enter only after spot breaks and sustains above "
+            f"{fmt_price(trigger_level)}."
         )
         exit_rule = (
-            f"Exit if spot closes below support {fmt_price(support)} "
-            f"or option premium hits {fmt_price(sl)}. "
-            f"After Target 1, book partial profit and trail the balance."
+            f"Exit if spot loses support {fmt_price(support)} or premium hits "
+            f"{fmt_price(sl)}. After Target 1, book partial profit and trail."
         )
     else:
+        trigger_level = support - trigger_buffer
+        trigger_hit = spot <= trigger_level
         trigger = (
-            f"Enter only after spot breaks and sustains below support/trigger "
-            f"around {fmt_price(support)}."
+            f"Enter only after spot breaks and sustains below "
+            f"{fmt_price(trigger_level)}."
         )
         exit_rule = (
-            f"Exit if spot closes above resistance {fmt_price(resistance)} "
-            f"or option premium hits {fmt_price(sl)}. "
-            f"After Target 1, book partial profit and trail the balance."
+            f"Exit if spot reclaims resistance {fmt_price(resistance)} or premium "
+            f"hits {fmt_price(sl)}. After Target 1, book partial profit and trail."
         )
+
+    desired = "Bullish" if side == "CE" else "Bearish"
+    opposite = "Bearish" if side == "CE" else "Bullish"
+
+    # Hard quality gates intentionally bias toward NO TRADE.
+    hard_fail = []
+    if scored["score"] < 72:
+        hard_fail.append("setup score below 72")
+    if scored["alignment"] < 2:
+        hard_fail.append("fewer than 2 aligned timeframes")
+    if tf5.get("trend") == opposite or tf30.get("trend") == opposite:
+        hard_fail.append("short-term trend conflict")
+    if scored["spread_pct"] > 4:
+        hard_fail.append("wide option spread")
+    if not np.isfinite(scored["delta"]) or not (0.35 <= abs(scored["delta"]) <= 0.80):
+        hard_fail.append("poor delta")
+    if not np.isfinite(scored["pop"]) or scored["pop"] < 55:
+        hard_fail.append("low Upstox PoP")
+    if scored["volume"] <= 0:
+        hard_fail.append("no option volume")
+
+    readiness = "READY" if not hard_fail and trigger_hit else (
+        "WAIT FOR TRIGGER" if not hard_fail else "NO TRADE"
+    )
 
     return {
         "side": side,
@@ -544,12 +781,17 @@ def build_plan(row, side, spot, support, resistance, pcr, tech, risk_profile):
         "rr1": rr1,
         "rr2": rr2,
         "trigger": trigger,
+        "trigger_level": trigger_level,
+        "trigger_hit": trigger_hit,
+        "readiness": readiness,
+        "fail_reasons": hard_fail,
         "exit": exit_rule,
         "oi": row[f"{side} OI"],
         "chg_oi": scored["chg_oi"],
         "volume": scored["volume"],
+        "spread_pct": scored["spread_pct"],
+        "alignment": scored["alignment"],
     }
-
 
 
 # ============================================================
@@ -903,7 +1145,16 @@ try:
         )
 
         candles = get_daily_candles(underlying_key)
-        tech = technicals(candles, spot)
+        candles_30m = get_30m_candles(underlying_key)
+        candles_5m = get_intraday_candles(underlying_key, 5)
+
+        daily_tech = technicals(candles, spot)
+        tf30 = technicals(candles_30m, spot)
+        tf5 = technicals(candles_5m, spot)
+
+        # Keep the existing UI terminology while using the stronger daily trend
+        # as the headline bias.
+        tech = daily_tech
 
 except UpstoxError as exc:
     st.error(str(exc))
@@ -912,82 +1163,67 @@ except Exception as exc:
     st.error(f"Unexpected error while loading live data: {exc}")
     st.stop()
 
-support, resistance, pcr = oi_levels(chain, spot)
+support, resistance, pcr, oi_wall_info = oi_levels(chain, spot)
 
 atm_index = (chain["Strike"] - spot).abs().idxmin()
 atm_strike = float(chain.loc[atm_index, "Strike"])
 
+# Evaluate a slightly wider ATM band, then choose the option with the
+# strongest quality score rather than simply choosing the highest PoP.
 candidate_rows = chain.iloc[
-    max(0, atm_index - 3): min(len(chain), atm_index + 4)
+    max(0, atm_index - 5): min(len(chain), atm_index + 6)
 ]
 
-ce_scores = []
-pe_scores = []
+ce_candidates = []
+pe_candidates = []
 
 for _, row in candidate_rows.iterrows():
-    ce_scores.append(
-        (
-            score_option(row, "CE", spot, pcr, tech)["score"],
-            float(row["Strike"]),
-        )
+    ce_candidates.append(
+        (score_option(row, "CE", spot, pcr, tf5, tf30, daily_tech, chain)["score"], row)
     )
-    pe_scores.append(
-        (
-            score_option(row, "PE", spot, pcr, tech)["score"],
-            float(row["Strike"]),
-        )
+    pe_candidates.append(
+        (score_option(row, "PE", spot, pcr, tf5, tf30, daily_tech, chain)["score"], row)
     )
 
-best_ce_strike = max(ce_scores, default=(0, atm_strike))[1]
-best_pe_strike = max(pe_scores, default=(0, atm_strike))[1]
+best_ce_row = max(ce_candidates, key=lambda x: x[0], default=(0, None))[1]
+best_pe_row = max(pe_candidates, key=lambda x: x[0], default=(0, None))[1]
 
 ce_plan = build_plan(
-    nearest_row(chain, best_ce_strike),
-    "CE",
-    spot,
-    support,
-    resistance,
-    pcr,
-    tech,
-    risk_profile,
+    best_ce_row, "CE", spot, support, resistance, pcr,
+    tf5, tf30, daily_tech, risk_profile, chain
 )
-
 pe_plan = build_plan(
-    nearest_row(chain, best_pe_strike),
-    "PE",
-    spot,
-    support,
-    resistance,
-    pcr,
-    tech,
-    risk_profile,
+    best_pe_row, "PE", spot, support, resistance, pcr,
+    tf5, tf30, daily_tech, risk_profile, chain
 )
 
 ce_score = ce_plan["score"] if ce_plan else 0
 pe_score = pe_plan["score"] if pe_plan else 0
 
-if (
-    ce_plan
-    and ce_score >= 60
-    and ce_score >= pe_score + 5
-    and tech["trend"] == "Bullish"
-):
-    decision = "CALL BUY"
-    decision_class = "trade-call"
+# High-accuracy mode: disagreement or an unconfirmed breakout produces
+# WAIT/NO TRADE instead of forcing a position.
+overall_direction, overall_alignment = overall_trend(tf5, tf30, daily_tech)
+
+if ce_plan and ce_score >= 72 and ce_score >= pe_score + 8 and         overall_direction == "Bullish" and ce_plan["readiness"] in {"READY", "WAIT FOR TRIGGER"}:
+    decision = "CALL BUY" if ce_plan["readiness"] == "READY" else "WAIT FOR TRIGGER"
+    decision_class = "trade-call" if decision == "CALL BUY" else "trade-neutral"
     best_plan = ce_plan
-elif (
-    pe_plan
-    and pe_score >= 60
-    and pe_score >= ce_score + 5
-    and tech["trend"] == "Bearish"
-):
-    decision = "PUT BUY"
-    decision_class = "trade-put"
+elif pe_plan and pe_score >= 72 and pe_score >= ce_score + 8 and         overall_direction == "Bearish" and pe_plan["readiness"] in {"READY", "WAIT FOR TRIGGER"}:
+    decision = "PUT BUY" if pe_plan["readiness"] == "READY" else "WAIT FOR TRIGGER"
+    decision_class = "trade-put" if decision == "PUT BUY" else "trade-neutral"
     best_plan = pe_plan
 else:
     decision = "NO TRADE"
     decision_class = "trade-neutral"
     best_plan = ce_plan if ce_score >= pe_score else pe_plan
+
+# Confidence is intentionally a separate descriptive measure.
+best_score = best_plan["score"] if best_plan else 0
+best_alignment = best_plan["alignment"] if best_plan else 0
+confidence = int(np.clip(
+    best_score * 0.70 + (best_alignment / 3) * 20 +
+    (5 if overall_direction in {"Bullish", "Bearish"} else 0), 0, 100
+))
 
 updated = quote_data.get(
     "timestamp",
@@ -1124,8 +1360,8 @@ d1, d2, d3, d4 = st.columns(4)
 
 d1.metric("Bull Score", f"{ce_score:.0f}/100")
 d2.metric("Bear Score", f"{pe_score:.0f}/100")
-d3.metric("Trend", tech["trend"])
-d4.metric("ATR", fmt_price(tech["atr"]))
+d3.metric("Trend", overall_direction)
+d4.metric("Confidence", f"{confidence}/100")
 
 st.markdown('</div>', unsafe_allow_html=True)
 
@@ -1171,6 +1407,7 @@ for label, plan in [
                     else "—"
                 ),
                 "R:R T1": f"1:{plan['rr1']:.2f}",
+                "Readiness": plan["readiness"],
             }
         )
 
@@ -1259,10 +1496,12 @@ with tab1:
 
     reasons = [
         f"Live spot is {fmt_price(spot)}; nearest ATM strike is {atm_strike:.0f}.",
-        f"Trend from live historical candles: {tech['trend']}.",
-        f"RSI is {tech['rsi']:.1f}.",
+        f"5-minute trend: {tf5['trend']} | 30-minute trend: {tf30['trend']} | Daily trend: {daily_tech['trend']}.",
+        f"RSI: 5m {tf5['rsi']:.1f} | 30m {tf30['rsi']:.1f} | Daily {daily_tech['rsi']:.1f}.",
         f"PCR is {pcr:.2f}.",
         f"OI support is {fmt_price(support)} and resistance is {fmt_price(resistance)}.",
+        f"Overall direction: {overall_direction} with {overall_alignment}/3 timeframes aligned.",
+        f"Engine confidence: {confidence}/100. The score is a rule-based quality measure, not a historical win probability.",
     ]
 
     if best_plan and not np.isnan(best_plan["pop"]):
@@ -1318,9 +1557,20 @@ with tab2:
 with tab3:
     a1, a2, a3 = st.columns(3)
 
-    a1.metric("EMA 20", fmt_price(tech["ema20"]))
-    a2.metric("EMA 50", fmt_price(tech["ema50"]))
-    a3.metric("ATR 14", fmt_price(tech["atr"]))
+    a1.metric("EMA 20", fmt_price(daily_tech["ema20"]))
+    a2.metric("EMA 50", fmt_price(daily_tech["ema50"]))
+    a3.metric("ATR 14", fmt_price(daily_tech["atr"]))
+
+    st.markdown("### Multi-Timeframe Confirmation")
+    mtf = pd.DataFrame([
+        {"Timeframe": "5 Minute", "Trend": tf5["trend"], "RSI": round(tf5["rsi"], 1),
+         "ADX": round(tf5["adx"], 1), "Momentum %": round(tf5["momentum"], 2)},
+        {"Timeframe": "30 Minute", "Trend": tf30["trend"], "RSI": round(tf30["rsi"], 1),
+         "ADX": round(tf30["adx"], 1), "Momentum %": round(tf30["momentum"], 2)},
+        {"Timeframe": "Daily", "Trend": daily_tech["trend"], "RSI": round(daily_tech["rsi"], 1),
+         "ADX": round(daily_tech["adx"], 1), "Momentum %": round(daily_tech["momentum"], 2)},
+    ])
+    st.dataframe(mtf, use_container_width=True, hide_index=True)
 
     left, right = st.columns(2)
 
@@ -1369,9 +1619,11 @@ with tab4:
 
 **1. Market direction**
 - Live spot
-- Daily EMA20 / EMA50
+- 5-minute + 30-minute + Daily trend alignment
+- EMA20 / EMA50
 - RSI
-- ATR
+- ADX / momentum
+- Intraday VWAP where volume is available
 
 **2. Option-chain structure**
 - Put OI / Change in OI
@@ -1396,9 +1648,15 @@ with tab4:
 - Exit / invalidation rule
 - Risk / Reward
 
-**5. Quality gate**
-- The app can return **NO TRADE** when live evidence is mixed.
-- It does not manufacture a trade simply because an instrument was entered.
+**5. High-accuracy quality gate**
+- Minimum setup score: 72/100
+- At least 2 of 3 timeframes must agree
+- Short-term trend conflict blocks the trade
+- Delta, liquidity and bid/ask spread are checked
+- Upstox PoP must be at least 55%
+- The underlying breakout trigger must occur before a BUY signal
+- Otherwise the engine returns **WAIT FOR TRIGGER** or **NO TRADE**
+- The score is not a backtested win rate and does not guarantee profit.
 """
     )
 
