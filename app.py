@@ -1703,10 +1703,15 @@ if best_plan:
 else:
     why_items = ["No valid option plan is currently available."]
 
-why_html = "".join(
-    f"<div class='why-item {'why-warning' if item.startswith('⚠') else ''}'>{'⚠' if item.startswith('⚠') else '✓'} {item.lstrip('⚠ ')}</div>"
-    for item in why_items
-)
+why_html_parts = []
+for item in why_items:
+    warning_class = "why-warning" if item.startswith("⚠") else ""
+    icon = "⚠" if item.startswith("⚠") else "✓"
+    clean_item = item.lstrip("⚠ ")
+    why_html_parts.append(
+        f"<div class='why-item {warning_class}'>{icon} {clean_item}</div>"
+    )
+why_html = "".join(why_html_parts)
 st.markdown(f"<div class='why-card'>{why_html}</div>", unsafe_allow_html=True)
 
 # ---------- OI map ----------
