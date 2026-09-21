@@ -1459,45 +1459,6 @@ def _status_class(value):
     return "status-grey"
 
 
-def _plan_card(plan, label, selected=False):
-    if not plan:
-        return f"""
-        <div class=\"option-card option-muted\">
-            <div class=\"option-head\"><span>◻ {label} BUY</span><span>NO DATA</span></div>
-            <div class=\"option-empty\">No valid option plan returned.</div>
-        </div>
-        """
-
-    accent = "option-call" if plan["side"] == "CE" else "option-put"
-    icon = "🟢" if plan["side"] == "CE" else "🔴"
-    selected_tag = "<span class='selected-tag'>★ SELECTED</span>" if selected else ""
-    pop = _num_or_dash(plan.get("pop"), 1)
-    delta = _num_or_dash(plan.get("delta"), 2)
-    iv = _num_or_dash(plan.get("iv"), 1)
-    rr2 = _num_or_dash(plan.get("rr2"), 2)
-    selected_class = "option-selected" if selected else ""
-    contract_type = "CE" if plan["side"] == "CE" else "PE"
-    return f"""
-    <div class=\"option-card {accent} {selected_class}\">
-        <div class=\"option-head\">
-            <span>{icon} {label} BUY</span>
-            {selected_tag}
-        </div>
-        <div class=\"option-strike\">{plan['strike']:.0f} {contract_type}</div>
-        <div class=\"option-grid\">
-            <div><span>Entry</span><b>{fmt_price(plan['entry'])}</b></div>
-            <div><span>Stop Loss</span><b>{fmt_price(plan['sl'])}</b></div>
-            <div><span>Target 1</span><b>{fmt_price(plan['target1'])}</b></div>
-            <div><span>Target 2</span><b>{fmt_price(plan['target2'])}</b></div>
-            <div><span>PoP</span><b>{pop}%</b></div>
-            <div><span>Delta</span><b>{delta}</b></div>
-            <div><span>IV</span><b>{iv}%</b></div>
-            <div><span>R:R T2</span><b>1:{rr2}</b></div>
-        </div>
-        <div class=\"option-readiness {_status_class(plan['readiness'])}\">{plan['readiness']}</div>
-    </div>
-    """
-
 
 def _check_row(label, state, detail):
     icon = "🟢" if state == "PASS" else "🟡" if state == "WAIT" else "🔴"
@@ -1645,11 +1606,64 @@ st.markdown(
 # ---------- Trade plan ----------
 st.markdown("<div class='section-heading'>🎯 TRADE PLAN</div>", unsafe_allow_html=True)
 selected_side = best_plan["side"] if best_plan else None
+
+def render_plan_native(plan, label, selected=False):
+    """Render the trade plan with native Streamlit components.
+
+    This intentionally avoids nested HTML divs because Streamlit's Markdown/HTML
+    sanitizer can render portions of complex nested cards as literal code.
+    """
+    if not plan:
+        st.info(f"{label} BUY — No valid option plan returned.")
+        return
+
+    side = plan["side"]
+    icon = "🟢" if side == "CE" else "🔴"
+    contract = "CE" if side == "CE" else "PE"
+    status = str(plan.get("readiness", "NO TRADE"))
+    status_icon = "🟢" if status == "READY" else "🟡" if "WAIT" in status else "🔴"
+
+    with st.container(border=True):
+        header_left, header_right = st.columns([3, 1])
+        with header_left:
+            st.markdown(f"### {icon} {label} BUY")
+        with header_right:
+            if selected:
+                st.markdown("**★ SELECTED**")
+
+        st.markdown(f"## {plan['strike']:.0f} {contract}")
+
+        values = [
+            ("Entry", fmt_price(plan.get("entry"))),
+            ("Stop Loss", fmt_price(plan.get("sl"))),
+            ("Target 1", fmt_price(plan.get("target1"))),
+            ("Target 2", fmt_price(plan.get("target2"))),
+            ("PoP", f"{_num_or_dash(plan.get('pop'), 1)}%"),
+            ("Delta", _num_or_dash(plan.get("delta"), 2)),
+            ("IV", f"{_num_or_dash(plan.get('iv'), 1)}%"),
+            ("R:R T2", f"1:{_num_or_dash(plan.get('rr2'), 2)}"),
+        ]
+        cols = st.columns(4)
+        for col, (title, value) in zip(cols, values[:4]):
+            with col:
+                st.metric(title, value)
+        cols = st.columns(4)
+        for col, (title, value) in zip(cols, values[4:]):
+            with col:
+                st.metric(title, value)
+
+        if status == "READY":
+            st.success(f"{status_icon} {status}")
+        elif "WAIT" in status:
+            st.warning(f"{status_icon} {status}")
+        else:
+            st.error(f"{status_icon} {status}")
+
 p1, p2 = st.columns(2)
 with p1:
-    st.markdown(_plan_card(ce_plan, "CALL", selected_side == "CE"), unsafe_allow_html=True)
+    render_plan_native(ce_plan, "CALL", selected_side == "CE")
 with p2:
-    st.markdown(_plan_card(pe_plan, "PUT", selected_side == "PE"), unsafe_allow_html=True)
+    render_plan_native(pe_plan, "PUT", selected_side == "PE")
 
 # ---------- Entry / Exit ----------
 st.markdown("<div class='section-heading'>📍 ENTRY / EXIT</div>", unsafe_allow_html=True)
