@@ -523,40 +523,6 @@ def normalize_chain(rows):
     return pd.DataFrame(records).sort_values("Strike").reset_index(drop=True)
 
 
-def oi_levels(chain, spot):
-    valid = chain.dropna(subset=["Strike"]).copy()
-
-    below = valid[valid["Strike"] <= spot]
-    above = valid[valid["Strike"] >= spot]
-
-    support_row = (
-        below.loc[below["PE OI"].idxmax()]
-        if not below.empty
-        else valid.loc[valid["PE OI"].idxmax()]
-    )
-
-    resistance_row = (
-        above.loc[above["CE OI"].idxmax()]
-        if not above.empty
-        else valid.loc[valid["CE OI"].idxmax()]
-    )
-
-    total_call_oi = valid["CE OI"].sum()
-    total_put_oi = valid["PE OI"].sum()
-    pcr = total_put_oi / total_call_oi if total_call_oi else np.nan
-
-    return (
-        float(support_row["Strike"]),
-        float(resistance_row["Strike"]),
-        pcr,
-    )
-
-
-def nearest_row(chain, strike):
-    if chain.empty:
-        return None
-    index = (chain["Strike"] - strike).abs().idxmin()
-    return chain.loc[index]
 
 
 def score_option(row, side, spot, pcr, tf5, tf30, daily, chain):
