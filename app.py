@@ -1475,13 +1475,15 @@ def _plan_card(plan, label, selected=False):
     delta = _num_or_dash(plan.get("delta"), 2)
     iv = _num_or_dash(plan.get("iv"), 1)
     rr2 = _num_or_dash(plan.get("rr2"), 2)
+    selected_class = "option-selected" if selected else ""
+    contract_type = "CE" if plan["side"] == "CE" else "PE"
     return f"""
-    <div class=\"option-card {accent} {"option-selected" if selected else ""}\">
+    <div class=\"option-card {accent} {selected_class}\">
         <div class=\"option-head\">
             <span>{icon} {label} BUY</span>
             {selected_tag}
         </div>
-        <div class=\"option-strike\">{plan['strike']:.0f} {"CE" if plan['side'] == 'CE' else "PE"}</div>
+        <div class=\"option-strike\">{plan['strike']:.0f} {contract_type}</div>
         <div class=\"option-grid\">
             <div><span>Entry</span><b>{fmt_price(plan['entry'])}</b></div>
             <div><span>Stop Loss</span><b>{fmt_price(plan['sl'])}</b></div>
@@ -1542,10 +1544,10 @@ with m2:
     st.markdown(f"<div class='metric-card {bias_cls}'><span>MARKET BIAS</span><b>{tech['trend']}</b><small>HEADLINE TREND</small></div>", unsafe_allow_html=True)
 with m3:
     pcr_display = f"{pcr:.2f}" if np.isfinite(pcr) else "—"
-st.markdown(
-    f"<div class='metric-card'><span>PCR</span><b>{pcr_display}</b><small>PUT / CALL OI</small></div>",
-    unsafe_allow_html=True,
-)
+    st.markdown(
+        f"<div class='metric-card'><span>PCR</span><b>{pcr_display}</b><small>PUT / CALL OI</small></div>",
+        unsafe_allow_html=True,
+    )
 with m4:
     st.markdown(f"<div class='metric-card metric-support'><span>SUPPORT</span><b>{fmt_price(support)}</b><small>PUT OI WALL</small></div>", unsafe_allow_html=True)
 with m5:
