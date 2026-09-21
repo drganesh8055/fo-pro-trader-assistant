@@ -155,7 +155,7 @@ class UpstoxRateLimitError(UpstoxError):
 # This prevents request bursts from multiple app reruns/sessions.
 _API_REQUEST_LOCK = threading.Lock()
 _LAST_API_REQUEST = 0.0
-_MIN_API_GAP = 0.12
+_MIN_API_GAP = 0.50
 
 
 def get_token():
@@ -1110,7 +1110,7 @@ def scan_full_fno_pop_market(min_pop=75.0):
     for idx, item in enumerate(universe, start=1):
         try:
             if idx > 1:
-                time.sleep(0.12)
+                time.sleep(0.80)
             rows = get_option_chain(item["underlying_key"], item["expiry"])
             if not rows:
                 failed += 1
@@ -1321,11 +1321,11 @@ with st.sidebar:
 
     if st_autorefresh is not None:
         auto_refresh = st.checkbox(
-            "Auto refresh every 30 seconds",
-            value=True,
+            "Auto refresh every 60 seconds",
+            value=False,
         )
         if auto_refresh:
-            st_autorefresh(interval=30_000, key="upstox_live_refresh")
+            st_autorefresh(interval=60_000, key="upstox_live_refresh")
 
     st.divider()
     st.caption("LIVE DATA • Powered by Upstox")
