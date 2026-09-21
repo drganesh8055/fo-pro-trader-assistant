@@ -8,6 +8,8 @@ import numpy as np
 import pandas as pd
 import requests
 import streamlit as st
+import threading
+import time
 
 try:
     from streamlit_autorefresh import st_autorefresh
@@ -142,6 +144,20 @@ class UpstoxError(RuntimeError):
     pass
 
 
+class UpstoxRateLimitError(UpstoxError):
+    def __init__(self, message, retry_after=30):
+        super().__init__(message)
+        self.retry_after = int(retry_after or 30)
+
+
+# Global pacing is intentionally conservative because Streamlit can rerun the
+# script very quickly (manual refresh, auto-refresh, reconnects, etc.).
+# This prevents request bursts from multiple app reruns/sessions.
+_API_REQUEST_LOCK = threading.Lock()
+_LAST_API_REQUEST = 0.0
+_MIN_API_GAP = 0.12
+
+
 def get_token():
     try:
         return str(st.secrets.get("UPSTOX_ACCESS_TOKEN", "")).strip()
@@ -166,6 +182,22 @@ HEADERS = {
 
 
 def api_get(path, params=None, timeout=20):
+    """GET from Upstox with pacing and explicit Cloudflare/429 handling.
+
+    Important: a 429 is NOT retried immediately. Upstox/Cloudflare supplies a
+    retry_after value, and hammering the endpoint while blocked can prolong the
+    rate limit. The caller receives a clear, actionable error instead.
+    """
+    global _LAST_API_REQUEST
+
+    # Keep requests from arriving in a tight burst after Streamlit reruns.
+    with _API_REQUEST_LOCK:
+        now = time.monotonic()
+        wait_for = _MIN_API_GAP - (now - _LAST_API_REQUEST)
+        if wait_for > 0:
+            time.sleep(wait_for)
+        _LAST_API_REQUEST = time.monotonic()
+
     try:
         response = requests.get(
             f"{API_BASE}{path}",
@@ -175,6 +207,25 @@ def api_get(path, params=None, timeout=20):
         )
     except requests.RequestException as exc:
         raise UpstoxError(f"Network error while contacting Upstox: {exc}") from exc
+
+    if response.status_code == 429:
+        retry_after = 30
+        try:
+            body = response.json()
+            if isinstance(body, dict):
+                retry_after = int(body.get("retry_after") or 30)
+                detail = body.get("detail") or body.get("message") or body
+            else:
+                detail = body
+        except Exception:
+            detail = response.text[:500]
+
+        raise UpstoxRateLimitError(
+            f"Upstox is rate-limiting this app (HTTP 429). "
+            f"Please wait at least {retry_after} seconds before trying again. "
+            f"The app has stopped sending requests while rate-limited.",
+            retry_after=retry_after,
+        )
 
     if response.status_code != 200:
         try:
@@ -228,7 +279,7 @@ def alias_symbol(symbol):
     return aliases.get(s, s)
 
 
-@st.cache_data(ttl=30, show_spinner=False)
+@st.cache_data(ttl=60, show_spinner=False)
 def search_underlying(symbol):
     symbol = alias_symbol(symbol)
     results = []
@@ -268,7 +319,7 @@ def search_underlying(symbol):
     return equities[0] if equities else results[0]
 
 
-@st.cache_data(ttl=120, show_spinner=False)
+@st.cache_data(ttl=300, show_spinner=False)
 def get_contracts(underlying_key):
     payload = api_get(
         "/v2/option/contract",
@@ -292,7 +343,7 @@ def available_expiries(contracts):
     )
 
 
-@st.cache_data(ttl=20, show_spinner=False)
+@st.cache_data(ttl=45, show_spinner=False)
 def get_option_chain(underlying_key, expiry):
     payload = api_get(
         "/v2/option/chain",
@@ -308,7 +359,7 @@ def get_option_chain(underlying_key, expiry):
     return rows
 
 
-@st.cache_data(ttl=20, show_spinner=False)
+@st.cache_data(ttl=30, show_spinner=False)
 def get_quote(instrument_key):
     payload = api_get(
         "/v3/market-quote/quotes",
@@ -321,7 +372,7 @@ def get_quote(instrument_key):
 
 
 
-@st.cache_data(ttl=60, show_spinner=False)
+@st.cache_data(ttl=90, show_spinner=False)
 def get_intraday_candles(instrument_key, interval=5):
     """Current-session intraday candles used for entry timing."""
     path = (
@@ -342,7 +393,7 @@ def get_intraday_candles(instrument_key, interval=5):
     return df.sort_values("timestamp").reset_index(drop=True)
 
 
-@st.cache_data(ttl=180, show_spinner=False)
+@st.cache_data(ttl=600, show_spinner=False)
 def get_30m_candles(instrument_key):
     end_date = date.today()
     start_date = end_date - timedelta(days=90)
@@ -364,7 +415,7 @@ def get_30m_candles(instrument_key):
     return df.sort_values("timestamp").reset_index(drop=True)
 
 
-@st.cache_data(ttl=300, show_spinner=False)
+@st.cache_data(ttl=1800, show_spinner=False)
 def get_daily_candles(instrument_key):
     end_date = date.today()
     start_date = end_date - timedelta(days=220)
@@ -1058,6 +1109,8 @@ def scan_full_fno_pop_market(min_pop=75.0):
 
     for idx, item in enumerate(universe, start=1):
         try:
+            if idx > 1:
+                time.sleep(0.12)
             rows = get_option_chain(item["underlying_key"], item["expiry"])
             if not rows:
                 failed += 1
@@ -1145,6 +1198,9 @@ def scan_full_fno_pop_market(min_pop=75.0):
                 candidates.append(best_for_stock)
             scanned += 1
 
+        except UpstoxRateLimitError:
+            progress.empty()
+            raise
         except Exception:
             failed += 1
 
@@ -1184,6 +1240,12 @@ with st.sidebar:
             st.session_state["fno_pop_results"] = results
             st.session_state["fno_pop_scan_info"] = (total, scanned, failed)
             st.session_state["fno_pop_scan_time"] = datetime.now(ZoneInfo("Asia/Kolkata")).strftime("%H:%M:%S")
+        except UpstoxRateLimitError as exc:
+            st.session_state["fno_pop_results"] = []
+            st.error(
+                f"⏳ Upstox rate limit reached. Wait about {exc.retry_after} seconds, "
+                "then scan again. The scanner stopped immediately to avoid making the block worse."
+            )
         except UpstoxError as exc:
             st.session_state["fno_pop_results"] = []
             st.error(str(exc))
@@ -1338,6 +1400,12 @@ try:
         # as the headline bias.
         tech = daily_tech
 
+except UpstoxRateLimitError as exc:
+    st.error(
+        f"⏳ Upstox rate limit reached. Please wait about {exc.retry_after} seconds "
+        "before refreshing. The app has stopped sending requests while the limit is active."
+    )
+    st.stop()
 except UpstoxError as exc:
     st.error(str(exc))
     st.stop()
