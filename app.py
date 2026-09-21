@@ -429,50 +429,71 @@ def timeframe_score(side, tf5, tf30, daily):
 
 
 def oi_levels(chain, spot):
+    """Build practical OI support/resistance and OI-wall context.
+
+    Uses a local strike band, then separates the nearest meaningful wall from
+    the largest wall so a very distant strike does not dominate the decision.
+    """
     valid = chain.dropna(subset=["Strike"]).copy()
-    if valid.empty:
-        return spot, spot, np.nan, {"put_walls": [], "call_walls": []}
+    if valid.empty or not np.isfinite(spot):
+        return spot, spot, np.nan, {"put_walls": [], "call_walls": [],
+                                    "major_support": spot, "major_resistance": spot,
+                                    "nearest_support": spot, "nearest_resistance": spot}
 
-    # Do not allow a distant strike to become a misleading support/resistance.
-    band = valid[
-        (valid["Strike"] >= spot * 0.90) &
-        (valid["Strike"] <= spot * 1.10)
-    ].copy()
+    # Keep OI analysis close enough to the underlying to remain actionable.
+    band = valid[(valid["Strike"] >= spot * 0.90) & (valid["Strike"] <= spot * 1.10)].copy()
     if band.empty:
-        band = valid
+        band = valid.copy()
 
-    below = band[band["Strike"] <= spot]
-    above = band[band["Strike"] >= spot]
+    band["PE OI"] = pd.to_numeric(band["PE OI"], errors="coerce").fillna(0)
+    band["CE OI"] = pd.to_numeric(band["CE OI"], errors="coerce").fillna(0)
+    band["PE Chg OI"] = pd.to_numeric(band["PE Chg OI"], errors="coerce").fillna(0)
+    band["CE Chg OI"] = pd.to_numeric(band["CE Chg OI"], errors="coerce").fillna(0)
 
-    support_row = (
-        below.loc[below["PE OI"].fillna(0).idxmax()]
-        if not below.empty else band.loc[band["PE OI"].fillna(0).idxmax()]
-    )
-    resistance_row = (
-        above.loc[above["CE OI"].fillna(0).idxmax()]
-        if not above.empty else band.loc[band["CE OI"].fillna(0).idxmax()]
-    )
+    below = band[band["Strike"] <= spot].copy()
+    above = band[band["Strike"] >= spot].copy()
 
-    total_call_oi = band["CE OI"].fillna(0).sum()
-    total_put_oi = band["PE OI"].fillna(0).sum()
-    pcr = total_put_oi / total_call_oi if total_call_oi else np.nan
+    # Nearest walls provide the immediate decision barrier.
+    nearest_support = float(below["Strike"].max()) if not below.empty else float(band["Strike"].min())
+    nearest_resistance = float(above["Strike"].min()) if not above.empty else float(band["Strike"].max())
+
+    # Major walls use OI, but only among strikes on the correct side.
+    support_row = below.loc[below["PE OI"].idxmax()] if not below.empty else band.loc[band["PE OI"].idxmax()]
+    resistance_row = above.loc[above["CE OI"].idxmax()] if not above.empty else band.loc[band["CE OI"].idxmax()]
+
+    major_support = float(support_row["Strike"])
+    major_resistance = float(resistance_row["Strike"])
+
+    total_call_oi = float(band["CE OI"].sum())
+    total_put_oi = float(band["PE OI"].sum())
+    pcr = total_put_oi / total_call_oi if total_call_oi > 0 else np.nan
 
     put_walls = band.nlargest(3, "PE OI")[["Strike", "PE OI", "PE Chg OI"]].to_dict("records")
     call_walls = band.nlargest(3, "CE OI")[["Strike", "CE OI", "CE Chg OI"]].to_dict("records")
 
     return (
-        float(support_row["Strike"]),
-        float(resistance_row["Strike"]),
+        major_support,
+        major_resistance,
         pcr,
-        {"put_walls": put_walls, "call_walls": call_walls},
+        {
+            "put_walls": put_walls,
+            "call_walls": call_walls,
+            "major_support": major_support,
+            "major_resistance": major_resistance,
+            "nearest_support": nearest_support,
+            "nearest_resistance": nearest_resistance,
+            "support_room_pct": max((spot - major_support) / max(spot, 1) * 100, 0),
+            "resistance_room_pct": max((major_resistance - spot) / max(spot, 1) * 100, 0),
+        },
     )
 
 
 def nearest_row(chain, strike):
-    if chain.empty:
+    if chain.empty or not np.isfinite(strike):
         return None
     index = (chain["Strike"] - strike).abs().idxmin()
     return chain.loc[index]
+
 
 def normalize_chain(rows):
     records = []
@@ -523,12 +544,13 @@ def normalize_chain(rows):
     return pd.DataFrame(records).sort_values("Strike").reset_index(drop=True)
 
 
+def score_option(row, side, spot, pcr, tf5, tf30, daily, chain,
+                 support=None, resistance=None, oi_wall_info=None):
+    """100-point trade-quality engine.
 
-
-def score_option(row, side, spot, pcr, tf5, tf30, daily, chain):
-    """Conservative 100-point option-quality score.
-
-    This is a decision-support score, not a statistical probability of winning.
+    This is a rule-based setup score, not a historical win probability.
+    It deliberately rewards confluence and penalizes poor liquidity, weak room,
+    VWAP conflict and expensive/poorly placed strikes.
     """
     if side == "CE":
         premium = safe_float(row["CE LTP"])
@@ -537,6 +559,7 @@ def score_option(row, side, spot, pcr, tf5, tf30, daily, chain):
         pop = safe_float(row["CE PoP"])
         chg_oi = safe_float(row["CE Chg OI"], 0)
         volume = safe_float(row["CE Volume"], 0)
+        oi = safe_float(row["CE OI"], 0)
         bid = safe_float(row["CE Bid"])
         ask = safe_float(row["CE Ask"])
     else:
@@ -546,6 +569,7 @@ def score_option(row, side, spot, pcr, tf5, tf30, daily, chain):
         pop = safe_float(row["PE PoP"])
         chg_oi = safe_float(row["PE Chg OI"], 0)
         volume = safe_float(row["PE Volume"], 0)
+        oi = safe_float(row["PE OI"], 0)
         bid = safe_float(row["PE Bid"])
         ask = safe_float(row["PE Ask"])
 
@@ -555,91 +579,154 @@ def score_option(row, side, spot, pcr, tf5, tf30, daily, chain):
     # 30 points: multi-timeframe agreement.
     tf_points, alignment = timeframe_score(side, tf5, tf30, daily)
 
-    # 15 points: price/momentum confirmation.
+    # 15 points: momentum + trend strength.
     tf = tf5
     momentum_points = 0
     if tf.get("trend") == desired:
-        momentum_points += 6
-    if tf.get("rsi", 50) >= 52 and side == "CE":
-        momentum_points += 3
-    if tf.get("rsi", 50) <= 48 and side == "PE":
-        momentum_points += 3
-    if side == "CE" and tf.get("momentum", 0) > 0:
-        momentum_points += 3
-    if side == "PE" and tf.get("momentum", 0) < 0:
-        momentum_points += 3
-    if tf.get("adx", 0) >= 20:
-        momentum_points += 3
+        momentum_points += 5
+    rsi = tf.get("rsi", 50)
+    if side == "CE":
+        if 52 <= rsi <= 68:
+            momentum_points += 3
+        elif 50 <= rsi < 52:
+            momentum_points += 1
+        if tf.get("momentum", 0) > 0:
+            momentum_points += 3
+    else:
+        if 32 <= rsi <= 48:
+            momentum_points += 3
+        elif 48 < rsi <= 50:
+            momentum_points += 1
+        if tf.get("momentum", 0) < 0:
+            momentum_points += 3
+    if tf.get("adx", 0) >= 25:
+        momentum_points += 4
+    elif tf.get("adx", 0) >= 20:
+        momentum_points += 2
     momentum_points = min(momentum_points, 15)
 
-    # 15 points: PCR is confirmation only, never the main signal.
+    # 10 points: VWAP confirmation. This was previously calculated but not
+    # actually used in the trade score.
+    vwap = safe_float(tf5.get("vwap"), spot)
+    vwap_points = 0
+    if np.isfinite(vwap) and vwap > 0:
+        vwap_gap_pct = (spot - vwap) / spot * 100
+        if side == "CE":
+            if spot > vwap and tf5.get("momentum", 0) > 0:
+                vwap_points = 10
+            elif spot > vwap:
+                vwap_points = 6
+            elif spot >= vwap * 0.997:
+                vwap_points = 2
+        else:
+            if spot < vwap and tf5.get("momentum", 0) < 0:
+                vwap_points = 10
+            elif spot < vwap:
+                vwap_points = 6
+            elif spot <= vwap * 1.003:
+                vwap_points = 2
+    else:
+        vwap_gap_pct = 0.0
+
+    # 10 points: PCR as secondary confirmation.
     pcr_points = 0
     if np.isfinite(pcr):
         if side == "CE":
-            pcr_points = 7 if 0.90 <= pcr <= 1.35 else 3 if 0.75 <= pcr < 0.90 else 0
+            pcr_points = 10 if 0.90 <= pcr <= 1.35 else 5 if 0.80 <= pcr < 0.90 else 0
         else:
-            pcr_points = 7 if 0.65 <= pcr <= 1.10 else 3 if 1.10 < pcr <= 1.30 else 0
+            pcr_points = 10 if 0.65 <= pcr <= 1.10 else 5 if 1.10 < pcr <= 1.25 else 0
 
-    # OI change is deliberately a small component because this endpoint exposes
-    # current OI versus previous OI, not a full intraday OI history.
-    if side == "CE":
-        oi_points = 4 if chg_oi <= 0 else 2
+    # 5 points: option OI change direction. Small weight because the endpoint
+    # gives current-vs-previous OI, not a full intraday OI sequence.
+    oi_points = 0
+    if chg_oi < 0:
+        oi_points = 5
+    elif chg_oi == 0:
+        oi_points = 3
     else:
-        oi_points = 4 if chg_oi <= 0 else 2
+        oi_points = 1
 
-    # Option quality: 25 points.
+    # 20 points: option quality and liquidity.
     quality = 0
     abs_delta = abs(delta) if np.isfinite(delta) else np.nan
     if np.isfinite(abs_delta):
-        if 0.45 <= abs_delta <= 0.70:
-            quality += 8
-        elif 0.35 <= abs_delta < 0.45 or 0.70 < abs_delta <= 0.80:
-            quality += 5
+        if 0.45 <= abs_delta <= 0.65:
+            quality += 6
+        elif 0.40 <= abs_delta < 0.45 or 0.65 < abs_delta <= 0.75:
+            quality += 4
+        elif 0.35 <= abs_delta < 0.40 or 0.75 < abs_delta <= 0.80:
+            quality += 2
 
     spread_pct = (
         max(ask - bid, 0) / max((ask + bid) / 2, 0.01) * 100
         if np.isfinite(ask) and np.isfinite(bid) and ask > 0 and bid > 0
         else 999
     )
-    if spread_pct <= 1.5:
-        quality += 6
-    elif spread_pct <= 2.5:
+    if spread_pct <= 1.0:
+        quality += 5
+    elif spread_pct <= 2.0:
         quality += 4
-    elif spread_pct <= 4:
+    elif spread_pct <= 3.0:
         quality += 2
 
-    if volume > 0:
+    # Liquidity is tiered rather than treating any volume > 0 as equal.
+    if volume >= 10000:
+        quality += 5
+    elif volume >= 5000:
         quality += 4
-    if np.isfinite(iv):
-        iv_values = chain[f"{side} IV"].replace([np.inf, -np.inf], np.nan).dropna()
-        if len(iv_values) >= 5:
-            iv_rank = float((iv_values <= iv).mean())
-            if 0.15 <= iv_rank <= 0.75:
-                quality += 4
-            elif iv_rank < 0.90:
-                quality += 2
-        else:
-            quality += 2
+    elif volume >= 1000:
+        quality += 2
 
-    # Near-ATM strikes are preferred; avoid deep OTM lottery tickets.
-    distance_pct = abs(float(row["Strike"]) - spot) / max(spot, 1)
-    if distance_pct <= 0.015:
-        distance_points = 5
-    elif distance_pct <= 0.03:
-        distance_points = 3
+    if oi >= 10000:
+        quality += 4
+    elif oi >= 3000:
+        quality += 3
+    elif oi > 0:
+        quality += 1
+
+    # 10 points: strike placement + room to the OI barrier.
+    distance_pct = abs(float(row["Strike"]) - spot) / max(spot, 1) * 100
+    if distance_pct <= 1.0:
+        strike_points = 6
+    elif distance_pct <= 2.0:
+        strike_points = 5
+    elif distance_pct <= 3.0:
+        strike_points = 3
+    elif distance_pct <= 5.0:
+        strike_points = 1
     else:
-        distance_points = 0
+        strike_points = 0
 
-    pop_points = (
-        float(np.clip((pop - 50) / 2.5, 0, 10))
-        if np.isfinite(pop) else 0
+    room_points = 0
+    room_pct = np.nan
+    if side == "CE" and np.isfinite(resistance):
+        room_pct = max((resistance - spot) / max(spot, 1) * 100, 0)
+        if spot >= resistance:
+            room_points = 4
+        elif room_pct >= 2.0:
+            room_points = 4
+        elif room_pct >= 1.0:
+            room_points = 2
+    elif side == "PE" and np.isfinite(support):
+        room_pct = max((spot - support) / max(spot, 1) * 100, 0)
+        if spot <= support:
+            room_points = 4
+        elif room_pct >= 2.0:
+            room_points = 4
+        elif room_pct >= 1.0:
+            room_points = 2
+
+    strike_quality = strike_points + room_points
+
+    # 10 points: PoP is useful but capped so it cannot dominate direction.
+    pop_points = float(np.clip((pop - 55) / 3.0, 0, 10)) if np.isfinite(pop) else 0
+
+    # Total: 30 + 15 + 10 + 10 + 5 + 20 + 10 + 10 = 110.
+    raw_score = (
+        tf_points + momentum_points + vwap_points + pcr_points + oi_points +
+        quality + strike_quality + pop_points
     )
-
-    score = float(np.clip(
-        tf_points + momentum_points + pcr_points + oi_points +
-        quality + distance_points + pop_points,
-        0, 100
-    ))
+    score = float(np.clip(raw_score / 110 * 100, 0, 100))
 
     return {
         "score": score,
@@ -649,19 +736,27 @@ def score_option(row, side, spot, pcr, tf5, tf30, daily, chain):
         "pop": pop,
         "chg_oi": chg_oi,
         "volume": volume,
+        "oi": oi,
         "spread_pct": spread_pct,
         "alignment": alignment,
         "distance_pct": distance_pct,
         "quality": quality,
+        "vwap": vwap,
+        "vwap_gap_pct": vwap_gap_pct,
+        "room_pct": room_pct,
+        "strike_quality": strike_quality,
     }
 
 
 def build_plan(row, side, spot, support, resistance, pcr, tf5, tf30, daily,
-               risk_profile, chain):
+               risk_profile, chain, oi_wall_info=None):
     if row is None:
         return None
 
-    scored = score_option(row, side, spot, pcr, tf5, tf30, daily, chain)
+    scored = score_option(
+        row, side, spot, pcr, tf5, tf30, daily, chain,
+        support=support, resistance=resistance, oi_wall_info=oi_wall_info,
+    )
 
     ask = safe_float(row[f"{side} Ask"])
     ltp = safe_float(row[f"{side} LTP"])
@@ -669,8 +764,8 @@ def build_plan(row, side, spot, support, resistance, pcr, tf5, tf30, daily,
     if not np.isfinite(entry) or entry <= 0:
         return None
 
-    # Conservative premium-risk model. Underlying invalidation remains the
-    # primary exit condition; premium SL is a secondary protection.
+    # Keep the same risk-profile labels and UI, but make the underlying ATR and
+    # OI barrier part of the validation rather than relying only on premium %.
     risk_settings = {
         "Conservative": (0.72, 1.25, 1.55),
         "Balanced": (0.70, 1.35, 1.75),
@@ -683,15 +778,28 @@ def build_plan(row, side, spot, support, resistance, pcr, tf5, tf30, daily,
     rr1 = (target1 - entry) / max(entry - sl, 0.01)
     rr2 = (target2 - entry) / max(entry - sl, 0.01)
 
-    atr = max(tf5.get("atr", spot*0.01), spot*0.001)
+    atr = max(tf5.get("atr", spot * 0.01), spot * 0.001)
     trigger_buffer = max(atr * 0.15, spot * 0.0015)
 
+    # Breakout confirmation is deliberately stricter than a simple spot touch.
+    # A BUY requires a live break plus candle/volume confirmation; otherwise WAIT.
+    candle_confirmed = False
+    volume_confirmed = False
+    body_strength = 0.0
     if side == "CE":
         trigger_level = resistance + trigger_buffer
         trigger_hit = spot >= trigger_level
+        if trigger_hit and isinstance(tf5, dict):
+            candle_confirmed = (
+                tf5.get("trend") == "Bullish" and
+                tf5.get("momentum", 0) > 0 and
+                tf5.get("rsi", 50) >= 52
+            )
+            volume_confirmed = tf5.get("volume_ratio", 1.0) >= 1.10
+        body_strength = max(tf5.get("momentum", 0), 0)
         trigger = (
-            f"Enter only after spot breaks and sustains above "
-            f"{fmt_price(trigger_level)}."
+            f"Enter only after spot breaks and sustains above {fmt_price(trigger_level)} "
+            "with 5m bullish confirmation and preferably above-average volume."
         )
         exit_rule = (
             f"Exit if spot loses support {fmt_price(support)} or premium hits "
@@ -700,9 +808,17 @@ def build_plan(row, side, spot, support, resistance, pcr, tf5, tf30, daily,
     else:
         trigger_level = support - trigger_buffer
         trigger_hit = spot <= trigger_level
+        if trigger_hit and isinstance(tf5, dict):
+            candle_confirmed = (
+                tf5.get("trend") == "Bearish" and
+                tf5.get("momentum", 0) < 0 and
+                tf5.get("rsi", 50) <= 48
+            )
+            volume_confirmed = tf5.get("volume_ratio", 1.0) >= 1.10
+        body_strength = max(-tf5.get("momentum", 0), 0)
         trigger = (
-            f"Enter only after spot breaks and sustains below "
-            f"{fmt_price(trigger_level)}."
+            f"Enter only after spot breaks and sustains below {fmt_price(trigger_level)} "
+            "with 5m bearish confirmation and preferably above-average volume."
         )
         exit_rule = (
             f"Exit if spot reclaims resistance {fmt_price(resistance)} or premium "
@@ -712,7 +828,6 @@ def build_plan(row, side, spot, support, resistance, pcr, tf5, tf30, daily,
     desired = "Bullish" if side == "CE" else "Bearish"
     opposite = "Bearish" if side == "CE" else "Bullish"
 
-    # Hard quality gates intentionally bias toward NO TRADE.
     hard_fail = []
     if scored["score"] < 72:
         hard_fail.append("setup score below 72")
@@ -720,18 +835,45 @@ def build_plan(row, side, spot, support, resistance, pcr, tf5, tf30, daily,
         hard_fail.append("fewer than 2 aligned timeframes")
     if tf5.get("trend") == opposite or tf30.get("trend") == opposite:
         hard_fail.append("short-term trend conflict")
-    if scored["spread_pct"] > 4:
+    if scored["spread_pct"] > 3:
         hard_fail.append("wide option spread")
     if not np.isfinite(scored["delta"]) or not (0.35 <= abs(scored["delta"]) <= 0.80):
         hard_fail.append("poor delta")
     if not np.isfinite(scored["pop"]) or scored["pop"] < 55:
         hard_fail.append("low Upstox PoP")
-    if scored["volume"] <= 0:
-        hard_fail.append("no option volume")
+    if scored["volume"] < 1000:
+        hard_fail.append("weak option liquidity")
+    if not np.isfinite(scored["oi"]) or scored["oi"] <= 0:
+        hard_fail.append("no option OI")
 
-    readiness = "READY" if not hard_fail and trigger_hit else (
-        "WAIT FOR TRIGGER" if not hard_fail else "NO TRADE"
-    )
+    # VWAP is now a real gate: do not buy against the active intraday side.
+    vwap = safe_float(tf5.get("vwap"), spot)
+    if np.isfinite(vwap) and vwap > 0:
+        if side == "CE" and spot < vwap * 0.997:
+            hard_fail.append("price below VWAP")
+        if side == "PE" and spot > vwap * 1.003:
+            hard_fail.append("price above VWAP")
+
+    # Avoid buying directly into a very close OI wall.
+    if side == "CE":
+        wall_room = (resistance - spot) / max(spot, 1) * 100
+        if spot < resistance and wall_room < 0.50:
+            hard_fail.append("resistance too close")
+    else:
+        wall_room = (spot - support) / max(spot, 1) * 100
+        if spot > support and wall_room < 0.50:
+            hard_fail.append("support too close")
+
+    # A breakout can qualify as READY only after candle confirmation. A raw
+    # price touch is not enough.
+    if not trigger_hit:
+        trigger_state = "WAIT FOR TRIGGER"
+    elif not candle_confirmed or not volume_confirmed:
+        trigger_state = "WAIT FOR CONFIRMATION"
+    else:
+        trigger_state = "READY" if not hard_fail else "NO TRADE"
+
+    readiness = trigger_state if not hard_fail else "NO TRADE"
 
     return {
         "side": side,
@@ -749,6 +891,8 @@ def build_plan(row, side, spot, support, resistance, pcr, tf5, tf30, daily,
         "trigger": trigger,
         "trigger_level": trigger_level,
         "trigger_hit": trigger_hit,
+        "candle_confirmed": candle_confirmed,
+        "volume_confirmed": volume_confirmed,
         "readiness": readiness,
         "fail_reasons": hard_fail,
         "exit": exit_rule,
@@ -757,6 +901,8 @@ def build_plan(row, side, spot, support, resistance, pcr, tf5, tf30, daily,
         "volume": scored["volume"],
         "spread_pct": scored["spread_pct"],
         "alignment": scored["alignment"],
+        "vwap": scored["vwap"],
+        "room_pct": scored["room_pct"],
     }
 
 
@@ -1134,8 +1280,7 @@ support, resistance, pcr, oi_wall_info = oi_levels(chain, spot)
 atm_index = (chain["Strike"] - spot).abs().idxmin()
 atm_strike = float(chain.loc[atm_index, "Strike"])
 
-# Evaluate a slightly wider ATM band, then choose the option with the
-# strongest quality score rather than simply choosing the highest PoP.
+# Evaluate a wider ATM band, then select the strike using the full quality engine.
 candidate_rows = chain.iloc[
     max(0, atm_index - 5): min(len(chain), atm_index + 6)
 ]
@@ -1144,23 +1289,37 @@ ce_candidates = []
 pe_candidates = []
 
 for _, row in candidate_rows.iterrows():
-    ce_candidates.append(
-        (score_option(row, "CE", spot, pcr, tf5, tf30, daily_tech, chain)["score"], row)
+    ce_scored = score_option(
+        row, "CE", spot, pcr, tf5, tf30, daily_tech, chain,
+        support=support, resistance=resistance, oi_wall_info=oi_wall_info,
     )
-    pe_candidates.append(
-        (score_option(row, "PE", spot, pcr, tf5, tf30, daily_tech, chain)["score"], row)
+    pe_scored = score_option(
+        row, "PE", spot, pcr, tf5, tf30, daily_tech, chain,
+        support=support, resistance=resistance, oi_wall_info=oi_wall_info,
     )
+    ce_candidates.append((ce_scored, row))
+    pe_candidates.append((pe_scored, row))
 
-best_ce_row = max(ce_candidates, key=lambda x: x[0], default=(0, None))[1]
-best_pe_row = max(pe_candidates, key=lambda x: x[0], default=(0, None))[1]
+def _candidate_key(item):
+    scored, row = item
+    # Score first; then prefer Delta, lower spread, higher volume and closer ATM.
+    abs_delta = abs(safe_float(scored.get("delta"), 0))
+    spread = safe_float(scored.get("spread_pct"), 999)
+    volume = safe_float(scored.get("volume"), 0)
+    distance = safe_float(scored.get("distance_pct"), 999)
+    delta_fit = -abs(abs_delta - 0.55)
+    return (scored["score"], delta_fit, -spread, np.log1p(max(volume, 0)), -distance)
+
+best_ce_scored, best_ce_row = max(ce_candidates, key=_candidate_key, default=({"score": 0}, None))
+best_pe_scored, best_pe_row = max(pe_candidates, key=_candidate_key, default=({"score": 0}, None))
 
 ce_plan = build_plan(
     best_ce_row, "CE", spot, support, resistance, pcr,
-    tf5, tf30, daily_tech, risk_profile, chain
+    tf5, tf30, daily_tech, risk_profile, chain, oi_wall_info
 )
 pe_plan = build_plan(
     best_pe_row, "PE", spot, support, resistance, pcr,
-    tf5, tf30, daily_tech, risk_profile, chain
+    tf5, tf30, daily_tech, risk_profile, chain, oi_wall_info
 )
 
 ce_score = ce_plan["score"] if ce_plan else 0
@@ -1170,12 +1329,12 @@ pe_score = pe_plan["score"] if pe_plan else 0
 # WAIT/NO TRADE instead of forcing a position.
 overall_direction, overall_alignment = overall_trend(tf5, tf30, daily_tech)
 
-if ce_plan and ce_score >= 72 and ce_score >= pe_score + 8 and         overall_direction == "Bullish" and ce_plan["readiness"] in {"READY", "WAIT FOR TRIGGER"}:
-    decision = "CALL BUY" if ce_plan["readiness"] == "READY" else "WAIT FOR TRIGGER"
+if ce_plan and ce_score >= 72 and ce_score >= pe_score + 8 and         overall_direction == "Bullish" and ce_plan["readiness"] in {"READY", "WAIT FOR TRIGGER", "WAIT FOR CONFIRMATION"}:
+    decision = "CALL BUY" if ce_plan["readiness"] == "READY" else ce_plan["readiness"]
     decision_class = "trade-call" if decision == "CALL BUY" else "trade-neutral"
     best_plan = ce_plan
-elif pe_plan and pe_score >= 72 and pe_score >= ce_score + 8 and         overall_direction == "Bearish" and pe_plan["readiness"] in {"READY", "WAIT FOR TRIGGER"}:
-    decision = "PUT BUY" if pe_plan["readiness"] == "READY" else "WAIT FOR TRIGGER"
+elif pe_plan and pe_score >= 72 and pe_score >= ce_score + 8 and         overall_direction == "Bearish" and pe_plan["readiness"] in {"READY", "WAIT FOR TRIGGER", "WAIT FOR CONFIRMATION"}:
+    decision = "PUT BUY" if pe_plan["readiness"] == "READY" else pe_plan["readiness"]
     decision_class = "trade-put" if decision == "PUT BUY" else "trade-neutral"
     best_plan = pe_plan
 else:
@@ -1200,13 +1359,17 @@ updated = quote_data.get(
 # HEADER
 # ============================================================
 
-HEADER_HTML = (
-    "<div class=\"topbar\">"
-    "<div class=\"topbar-title\">📊 FO PRO Trader Assistant</div>"
-    "<div class=\"topbar-sub\">Options Analysis • Powered by Upstox • Live market data</div>"
-    "</div>"
+st.markdown(
+    """
+<div class="topbar">
+    <div class="topbar-title">📊 FO PRO Trader Assistant</div>
+    <div class="topbar-sub">
+        Options Analysis • Powered by Upstox • Live market data
+    </div>
+</div>
+""",
+    unsafe_allow_html=True,
 )
-st.markdown(HEADER_HTML, unsafe_allow_html=True)
 
 h1, h2, h3 = st.columns([2.2, 1.2, 1.0])
 
@@ -1463,6 +1626,7 @@ with tab1:
         f"PCR is {pcr:.2f}.",
         f"OI support is {fmt_price(support)} and resistance is {fmt_price(resistance)}.",
         f"Overall direction: {overall_direction} with {overall_alignment}/3 timeframes aligned.",
+        f"5m VWAP: {fmt_price(tf5['vwap'])}; spot is {'above' if spot >= tf5['vwap'] else 'below'} VWAP.",
         f"Engine confidence: {confidence}/100. The score is a rule-based quality measure, not a historical win probability.",
     ]
 
@@ -1613,11 +1777,13 @@ with tab4:
 **5. High-accuracy quality gate**
 - Minimum setup score: 72/100
 - At least 2 of 3 timeframes must agree
+- VWAP must confirm the intraday direction
 - Short-term trend conflict blocks the trade
-- Delta, liquidity and bid/ask spread are checked
+- Delta, OI, tiered liquidity and bid/ask spread are checked
 - Upstox PoP must be at least 55%
-- The underlying breakout trigger must occur before a BUY signal
-- Otherwise the engine returns **WAIT FOR TRIGGER** or **NO TRADE**
+- The underlying breakout requires 5m trend/momentum confirmation
+- A close OI wall can block a setup even when PoP is high
+- Otherwise the engine returns **WAIT FOR TRIGGER**, **WAIT FOR CONFIRMATION** or **NO TRADE**
 - The score is not a backtested win rate and does not guarantee profit.
 """
     )
