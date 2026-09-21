@@ -62,6 +62,76 @@ st.markdown(
     background:#f2f4f7;border:1px solid #dfe3e8;border-radius:12px;
     padding:14px 16px;font-weight:800;color:#475467;
 }
+
+/* ============================================================
+   REDESIGNED DASHBOARD VISUAL SYSTEM
+   ============================================================ */
+.topbar-dashboard {
+    display:flex;align-items:center;justify-content:space-between;gap:18px;
+}
+.header-live,.live-block,.closed-block {
+    color:#fff;padding:10px 16px;border-radius:9px;font-size:13px;
+    font-weight:800;letter-spacing:.2px;text-align:center;white-space:nowrap;
+}
+.header-live { background:rgba(255,255,255,.14); }
+.live-block { background:#16a34a; }
+.closed-block { background:#dc2626; }
+.hero-price {font-size:29px;font-weight:850;line-height:1.05;color:#182230;}
+.section-heading {
+    font-size:19px;font-weight:850;color:#182230;margin:20px 0 10px;
+    letter-spacing:.15px;
+}
+.metric-card,.entry-card {
+    background:#fff;border:1px solid #e7ebf0;border-radius:13px;
+    padding:15px 14px;min-height:105px;box-shadow:0 2px 8px rgba(16,42,67,.035);
+}
+.metric-card span,.entry-card span,.decision-stats span,.status-grid span,
+.option-grid span,.exit-rule span {
+    display:block;font-size:10px;font-weight:800;color:#667085;letter-spacing:.55px;
+}
+.metric-card b,.entry-card b {display:block;font-size:20px;color:#182230;margin-top:8px;line-height:1.15;}
+.metric-card small,.entry-card small {display:block;color:#98a2b3;font-size:10px;margin-top:7px;}
+.metric-positive b {color:#147a3d;}.metric-negative b {color:#b4232f;}
+.metric-support b {color:#147a3d;}.metric-resistance b {color:#b4232f;}
+.metric-neutral b {color:#475467;}
+.decision-card {
+    border-radius:16px;padding:23px 25px;border:1px solid #dfe5eb;
+    background:#fff;box-shadow:0 3px 12px rgba(16,42,67,.055);
+}
+.decision-call {border-color:#bde5c9;background:linear-gradient(180deg,#f5fcf7,#fff);}
+.decision-put {border-color:#f2c5c8;background:linear-gradient(180deg,#fff7f7,#fff);}
+.decision-neutral {border-color:#dfe3e8;background:#fbfcfd;}
+.decision-main {font-size:32px;font-weight:900;text-align:center;line-height:1.1;}
+.decision-call .decision-main {color:#147a3d;}.decision-put .decision-main {color:#b4232f;}.decision-neutral .decision-main {color:#475467;}
+.decision-sub {text-align:center;color:#667085;margin:9px 0 20px;font-size:13px;}
+.decision-stats {display:grid;grid-template-columns:repeat(4,1fr);gap:10px;}
+.decision-stats>div {background:rgba(255,255,255,.78);border:1px solid #edf0f3;border-radius:10px;padding:11px;text-align:center;}
+.decision-stats b {display:block;font-size:19px;margin-top:5px;color:#182230;}.decision-stats em {font-size:11px;font-style:normal;color:#98a2b3;}
+.status-panel {border-radius:14px;padding:18px 20px;border:1px solid #e4e7ec;background:#fff;box-shadow:0 2px 8px rgba(16,42,67,.035);}
+.status-green {border-color:#bde5c9;background:#f4fbf6;}.status-yellow {border-color:#f1d79b;background:#fffbf1;}.status-red {border-color:#f2c5c8;background:#fff6f6;}.status-grey {border-color:#dfe3e8;background:#f8fafc;}
+.status-title {font-size:22px;font-weight:900;text-align:center;margin-bottom:15px;}
+.status-green .status-title{color:#147a3d}.status-yellow .status-title{color:#9a6700}.status-red .status-title{color:#b4232f}.status-grey .status-title{color:#475467}
+.status-grid {display:grid;grid-template-columns:repeat(3,1fr);gap:12px;}
+.status-grid>div {background:#fff;border:1px solid #e8ebef;border-radius:10px;padding:11px;text-align:center;}
+.status-grid b {display:block;font-size:18px;color:#182230;margin-top:5px;}
+.status-note {margin-top:12px;text-align:center;color:#667085;font-size:12px;line-height:1.5;}
+.check-card {background:#fff;border:1px solid #e7ebf0;border-radius:14px;padding:8px 18px;box-shadow:0 2px 8px rgba(16,42,67,.035);}
+.check-row {display:grid;grid-template-columns:1.35fr .8fr 2fr;align-items:center;gap:10px;padding:12px 3px;border-bottom:1px solid #eef0f2;}
+.check-row>span {font-weight:750;color:#344054;font-size:13px;}.check-row small {color:#98a2b3;font-size:11px;}.check-pass{color:#147a3d}.check-wait{color:#9a6700}.check-fail{color:#b4232f}
+.check-total {display:flex;justify-content:space-between;align-items:center;padding:13px 3px 7px;font-size:12px;font-weight:850;color:#667085;}.check-total b{font-size:18px;color:#182230;}
+.option-card {border:1px solid #e5e7eb;border-radius:15px;background:#fff;padding:17px;box-shadow:0 2px 9px rgba(16,42,67,.035);}
+.option-call {border-top:4px solid #16a34a;}.option-put {border-top:4px solid #dc2626;}.option-selected{box-shadow:0 4px 16px rgba(16,42,67,.09);}
+.option-head {display:flex;justify-content:space-between;align-items:center;font-size:16px;font-weight:900;color:#182230;}.option-call .option-head>span:first-child{color:#147a3d}.option-put .option-head>span:first-child{color:#b4232f}
+.selected-tag {font-size:9px;background:#eef7f0;color:#147a3d;padding:5px 8px;border-radius:12px;letter-spacing:.4px;}
+.option-strike {font-size:24px;font-weight:900;color:#182230;margin:8px 0 14px;}.option-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:10px;}.option-grid>div{background:#f8fafc;border-radius:9px;padding:9px;}.option-grid b{display:block;font-size:14px;margin-top:5px;color:#182230;}
+.option-readiness {margin-top:13px;border-radius:8px;text-align:center;padding:8px;font-size:11px;font-weight:900;letter-spacing:.4px;}.option-readiness.status-green{color:#147a3d}.option-readiness.status-yellow{color:#9a6700}.option-readiness.status-red{color:#b4232f}.option-readiness.status-grey{color:#475467}
+.option-empty {padding:28px 5px;color:#98a2b3;text-align:center;font-size:13px;}.option-muted{border-top:4px solid #98a2b3;}
+.exit-rule {background:#f8fafc;border:1px solid #e7ebf0;border-radius:11px;padding:13px 15px;margin-top:12px;}.exit-rule b{display:block;color:#344054;font-size:12px;margin-top:5px;line-height:1.5;}
+.why-card {background:#fff;border:1px solid #e7ebf0;border-radius:14px;padding:7px 18px;box-shadow:0 2px 8px rgba(16,42,67,.035);}.why-item{padding:10px 3px;border-bottom:1px solid #eef0f2;color:#344054;font-size:12px;}.why-item:last-child{border-bottom:0}.why-warning{color:#9a6700;background:#fffbf1;border-radius:7px;padding-left:9px;padding-right:9px;margin:5px 0;}
+.sr-map {display:grid;grid-template-columns:1fr 1.15fr 1fr;align-items:stretch;gap:0;background:#fff;border:1px solid #e7ebf0;border-radius:15px;overflow:hidden;box-shadow:0 2px 8px rgba(16,42,67,.035);min-height:150px;}.sr-side{display:flex;flex-direction:column;justify-content:center;align-items:center;padding:18px;text-align:center;}.sr-side span{font-size:10px;font-weight:900;letter-spacing:.4px}.sr-side b{font-size:25px;margin:7px 0;color:#182230}.sr-side small{color:#667085;font-size:11px}.sr-resistance{background:#fff7f7}.sr-resistance span{color:#b4232f}.sr-support{background:#f4fbf6}.sr-support span{color:#147a3d}.sr-line{display:flex;flex-direction:column;justify-content:center;align-items:center;gap:8px;background:#fff;border-left:1px dashed #dfe3e8;border-right:1px dashed #dfe3e8;}.room-label{font-size:11px;color:#98a2b3;font-weight:700}.current-marker{font-size:17px;font-weight:900;color:#182230;background:#f2f4f7;border:1px solid #e1e5ea;border-radius:20px;padding:8px 14px}.current-marker span{font-size:9px;color:#667085;margin-left:5px;letter-spacing:.4px;}
+.tab-alert{border-radius:12px;padding:14px 16px;margin-bottom:16px;line-height:1.55;font-size:12px;}.tab-positive{background:#f4fbf6;border:1px solid #bde5c9;color:#147a3d}.tab-danger{background:#fff6f6;border:1px solid #f2c5c8;color:#b4232f}
+@media (max-width:900px){.decision-stats,.status-grid{grid-template-columns:repeat(2,1fr)}.option-grid{grid-template-columns:repeat(2,1fr)}.sr-map{grid-template-columns:1fr}.sr-line{padding:15px;border-top:1px dashed #dfe3e8;border-bottom:1px dashed #dfe3e8}.topbar-dashboard{align-items:flex-start}.header-live{display:none}}
+@media (max-width:600px){.block-container{padding-left:.7rem;padding-right:.7rem}.decision-main{font-size:25px}.check-row{grid-template-columns:1fr .9fr}.check-row small{grid-column:1 / -1}.metric-card,.entry-card{min-height:95px}.option-grid{grid-template-columns:repeat(2,1fr)}}
 </style>
 """,
     unsafe_allow_html=True,
@@ -1356,393 +1426,386 @@ updated = quote_data.get(
 )
 
 # ============================================================
-# HEADER
+# DASHBOARD UI — REDESIGNED VISUAL HIERARCHY ONLY
+# The analysis engine above is intentionally unchanged.
 # ============================================================
 
-st.markdown(
+market_now = datetime.now(ZoneInfo("Asia/Kolkata"))
+market_open = (
+    market_now.weekday() < 5
+    and (market_now.hour, market_now.minute) >= (9, 15)
+    and (market_now.hour, market_now.minute) < (15, 30)
+)
+
+# ---------- UI helpers ----------
+def _num_or_dash(v, decimals=2):
+    try:
+        x = float(v)
+        if not np.isfinite(x):
+            return "—"
+        return f"{x:.{decimals}f}"
+    except Exception:
+        return "—"
+
+
+def _status_class(value):
+    v = str(value).upper()
+    if "READY" in v or "PASS" in v or "BUY" in v:
+        return "status-green"
+    if "WAIT" in v or "CAUTION" in v:
+        return "status-yellow"
+    if "NO TRADE" in v or "FAIL" in v:
+        return "status-red"
+    return "status-grey"
+
+
+def _plan_card(plan, label, selected=False):
+    if not plan:
+        return f"""
+        <div class=\"option-card option-muted\">
+            <div class=\"option-head\"><span>◻ {label} BUY</span><span>NO DATA</span></div>
+            <div class=\"option-empty\">No valid option plan returned.</div>
+        </div>
+        """
+
+    accent = "option-call" if plan["side"] == "CE" else "option-put"
+    icon = "🟢" if plan["side"] == "CE" else "🔴"
+    selected_tag = "<span class='selected-tag'>★ SELECTED</span>" if selected else ""
+    pop = _num_or_dash(plan.get("pop"), 1)
+    delta = _num_or_dash(plan.get("delta"), 2)
+    iv = _num_or_dash(plan.get("iv"), 1)
+    rr2 = _num_or_dash(plan.get("rr2"), 2)
+    return f"""
+    <div class=\"option-card {accent} {"option-selected" if selected else ""}\">
+        <div class=\"option-head\">
+            <span>{icon} {label} BUY</span>
+            {selected_tag}
+        </div>
+        <div class=\"option-strike\">{plan['strike']:.0f} {"CE" if plan['side'] == 'CE' else "PE"}</div>
+        <div class=\"option-grid\">
+            <div><span>Entry</span><b>{fmt_price(plan['entry'])}</b></div>
+            <div><span>Stop Loss</span><b>{fmt_price(plan['sl'])}</b></div>
+            <div><span>Target 1</span><b>{fmt_price(plan['target1'])}</b></div>
+            <div><span>Target 2</span><b>{fmt_price(plan['target2'])}</b></div>
+            <div><span>PoP</span><b>{pop}%</b></div>
+            <div><span>Delta</span><b>{delta}</b></div>
+            <div><span>IV</span><b>{iv}%</b></div>
+            <div><span>R:R T2</span><b>1:{rr2}</b></div>
+        </div>
+        <div class=\"option-readiness {_status_class(plan['readiness'])}\">{plan['readiness']}</div>
+    </div>
     """
-<div class="topbar">
-    <div class="topbar-title">📊 FO PRO Trader Assistant</div>
-    <div class="topbar-sub">
-        Options Analysis • Powered by Upstox • Live market data
+
+
+def _check_row(label, state, detail):
+    icon = "🟢" if state == "PASS" else "🟡" if state == "WAIT" else "🔴"
+    css = "check-pass" if state == "PASS" else "check-wait" if state == "WAIT" else "check-fail"
+    return f"<div class='check-row'><span>{label}</span><strong class='{css}'>{icon} {state}</strong><small>{detail}</small></div>"
+
+
+# ---------- Header ----------
+st.markdown(
+    f"""
+<div class=\"topbar topbar-dashboard\">
+    <div>
+        <div class=\"topbar-title\">📊 FO PRO Trader Assistant</div>
+        <div class=\"topbar-sub\">Options Analysis • Powered by Upstox • Live market data</div>
+    </div>
+    <div class=\"header-live\">{'● LIVE DATA' if market_open else '● MARKET CLOSED'}</div>
+</div>
+""",
+    unsafe_allow_html=True,
+)
+
+h1, h2, h3 = st.columns([2.3, 1.15, 1.05])
+with h1:
+    st.markdown(f"## {symbol} — F&O Options Analysis")
+    st.caption("Live underlying • Option-chain analysis • Multi-timeframe confirmation")
+with h2:
+    st.markdown("**Last Traded**")
+    st.markdown(f"<div class='hero-price'>{fmt_price(spot)}</div>", unsafe_allow_html=True)
+    st.caption(f"{net_change:+.2f} ({change_pct:+.2f}%)")
+with h3:
+    st.markdown("**Data Status**")
+    status_text = "● LIVE DATA" if market_open else "● MARKET CLOSED"
+    status_css = "live-block" if market_open else "closed-block"
+    st.markdown(f"<div class='{status_css}'>{status_text}</div>", unsafe_allow_html=True)
+    st.caption(f"Expiry: {selected_expiry}")
+
+# ---------- Market snapshot ----------
+st.markdown("<div class='section-heading'>📊 MARKET SNAPSHOT</div>", unsafe_allow_html=True)
+m1, m2, m3, m4, m5, m6 = st.columns(6)
+with m1:
+    st.markdown(f"<div class='metric-card'><span>LAST PRICE</span><b>{fmt_price(spot)}</b><small>LIVE PRICE</small></div>", unsafe_allow_html=True)
+with m2:
+    bias_cls = "metric-positive" if tech["trend"] == "Bullish" else "metric-negative" if tech["trend"] == "Bearish" else "metric-neutral"
+    st.markdown(f"<div class='metric-card {bias_cls}'><span>MARKET BIAS</span><b>{tech['trend']}</b><small>HEADLINE TREND</small></div>", unsafe_allow_html=True)
+with m3:
+    st.markdown(f"<div class='metric-card'><span>PCR</span><b>{pcr:.2f if False else '.2f'}</b><small>PUT / CALL OI</small></div>" if np.isfinite(pcr) else "<div class='metric-card'><span>PCR</span><b>—</b><small>PUT / CALL OI</small></div>", unsafe_allow_html=True)
+with m4:
+    st.markdown(f"<div class='metric-card metric-support'><span>SUPPORT</span><b>{fmt_price(support)}</b><small>PUT OI WALL</small></div>", unsafe_allow_html=True)
+with m5:
+    st.markdown(f"<div class='metric-card metric-resistance'><span>RESISTANCE</span><b>{fmt_price(resistance)}</b><small>CALL OI WALL</small></div>", unsafe_allow_html=True)
+with m6:
+    st.markdown(f"<div class='metric-card'><span>RSI</span><b>{tech['rsi']:.1f}</b><small>DAILY RSI</small></div>", unsafe_allow_html=True)
+
+# ---------- Trade decision ----------
+decision_icon = "🟢" if decision == "CALL BUY" else "🔴" if decision == "PUT BUY" else "🟡" if "WAIT" in decision else "⚪"
+decision_state_css = "decision-call" if decision == "CALL BUY" else "decision-put" if decision == "PUT BUY" else "decision-neutral"
+decision_sub = {
+    "CALL BUY": "Bullish conditions aligned — entry confirmation required by the engine.",
+    "PUT BUY": "Bearish conditions aligned — entry confirmation required by the engine.",
+    "WAIT FOR TRIGGER": "Setup is developing. Do not enter until the trigger is reached.",
+    "WAIT FOR CONFIRMATION": "Trigger reached, but confirmation conditions are not complete.",
+    "NO TRADE": "Conditions are not sufficiently aligned for a valid setup.",
+}.get(decision, "Review the live conditions before taking action.")
+
+st.markdown("<div class='section-heading'>🎯 TRADE DECISION</div>", unsafe_allow_html=True)
+st.markdown(
+    f"""
+<div class='decision-card {decision_state_css}'>
+    <div class='decision-main'>{decision_icon} {decision}</div>
+    <div class='decision-sub'>{decision_sub}</div>
+    <div class='decision-stats'>
+        <div><span>BULL SCORE</span><b>{ce_score:.0f}<em>/100</em></b></div>
+        <div><span>BEAR SCORE</span><b>{pe_score:.0f}<em>/100</em></b></div>
+        <div><span>TREND</span><b>{overall_direction.upper()}</b></div>
+        <div><span>CONFIDENCE</span><b>{confidence}<em>/100</em></b></div>
     </div>
 </div>
 """,
     unsafe_allow_html=True,
 )
 
-h1, h2, h3 = st.columns([2.2, 1.2, 1.0])
-
-with h1:
-    st.markdown(f"## {symbol} — F&O Options Analysis")
-
-with h2:
-    st.markdown("**Last Traded**")
+# ---------- Trade status ----------
+st.markdown("<div class='section-heading'>🚦 TRADE STATUS</div>", unsafe_allow_html=True)
+status_plan = best_plan
+if status_plan:
+    status = status_plan["readiness"]
+    if decision == "NO TRADE":
+        status = "NO TRADE"
+    status_title = {
+        "READY": "🟢 READY TO ENTER",
+        "WAIT FOR TRIGGER": "🟡 WAIT FOR TRIGGER",
+        "WAIT FOR CONFIRMATION": "🟡 WAIT FOR CONFIRMATION",
+        "NO TRADE": "🔴 NO TRADE",
+    }.get(status, status)
+    trigger_distance = abs(spot - status_plan["trigger_level"])
     st.markdown(
-        f"<span style='font-size:25px;font-weight:800'>{fmt_price(spot)}</span>",
+        f"""
+<div class='status-panel {_status_class(status)}'>
+    <div class='status-title'>{status_title}</div>
+    <div class='status-grid'>
+        <div><span>CURRENT PRICE</span><b>{fmt_price(spot)}</b></div>
+        <div><span>TRIGGER</span><b>{fmt_price(status_plan['trigger_level'])}</b></div>
+        <div><span>DISTANCE</span><b>{fmt_price(trigger_distance)}</b></div>
+    </div>
+    <div class='status-note'>{status_plan['trigger']}</div>
+</div>
+""",
         unsafe_allow_html=True,
     )
-    st.caption(f"{net_change:+.2f} ({change_pct:+.2f}%)")
+else:
+    st.markdown("<div class='status-panel status-grey'><div class='status-title'>⚪ NO VALID PLAN</div><div class='status-note'>No usable option contract was returned by the live chain.</div></div>", unsafe_allow_html=True)
 
-with h3:
-    st.markdown("**Data Status**")
-    market_now = datetime.now(ZoneInfo("Asia/Kolkata"))
-    market_open = (
-        market_now.weekday() < 5
-        and (market_now.hour, market_now.minute) >= (9, 15)
-        and (market_now.hour, market_now.minute) < (15, 30)
-    )
-
-    if market_open:
-        st.markdown(
-            """
-            <div style="
-                background:#16a34a;
-                color:#ffffff;
-                padding:10px 16px;
-                border-radius:8px;
-                font-weight:700;
-                font-size:15px;
-                text-align:center;
-                width:100%;
-                box-sizing:border-box;
-                margin:6px 0 10px 0;
-            ">
-                ● LIVE DATA
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
-    else:
-        st.markdown(
-            """
-            <div style="
-                background:#dc2626;
-                color:#ffffff;
-                padding:10px 16px;
-                border-radius:8px;
-                font-weight:700;
-                font-size:15px;
-                text-align:center;
-                width:100%;
-                box-sizing:border-box;
-                margin:6px 0 10px 0;
-            ">
-                ● MARKET CLOSED
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
-
-    st.caption(f"Expiry: {selected_expiry}")
-
-# ============================================================
-# MARKET SNAPSHOT
-# ============================================================
-
-st.markdown('<div class="card">', unsafe_allow_html=True)
-st.markdown(
-    '<div class="section-title">📊 Market Snapshot</div>',
-    unsafe_allow_html=True,
-)
-
-m1, m2, m3, m4, m5, m6 = st.columns(6)
-
-m1.metric(
-    "Live Price",
-    fmt_price(spot),
-    f"{net_change:+.2f} ({change_pct:+.2f}%)",
-)
-
-m2.metric("Bias", tech["trend"])
-m3.metric(
-    "PCR",
-    f"{pcr:.2f}" if not np.isnan(pcr) else "—",
-)
-m4.metric("Support", fmt_price(support))
-m5.metric("Resistance", fmt_price(resistance))
-m6.metric("RSI", f"{tech['rsi']:.1f}")
-
-st.markdown('</div>', unsafe_allow_html=True)
-
-# ============================================================
-# TRADE DECISION
-# ============================================================
-
-st.markdown('<div class="card">', unsafe_allow_html=True)
-
-st.markdown(
-    '<div class="section-title">🎯 Trade Decision</div>',
-    unsafe_allow_html=True,
-)
-
-st.markdown(
-    f'<div class="{decision_class}">Decision: {decision}</div>',
-    unsafe_allow_html=True,
-)
-
-d1, d2, d3, d4 = st.columns(4)
-
-d1.metric("Bull Score", f"{ce_score:.0f}/100")
-d2.metric("Bear Score", f"{pe_score:.0f}/100")
-d3.metric("Trend", overall_direction)
-d4.metric("Confidence", f"{confidence}/100")
-
-st.markdown('</div>', unsafe_allow_html=True)
-
-# ============================================================
-# TRADE PLAN
-# ============================================================
-
-st.markdown('<div class="card">', unsafe_allow_html=True)
-
-st.markdown(
-    '<div class="section-title">🎯 Trade Plan</div>',
-    unsafe_allow_html=True,
-)
-
-plan_rows = []
-
-for label, plan in [
-    ("CALL", ce_plan),
-    ("PUT", pe_plan),
-]:
-    if plan:
-        plan_rows.append(
-            {
-                "Side": label,
-                "Strike": int(plan["strike"]),
-                "Entry (₹)": round(plan["entry"], 2),
-                "SL (₹)": round(plan["sl"], 2),
-                "Target 1 (₹)": round(plan["target1"], 2),
-                "Target 2 (₹)": round(plan["target2"], 2),
-                "PoP": (
-                    f"{plan['pop']:.1f}%"
-                    if not np.isnan(plan["pop"])
-                    else "—"
-                ),
-                "Delta": (
-                    round(plan["delta"], 3)
-                    if not np.isnan(plan["delta"])
-                    else "—"
-                ),
-                "IV": (
-                    f"{plan['iv']:.1f}%"
-                    if not np.isnan(plan["iv"])
-                    else "—"
-                ),
-                "R:R T1": f"1:{plan['rr1']:.2f}",
-                "Readiness": plan["readiness"],
-            }
-        )
-
-if plan_rows:
-    st.dataframe(
-        pd.DataFrame(plan_rows),
-        use_container_width=True,
-        hide_index=True,
-    )
-
+# ---------- Checklist ----------
+direction_pass = overall_direction in {"Bullish", "Bearish"}
+mtf_pass = overall_alignment >= 2
+oi_pass = np.isfinite(support) and np.isfinite(resistance) and support < spot < resistance
+vwap_value = safe_float(tf5.get("vwap"), spot)
 if best_plan:
-    st.markdown("### Entry / Exit Rules")
+    if best_plan["side"] == "CE":
+        vwap_pass = spot >= vwap_value * 0.997
+    else:
+        vwap_pass = spot <= vwap_value * 1.003
+else:
+    vwap_pass = False
+breakout_state = "PASS" if best_plan and best_plan.get("trigger_hit") and best_plan.get("candle_confirmed") and best_plan.get("volume_confirmed") else "WAIT"
 
-    e1, e2 = st.columns(2)
-
-    with e1:
-        st.markdown("**Entry Trigger**")
-        st.write(best_plan["trigger"])
-
-        st.markdown("**Entry**")
-        st.write(fmt_price(best_plan["entry"]))
-
-        st.markdown("**Stop Loss**")
-        st.write(fmt_price(best_plan["sl"]))
-
-        st.markdown("**Target 1 / Target 2**")
-        st.write(
-            f"{fmt_price(best_plan['target1'])} / "
-            f"{fmt_price(best_plan['target2'])}"
-        )
-
-    with e2:
-        st.markdown("**Exit Rule**")
-        st.write(best_plan["exit"])
-
-        st.markdown("**PoP**")
-        st.write(
-            f"{best_plan['pop']:.1f}%"
-            if not np.isnan(best_plan["pop"])
-            else "Not returned by Upstox"
-        )
-
-        st.markdown("**Risk / Reward**")
-        st.write(
-            f"Target 1: 1:{best_plan['rr1']:.2f} | "
-            f"Target 2: 1:{best_plan['rr2']:.2f}"
-        )
-
-st.caption(
-    "PoP is the Probability of Profit returned by Upstox for the option contract; "
-    "it is not a guarantee of profit."
+st.markdown("<div class='section-heading'>🧠 TRADE CHECKLIST</div>", unsafe_allow_html=True)
+check_html = (
+    _check_row("Market Direction", "PASS" if direction_pass else "FAIL", f"{overall_direction} market bias") +
+    _check_row("Multi-Timeframe", "PASS" if mtf_pass else "FAIL", f"{overall_alignment}/3 timeframes aligned") +
+    _check_row("OI Structure", "PASS" if oi_pass else "FAIL", f"Support {fmt_price(support)} • Resistance {fmt_price(resistance)}") +
+    _check_row("VWAP", "PASS" if vwap_pass else "FAIL", f"5m VWAP {fmt_price(vwap_value)}") +
+    _check_row("Breakout Confirmation", breakout_state, "Trigger + 5m momentum + volume confirmation")
+)
+check_overall = sum([direction_pass, mtf_pass, oi_pass, vwap_pass, breakout_state == "PASS"])
+st.markdown(
+    f"<div class='check-card'>{check_html}<div class='check-total'><span>OVERALL</span><b>{check_overall}/5</b></div></div>",
+    unsafe_allow_html=True,
 )
 
-st.markdown('</div>', unsafe_allow_html=True)
+# ---------- Trade plan ----------
+st.markdown("<div class='section-heading'>🎯 TRADE PLAN</div>", unsafe_allow_html=True)
+selected_side = best_plan["side"] if best_plan else None
+p1, p2 = st.columns(2)
+with p1:
+    st.markdown(_plan_card(ce_plan, "CALL", selected_side == "CE"), unsafe_allow_html=True)
+with p2:
+    st.markdown(_plan_card(pe_plan, "PUT", selected_side == "PE"), unsafe_allow_html=True)
 
-# ============================================================
-# TABS
-# ============================================================
-
-tab1, tab2, tab3, tab4 = st.tabs(
-    [
-        "🏆 Best Trade",
-        "🔎 Live Option Chain",
-        "📊 Market Analysis",
-        "🧠 How Engine Thinks",
+# ---------- Entry / Exit ----------
+st.markdown("<div class='section-heading'>📍 ENTRY / EXIT</div>", unsafe_allow_html=True)
+if best_plan:
+    entry_distance = abs(spot - best_plan["trigger_level"])
+    e1, e2, e3, e4, e5 = st.columns(5)
+    values = [
+        ("CURRENT PRICE", fmt_price(spot), "Underlying"),
+        ("ENTRY TRIGGER", fmt_price(best_plan["trigger_level"]), f"Distance {fmt_price(entry_distance)}"),
+        ("STOP LOSS", fmt_price(best_plan["sl"]), "Option premium"),
+        ("TARGET 1", fmt_price(best_plan["target1"]), "Partial exit"),
+        ("TARGET 2", fmt_price(best_plan["target2"]), "Final target"),
     ]
+    for col, (title, value, note) in zip([e1,e2,e3,e4,e5], values):
+        with col:
+            st.markdown(f"<div class='entry-card'><span>{title}</span><b>{value}</b><small>{note}</small></div>", unsafe_allow_html=True)
+    st.markdown(f"<div class='exit-rule'><span>EXIT RULE</span><b>{best_plan['exit']}</b></div>", unsafe_allow_html=True)
+else:
+    st.info("No valid trade plan is available from the current option chain.")
+
+# ---------- Why this trade ----------
+st.markdown("<div class='section-heading'>💡 WHY THIS TRADE?</div>", unsafe_allow_html=True)
+why_items = []
+if best_plan:
+    side_name = "CALL" if best_plan["side"] == "CE" else "PUT"
+    desired = "Bullish" if best_plan["side"] == "CE" else "Bearish"
+    why_items += [
+        f"{tf5['trend']} 5m trend supports the {side_name} direction.",
+        f"{tf30['trend']} 30m trend and {daily_tech['trend']} daily trend are part of the multi-timeframe check.",
+        f"Price is {'above' if spot >= vwap_value else 'below'} the 5m VWAP at {fmt_price(vwap_value)}.",
+        f"OI structure shows support at {fmt_price(support)} and resistance at {fmt_price(resistance)}.",
+        f"Selected option PoP is {_num_or_dash(best_plan['pop'], 1)}% with Delta {_num_or_dash(best_plan['delta'], 2)}.",
+        f"Option spread is {_num_or_dash(best_plan['spread_pct'], 1)}% with volume {fmt_num(best_plan['volume'])}.",
+    ]
+    if best_plan["fail_reasons"]:
+        why_items.append("⚠ " + "; ".join(best_plan["fail_reasons"]))
+else:
+    why_items = ["No valid option plan is currently available."]
+
+why_html = "".join(
+    f"<div class='why-item {'why-warning' if item.startswith('⚠') else ''}'>{'⚠' if item.startswith('⚠') else '✓'} {item.lstrip('⚠ ')}</div>"
+    for item in why_items
 )
+st.markdown(f"<div class='why-card'>{why_html}</div>", unsafe_allow_html=True)
+
+# ---------- OI map ----------
+st.markdown("<div class='section-heading'>📍 SUPPORT / RESISTANCE + OI MAP</div>", unsafe_allow_html=True)
+put_row = nearest_row(chain, support)
+call_row = nearest_row(chain, resistance)
+put_oi = put_row["PE OI"] if put_row is not None else np.nan
+call_oi = call_row["CE OI"] if call_row is not None else np.nan
+support_room = max((spot - support) / max(spot,1) * 100, 0) if np.isfinite(support) else np.nan
+resistance_room = max((resistance - spot) / max(spot,1) * 100, 0) if np.isfinite(resistance) else np.nan
+
+st.markdown(
+    f"""
+<div class='sr-map'>
+    <div class='sr-side sr-resistance'>
+        <span>🔴 CALL OI WALL</span><b>{fmt_price(resistance)}</b><small>OI {fmt_num(call_oi)}</small>
+    </div>
+    <div class='sr-line'>
+        <div class='room-label'>+{_num_or_dash(resistance_room,2)}%</div>
+        <div class='current-marker'>● {fmt_price(spot)} <span>CURRENT</span></div>
+        <div class='room-label'>-{_num_or_dash(support_room,2)}%</div>
+    </div>
+    <div class='sr-side sr-support'>
+        <span>🟢 PUT OI WALL</span><b>{fmt_price(support)}</b><small>OI {fmt_num(put_oi)}</small>
+    </div>
+</div>
+""",
+    unsafe_allow_html=True,
+)
+
+# ---------- Tabs ----------
+tab1, tab2, tab3, tab4 = st.tabs([
+    "🏆 Best Trade", "🔎 Live Option Chain", "📊 Market Analysis", "🧠 How Engine Thinks"
+])
 
 with tab1:
     if decision == "NO TRADE":
-        st.info(
-            "NO TRADE: the live conditions do not currently meet the "
-            "directional quality gate. Wait for the entry trigger instead "
-            "of forcing an option position."
-        )
+        st.markdown("<div class='tab-alert tab-danger'><b>⚪ NO TRADE</b><br>Conditions do not currently meet the quality gate. Wait for a new setup rather than forcing an entry.</div>", unsafe_allow_html=True)
     elif best_plan:
-        st.success(
-            f"{decision} | Strike {best_plan['strike']:.0f} | "
-            f"Entry {fmt_price(best_plan['entry'])} | "
-            f"SL {fmt_price(best_plan['sl'])} | "
-            f"T1 {fmt_price(best_plan['target1'])} | "
-            f"T2 {fmt_price(best_plan['target2'])}"
-        )
+        tab_icon = "🟢" if best_plan["side"] == "CE" else "🔴"
+        st.markdown(f"<div class='tab-alert tab-positive'><b>{tab_icon} {decision}</b><br>Strike {best_plan['strike']:.0f} • Entry {fmt_price(best_plan['entry'])} • SL {fmt_price(best_plan['sl'])} • T1 {fmt_price(best_plan['target1'])} • T2 {fmt_price(best_plan['target2'])}</div>", unsafe_allow_html=True)
 
-    st.markdown("### Why the Engine Says This")
-
-    reasons = [
-        f"Live spot is {fmt_price(spot)}; nearest ATM strike is {atm_strike:.0f}.",
-        f"5-minute trend: {tf5['trend']} | 30-minute trend: {tf30['trend']} | Daily trend: {daily_tech['trend']}.",
-        f"RSI: 5m {tf5['rsi']:.1f} | 30m {tf30['rsi']:.1f} | Daily {daily_tech['rsi']:.1f}.",
-        f"PCR is {pcr:.2f}.",
-        f"OI support is {fmt_price(support)} and resistance is {fmt_price(resistance)}.",
-        f"Overall direction: {overall_direction} with {overall_alignment}/3 timeframes aligned.",
-        f"5m VWAP: {fmt_price(tf5['vwap'])}; spot is {'above' if spot >= tf5['vwap'] else 'below'} VWAP.",
-        f"Engine confidence: {confidence}/100. The score is a rule-based quality measure, not a historical win probability.",
-    ]
-
-    if best_plan and not np.isnan(best_plan["pop"]):
-        reasons.append(
-            f"Selected option PoP from Upstox is {best_plan['pop']:.1f}%."
-        )
-
-    for reason in reasons:
-        st.write("✓", reason)
+    st.markdown("### Engine Summary")
+    summary_cols = st.columns(4)
+    summary_cols[0].metric("CALL SCORE", f"{ce_score:.0f}/100")
+    summary_cols[1].metric("PUT SCORE", f"{pe_score:.0f}/100")
+    summary_cols[2].metric("ALIGNMENT", f"{overall_alignment}/3")
+    summary_cols[3].metric("CHECKLIST", f"{check_overall}/5")
 
 with tab2:
-    st.markdown(
-        f"### Live Option Chain — {selected_expiry}"
-    )
-
+    st.markdown(f"### Live Option Chain — {selected_expiry}")
     view = chain.copy()
+    display = pd.DataFrame({
+        "Strike": view["Strike"].round(0).astype(int),
+        "CE LTP": view["CE LTP"].round(2),
+        "CE OI": view["CE OI"].round(0).astype("int64"),
+        "CE Chg OI": view["CE Chg OI"].round(0).astype("int64"),
+        "CE IV": view["CE IV"].round(1),
+        "CE Delta": view["CE Delta"].round(3),
+        "CE PoP": view["CE PoP"].round(1),
+        "PE LTP": view["PE LTP"].round(2),
+        "PE OI": view["PE OI"].round(0).astype("int64"),
+        "PE Chg OI": view["PE Chg OI"].round(0).astype("int64"),
+        "PE IV": view["PE IV"].round(1),
+        "PE Delta": view["PE Delta"].round(3),
+        "PE PoP": view["PE PoP"].round(1),
+    })
+    display["_distance"] = (display["Strike"] - spot).abs()
+    display = display.sort_values("_distance").drop(columns="_distance").head(15)
 
-    display = pd.DataFrame(
-        {
-            "Strike": view["Strike"].round(0).astype(int),
-            "CE LTP": view["CE LTP"].round(2),
-            "CE OI": view["CE OI"].round(0).astype("int64"),
-            "CE Chg OI": view["CE Chg OI"].round(0).astype("int64"),
-            "CE IV": view["CE IV"].round(1),
-            "CE Delta": view["CE Delta"].round(3),
-            "CE PoP": view["CE PoP"].round(1),
-            "PE LTP": view["PE LTP"].round(2),
-            "PE OI": view["PE OI"].round(0).astype("int64"),
-            "PE Chg OI": view["PE Chg OI"].round(0).astype("int64"),
-            "PE IV": view["PE IV"].round(1),
-            "PE Delta": view["PE Delta"].round(3),
-            "PE PoP": view["PE PoP"].round(1),
-        }
-    )
+    def style_chain(row):
+        styles = ["" for _ in row.index]
+        strike = row["Strike"]
+        if strike == int(round(atm_strike)):
+            styles = ["font-weight:700;" for _ in row.index]
+        if best_plan and strike == int(round(best_plan["strike"])):
+            styles = ["font-weight:800;" for _ in row.index]
+        return styles
 
-    display["_distance"] = (
-        display["Strike"] - spot
-    ).abs()
-
-    display = (
-        display
-        .sort_values("_distance")
-        .drop(columns="_distance")
-        .head(11)
-    )
-
-    st.dataframe(
-        display,
-        use_container_width=True,
-        hide_index=True,
-    )
+    styled_chain = display.style.apply(style_chain, axis=1)
+    st.dataframe(styled_chain, use_container_width=True, hide_index=True, height=520)
+    st.caption("ATM and selected strikes are emphasized. All original CE/PE LTP, OI, Change OI, IV, Delta and PoP fields remain available.")
 
 with tab3:
-    a1, a2, a3 = st.columns(3)
-
+    a1, a2, a3, a4 = st.columns(4)
     a1.metric("EMA 20", fmt_price(daily_tech["ema20"]))
     a2.metric("EMA 50", fmt_price(daily_tech["ema50"]))
     a3.metric("ATR 14", fmt_price(daily_tech["atr"]))
+    a4.metric("5m VWAP", fmt_price(tf5["vwap"]))
 
     st.markdown("### Multi-Timeframe Confirmation")
     mtf = pd.DataFrame([
-        {"Timeframe": "5 Minute", "Trend": tf5["trend"], "RSI": round(tf5["rsi"], 1),
-         "ADX": round(tf5["adx"], 1), "Momentum %": round(tf5["momentum"], 2)},
-        {"Timeframe": "30 Minute", "Trend": tf30["trend"], "RSI": round(tf30["rsi"], 1),
-         "ADX": round(tf30["adx"], 1), "Momentum %": round(tf30["momentum"], 2)},
-        {"Timeframe": "Daily", "Trend": daily_tech["trend"], "RSI": round(daily_tech["rsi"], 1),
-         "ADX": round(daily_tech["adx"], 1), "Momentum %": round(daily_tech["momentum"], 2)},
+        {"Timeframe": "5 Minute", "Trend": tf5["trend"], "RSI": round(tf5["rsi"], 1), "ADX": round(tf5["adx"], 1), "Momentum %": round(tf5["momentum"], 2), "VWAP": fmt_price(tf5["vwap"])},
+        {"Timeframe": "30 Minute", "Trend": tf30["trend"], "RSI": round(tf30["rsi"], 1), "ADX": round(tf30["adx"], 1), "Momentum %": round(tf30["momentum"], 2), "VWAP": fmt_price(tf30["vwap"])},
+        {"Timeframe": "Daily", "Trend": daily_tech["trend"], "RSI": round(daily_tech["rsi"], 1), "ADX": round(daily_tech["adx"], 1), "Momentum %": round(daily_tech["momentum"], 2), "VWAP": fmt_price(daily_tech["vwap"])},
     ])
     st.dataframe(mtf, use_container_width=True, hide_index=True)
 
     left, right = st.columns(2)
-
     with left:
         st.markdown("### 🟢 Support / Put OI")
-
-        st.write(
-            f"Major support from Put OI: **{fmt_price(support)}**"
-        )
-
-        support_row = nearest_row(chain, support)
-
-        if support_row is not None:
-            st.write(
-                f"Put OI: **{fmt_num(support_row['PE OI'])}**"
-            )
-            st.write(
-                f"Put Chg OI: **{fmt_num(support_row['PE Chg OI'])}**"
-            )
-
+        st.write(f"Major support from Put OI: **{fmt_price(support)}**")
+        if put_row is not None:
+            st.write(f"Put OI: **{fmt_num(put_row['PE OI'])}**")
+            st.write(f"Put Chg OI: **{fmt_num(put_row['PE Chg OI'])}**")
     with right:
         st.markdown("### 🔴 Resistance / Call OI")
-
-        st.write(
-            f"Major resistance from Call OI: **{fmt_price(resistance)}**"
-        )
-
-        resistance_row = nearest_row(chain, resistance)
-
-        if resistance_row is not None:
-            st.write(
-                f"Call OI: **{fmt_num(resistance_row['CE OI'])}**"
-            )
-            st.write(
-                f"Call Chg OI: **{fmt_num(resistance_row['CE Chg OI'])}**"
-            )
+        st.write(f"Major resistance from Call OI: **{fmt_price(resistance)}**")
+        if call_row is not None:
+            st.write(f"Call OI: **{fmt_num(call_row['CE OI'])}**")
+            st.write(f"Call Chg OI: **{fmt_num(call_row['CE Chg OI'])}**")
 
     if not candles.empty:
         chart = candles.set_index("timestamp")[["close"]].tail(80)
         st.line_chart(chart, use_container_width=True)
 
 with tab4:
-    st.markdown(
-        """
-### Live-data decision framework
-
+    st.markdown("### Live-data decision framework")
+    st.markdown("""
 **1. Market direction**
 - Live spot
 - 5-minute + 30-minute + Daily trend alignment
@@ -1774,7 +1837,7 @@ with tab4:
 - Exit / invalidation rule
 - Risk / Reward
 
-**5. High-accuracy quality gate**
+**5. Quality gate**
 - Minimum setup score: 72/100
 - At least 2 of 3 timeframes must agree
 - VWAP must confirm the intraday direction
@@ -1783,10 +1846,9 @@ with tab4:
 - Upstox PoP must be at least 55%
 - The underlying breakout requires 5m trend/momentum confirmation
 - A close OI wall can block a setup even when PoP is high
-- Otherwise the engine returns **WAIT FOR TRIGGER**, **WAIT FOR CONFIRMATION** or **NO TRADE**
-- The score is not a backtested win rate and does not guarantee profit.
-"""
-    )
+- The engine can return **WAIT FOR TRIGGER**, **WAIT FOR CONFIRMATION** or **NO TRADE**
+- The score is a rule-based quality measure, not a backtested win rate or guarantee of profit.
+""")
 
 st.divider()
 
