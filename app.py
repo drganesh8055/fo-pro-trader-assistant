@@ -1541,7 +1541,11 @@ with m2:
     bias_cls = "metric-positive" if tech["trend"] == "Bullish" else "metric-negative" if tech["trend"] == "Bearish" else "metric-neutral"
     st.markdown(f"<div class='metric-card {bias_cls}'><span>MARKET BIAS</span><b>{tech['trend']}</b><small>HEADLINE TREND</small></div>", unsafe_allow_html=True)
 with m3:
-    st.markdown(f"<div class='metric-card'><span>PCR</span><b>{pcr:.2f if False else '.2f'}</b><small>PUT / CALL OI</small></div>" if np.isfinite(pcr) else "<div class='metric-card'><span>PCR</span><b>—</b><small>PUT / CALL OI</small></div>", unsafe_allow_html=True)
+    pcr_display = f"{pcr:.2f}" if np.isfinite(pcr) else "—"
+st.markdown(
+    f"<div class='metric-card'><span>PCR</span><b>{pcr_display}</b><small>PUT / CALL OI</small></div>",
+    unsafe_allow_html=True,
+)
 with m4:
     st.markdown(f"<div class='metric-card metric-support'><span>SUPPORT</span><b>{fmt_price(support)}</b><small>PUT OI WALL</small></div>", unsafe_allow_html=True)
 with m5:
