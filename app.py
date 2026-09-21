@@ -536,7 +536,7 @@ def build_plan(row, side, spot, support, resistance, pcr, tf5, tf30, daily, risk
     readiness="READY" if triggered and not failures else "WAIT FOR TRIGGER" if scored["score"]>=68 and alignment>=2 else "NO TRADE"
     if side=="CE": exit_rule=f"Exit if spot closes below support {fmt_price(support)} or option premium hits {fmt_price(sl)}. After T1, book partial profit and trail."
     else: exit_rule=f"Exit if spot closes above resistance {fmt_price(resistance)} or option premium hits {fmt_price(sl)}. After T1, book partial profit and trail."
-    return {"side":side,"strike":float(row["Strike"]),"current_premium":float(current),"trigger_price":float(trigger_level),"triggered":triggered,"sl":sl,"target1":t1,"target2":t2,"pop":scored["pop"],"delta":scored["delta"],"iv":scored["iv"],"gamma":scored["gamma"],"theta":scored["theta"],"vega":scored["vega"],"score":scored["score"],"rr1":rr1,"rr2":rr2,"trigger":trigger,"exit":exit_rule,"oi":row[f"{side} OI"],"chg_oi":scored["chg_oi"],"volume":scored["volume"],"spread":scored["spread"],"iv_rank":scored["iv_rank"],"alignment":alignment,"failures":failures}
+    return {"side":side,"strike":float(row["Strike"]),"current_premium":float(current),"trigger_price":float(trigger_level),"triggered":triggered,"sl":sl,"target1":t1,"target2":t2,"pop":scored["pop"],"delta":scored["delta"],"iv":scored["iv"],"gamma":scored["gamma"],"theta":scored["theta"],"vega":scored["vega"],"score":scored["score"],"rr1":rr1,"rr2":rr2,"trigger":trigger,"exit":exit_rule,"oi":row[f"{side} OI"],"chg_oi":scored["chg_oi"],"volume":scored["volume"],"spread":scored["spread"],"iv_rank":scored["iv_rank"],"alignment":alignment,"failures":failures,"readiness":readiness}
 
 
 # ============================================================
