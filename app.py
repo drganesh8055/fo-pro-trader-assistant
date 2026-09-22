@@ -133,35 +133,59 @@ HEADERS = {
     "Accept": "application/json",
     "Content-Type": "application/json",
     "Authorization": f"Bearer {TOKEN}",
+    "User-Agent": "FO-PRO-Trader-Assistant/1.0",
 }
 
 
 def api_get(path, params=None, timeout=20):
-    """GET from Upstox with pacing and explicit Cloudflare/429 handling.
+    """GET from Upstox with pacing, timeout protection and explicit 429 handling.
 
-    Important: a 429 is NOT retried immediately. Upstox/Cloudflare supplies a
-    retry_after value, and hammering the endpoint while blocked can prolong the
-    rate limit. The caller receives a clear, actionable error instead.
+    Trading logic is not affected by this function. It only controls how the
+    app communicates with Upstox. HTTP 429 responses are never retried
+    immediately. Temporary connection/read timeouts are retried a small number
+    of times with backoff because Streamlit Cloud can occasionally experience
+    a slow connection to the Upstox API.
     """
     global _LAST_API_REQUEST
 
-    # Keep requests from arriving in a tight burst after Streamlit reruns.
-    with _API_REQUEST_LOCK:
-        now = time.monotonic()
-        wait_for = _MIN_API_GAP - (now - _LAST_API_REQUEST)
-        if wait_for > 0:
-            time.sleep(wait_for)
-        _LAST_API_REQUEST = time.monotonic()
+    url = f"{API_BASE}{path}"
+    # A bounded connect/read timeout prevents the whole Streamlit page from
+    # hanging for 30 seconds when the upstream connection is unhealthy.
+    if isinstance(timeout, (tuple, list)) and len(timeout) == 2:
+        request_timeout = (float(timeout[0]), float(timeout[1]))
+    else:
+        request_timeout = (8.0, float(timeout))
 
-    try:
-        response = requests.get(
-            f"{API_BASE}{path}",
-            headers=HEADERS,
-            params=params,
-            timeout=timeout,
-        )
-    except requests.RequestException as exc:
-        raise UpstoxError(f"Network error while contacting Upstox: {exc}") from exc
+    last_exc = None
+    for attempt in range(3):
+        # Keep requests from arriving in a tight burst after Streamlit reruns.
+        with _API_REQUEST_LOCK:
+            now = time.monotonic()
+            wait_for = _MIN_API_GAP - (now - _LAST_API_REQUEST)
+            if wait_for > 0:
+                time.sleep(wait_for)
+            _LAST_API_REQUEST = time.monotonic()
+
+        try:
+            response = requests.get(
+                url,
+                headers=HEADERS,
+                params=params,
+                timeout=request_timeout,
+            )
+            break
+        except (requests.exceptions.ConnectTimeout, requests.exceptions.ReadTimeout) as exc:
+            last_exc = exc
+            if attempt >= 2:
+                raise UpstoxError(
+                    "Upstox API timed out after 3 attempts. "
+                    "Please refresh after a few seconds. The trading logic was not changed."
+                ) from exc
+            time.sleep(1.5 * (attempt + 1))
+        except requests.RequestException as exc:
+            raise UpstoxError(f"Network error while contacting Upstox: {exc}") from exc
+    else:
+        raise UpstoxError(f"Network error while contacting Upstox: {last_exc}")
 
     if response.status_code == 429:
         retry_after = 30
