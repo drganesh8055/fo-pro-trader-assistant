@@ -839,16 +839,8 @@ def score_option(row, side, spot, pcr, tf5, tf30, daily, chain,
 
     strike_quality = strike_points + room_points
 
-    # PoP is supporting evidence only.  Upstox can occasionally return
-    # mathematically unusable combinations (for example IV=0 with Delta=1,
-    # or an extreme IV value).  Never let such a PoP influence the score.
-    pop_data_valid = (
-        np.isfinite(pop) and 0.0 < pop <= 100.0 and
-        np.isfinite(iv) and 0.01 <= iv <= 200.0 and
-        np.isfinite(abs_delta) and 0.05 <= abs_delta <= 0.95
-    )
-    pop_points = (float(np.clip((pop - 55) / 3.0, 0, 10))
-                  if pop_data_valid else 0.0)
+    # 10 points: PoP is useful but capped so it cannot dominate direction.
+    pop_points = float(np.clip((pop - 55) / 3.0, 0, 10)) if np.isfinite(pop) else 0
 
     # Total: 30 + 15 + 10 + 10 + 5 + 20 + 10 + 10 = 110.
     raw_score = (
@@ -863,7 +855,6 @@ def score_option(row, side, spot, pcr, tf5, tf30, daily, chain,
         "delta": delta,
         "iv": iv,
         "pop": pop,
-        "pop_data_valid": pop_data_valid,
         "chg_oi": chg_oi,
         "volume": volume,
         "oi": oi,
@@ -969,9 +960,7 @@ def build_plan(row, side, spot, support, resistance, pcr, tf5, tf30, daily,
         hard_fail.append("wide option spread")
     if not np.isfinite(scored["delta"]) or not (0.35 <= abs(scored["delta"]) <= 0.80):
         hard_fail.append("poor delta")
-    if not scored.get("pop_data_valid", False):
-        hard_fail.append("unreliable option Greeks/PoP data")
-    elif scored["pop"] < 55:
+    if not np.isfinite(scored["pop"]) or scored["pop"] < 55:
         hard_fail.append("low Upstox PoP")
     if scored["volume"] < 1000:
         hard_fail.append("weak option liquidity")
@@ -1015,7 +1004,6 @@ def build_plan(row, side, spot, support, resistance, pcr, tf5, tf30, daily,
         "target1": target1,
         "target2": target2,
         "pop": scored["pop"],
-        "pop_data_valid": scored.get("pop_data_valid", False),
         "delta": scored["delta"],
         "iv": scored["iv"],
         "score": scored["score"],
@@ -1475,57 +1463,25 @@ pe_plan = build_plan(
 ce_score = ce_plan["score"] if ce_plan else 0
 pe_score = pe_plan["score"] if pe_plan else 0
 
-# ------------------------------------------------------------------
-# MASTER DECISION
-# ------------------------------------------------------------------
-# The dashboard must have exactly one source of truth.  An option with a
-# spectacular-looking PoP is NOT allowed to override direction, data quality,
-# trigger confirmation or the overall setup score.  If the selected side fails
-# the quality gate, it is not shown as a competing trade candidate.
+# High-accuracy mode: disagreement or an unconfirmed breakout produces
+# WAIT/NO TRADE instead of forcing a position.
 overall_direction, overall_alignment = overall_trend(tf5, tf30, daily_tech)
 
-def _eligible_plan(plan, direction):
-    if not plan:
-        return False
-    expected = "CE" if direction == "Bullish" else "PE"
-    if direction not in {"Bullish", "Bearish"} or plan.get("side") != expected:
-        return False
-    if plan.get("readiness") == "NO TRADE":
-        return False
-    return True
-
-ce_ready = _eligible_plan(ce_plan, overall_direction)
-pe_ready = _eligible_plan(pe_plan, overall_direction)
-
-# Select only from the side that matches the underlying market direction.
-# This prevents a CALL and PUT from simultaneously competing on the UI.
-if overall_direction == "Bullish" and ce_ready and ce_score >= 72:
+if ce_plan and ce_score >= 72 and ce_score >= pe_score + 8 and         overall_direction == "Bullish" and ce_plan["readiness"] in {"READY", "WAIT FOR TRIGGER", "WAIT FOR CONFIRMATION"}:
     decision = "CALL BUY" if ce_plan["readiness"] == "READY" else ce_plan["readiness"]
+    decision_class = "trade-call" if decision == "CALL BUY" else "trade-neutral"
     best_plan = ce_plan
-elif overall_direction == "Bearish" and pe_ready and pe_score >= 72:
+elif pe_plan and pe_score >= 72 and pe_score >= ce_score + 8 and         overall_direction == "Bearish" and pe_plan["readiness"] in {"READY", "WAIT FOR TRIGGER", "WAIT FOR CONFIRMATION"}:
     decision = "PUT BUY" if pe_plan["readiness"] == "READY" else pe_plan["readiness"]
+    decision_class = "trade-put" if decision == "PUT BUY" else "trade-neutral"
     best_plan = pe_plan
 else:
-    # If direction is clear but the setup is developing, monitor ONE side only.
-    # Otherwise there is no actionable/monitoring plan to display.
-    best_plan = None
-    if overall_direction == "Bullish" and ce_plan and ce_plan.get("readiness") in {"WAIT FOR TRIGGER", "WAIT FOR CONFIRMATION"} and ce_plan.get("score", 0) >= 60 and ce_plan.get("pop_data_valid", False):
-        decision = ce_plan["readiness"]
-        best_plan = ce_plan
-    elif overall_direction == "Bearish" and pe_plan and pe_plan.get("readiness") in {"WAIT FOR TRIGGER", "WAIT FOR CONFIRMATION"} and pe_plan.get("score", 0) >= 60 and pe_plan.get("pop_data_valid", False):
-        decision = pe_plan["readiness"]
-        best_plan = pe_plan
-    else:
-        decision = "NO TRADE"
+    decision = "NO TRADE"
+    decision_class = "trade-neutral"
+    best_plan = ce_plan if ce_score >= pe_score else pe_plan
 
-decision_class = (
-    "trade-call" if decision == "CALL BUY" else
-    "trade-put" if decision == "PUT BUY" else
-    "trade-neutral"
-)
-
-# Confidence is descriptive, not a win probability.
-best_score = best_plan["score"] if best_plan else max(ce_score, pe_score)
+# Confidence is intentionally a separate descriptive measure.
+best_score = best_plan["score"] if best_plan else 0
 best_alignment = best_plan["alignment"] if best_plan else 0
 confidence = int(np.clip(
     best_score * 0.70 + (best_alignment / 3) * 20 +
@@ -1628,232 +1584,213 @@ with m5:
 with m6:
     st.markdown(f"<div class='metric-card'><span>RSI</span><b>{tech['rsi']:.1f}</b><small>DAILY RSI</small></div>", unsafe_allow_html=True)
 
-# ---------- Trade decision ----------
+# ---------- Decision-first UI ----------
 decision_icon = "🟢" if decision == "CALL BUY" else "🔴" if decision == "PUT BUY" else "🟡" if "WAIT" in decision else "⚪"
 decision_sub = {
-    "CALL BUY": "One master decision: CALL. Enter only when the displayed trigger is satisfied.",
-    "PUT BUY": "One master decision: PUT. Enter only when the displayed trigger is satisfied.",
-    "WAIT FOR TRIGGER": "One setup is being monitored. Do not enter until the displayed trigger is reached.",
-    "WAIT FOR CONFIRMATION": "One setup is being monitored. Trigger reached, but confirmation is incomplete.",
-    "NO TRADE": "No option setup currently passes the complete quality gate. Do not enter.",
+    "CALL BUY": "Bullish conditions are aligned. Enter only after the stated trigger is confirmed.",
+    "PUT BUY": "Bearish conditions are aligned. Enter only after the stated trigger is confirmed.",
+    "WAIT FOR TRIGGER": "A setup exists, but the entry trigger has not been confirmed. Do not enter yet.",
+    "WAIT FOR CONFIRMATION": "The trigger area is relevant, but confirmation is incomplete. Do not enter yet.",
+    "NO TRADE": "No option currently meets the engine's entry requirements. Wait for a new setup.",
 }.get(decision, "Review the live conditions before taking action.")
 
-st.markdown("<div class='section-heading'>🎯 TRADE DECISION</div>", unsafe_allow_html=True)
+st.markdown("<div class='section-heading'>🎯 MASTER DECISION</div>", unsafe_allow_html=True)
 with st.container(border=True):
-    st.markdown(f"### {decision_icon} {decision}")
+    st.markdown(f"# {decision_icon} {decision}")
     st.caption(decision_sub)
     d1, d2, d3, d4 = st.columns(4)
     with d1:
-        st.metric("CALL SCORE", f"{ce_score:.0f}/100")
-    with d2:
-        st.metric("PUT SCORE", f"{pe_score:.0f}/100")
-    with d3:
-        st.metric("TREND", overall_direction.upper())
-    with d4:
         st.metric("CONFIDENCE", f"{confidence}/100")
+    with d2:
+        st.metric("SETUP SCORE", f"{best_score:.0f}/100")
+    with d3:
+        st.metric("MARKET TREND", overall_direction.upper())
+    with d4:
+        st.metric("MTF ALIGNMENT", f"{best_alignment}/3")
 
-# ---------- Trade status ----------
-st.markdown("<div class='section-heading'>🚦 TRADE STATUS</div>", unsafe_allow_html=True)
-status_plan = best_plan
-if status_plan:
-    status = status_plan["readiness"]
-    if decision == "NO TRADE":
-        status = "NO TRADE"
-    status_title = {
-        "READY": "🟢 READY TO ENTER",
-        "WAIT FOR TRIGGER": "🟡 WAIT FOR TRIGGER",
-        "WAIT FOR CONFIRMATION": "🟡 WAIT FOR CONFIRMATION",
-        "NO TRADE": "🔴 NO TRADE",
-    }.get(status, status)
-    trigger_distance = abs(spot - status_plan["trigger_level"])
-    st.markdown(
-        f"""
-<div class='status-panel {_status_class(status)}'>
-    <div class='status-title'>{status_title}</div>
-    <div class='status-grid'>
-        <div><span>CURRENT PRICE</span><b>{fmt_price(spot)}</b></div>
-        <div><span>TRIGGER</span><b>{fmt_price(status_plan['trigger_level'])}</b></div>
-        <div><span>DISTANCE</span><b>{fmt_price(trigger_distance)}</b></div>
-    </div>
-    <div class='status-note'>{status_plan['trigger']}</div>
-</div>
-""",
-        unsafe_allow_html=True,
-    )
+# Only a master-approved direction is allowed to become an actionable plan.
+# On NO TRADE, the underlying candidate remains hidden from the trader-facing plan.
+active_plan = None
+if decision == "CALL BUY":
+    active_plan = ce_plan
+elif decision == "PUT BUY":
+    active_plan = pe_plan
+elif decision in {"WAIT FOR TRIGGER", "WAIT FOR CONFIRMATION"}:
+    active_plan = best_plan
+
+# ---------- Entry status ----------
+st.markdown("<div class='section-heading'>⚡ ENTRY STATUS</div>", unsafe_allow_html=True)
+if active_plan:
+    status = str(active_plan.get("readiness", decision))
+    if decision in {"CALL BUY", "PUT BUY"}:
+        status_title = "🟢 READY — WAIT FOR ENTRY TRIGGER" if status == "READY" else "🟡 WAIT FOR CONFIRMATION"
+        status_kind = "success" if status == "READY" else "warning"
+    else:
+        status_title = "🟡 MONITOR — NOT AN ACTIVE TRADE"
+        status_kind = "warning"
+
+    trigger_distance = abs(spot - active_plan["trigger_level"])
+    with st.container(border=True):
+        st.markdown(f"### {status_title}")
+        q1, q2, q3 = st.columns(3)
+        with q1:
+            st.metric("CURRENT PRICE", fmt_price(spot))
+        with q2:
+            st.metric("ENTRY TRIGGER", fmt_price(active_plan["trigger_level"]))
+        with q3:
+            st.metric("DISTANCE", fmt_price(trigger_distance))
+        st.info(active_plan["trigger"])
 else:
-    st.markdown("<div class='status-panel status-grey'><div class='status-title'>⚪ NO VALID PLAN</div><div class='status-note'>No usable option contract was returned by the live chain.</div></div>", unsafe_allow_html=True)
+    with st.container(border=True):
+        st.markdown("### 🔴 NO ACTIONABLE SETUP")
+        st.caption("The strongest candidate is intentionally not displayed as a trade because the master decision is NO TRADE.")
 
 # ---------- Checklist ----------
 direction_pass = overall_direction in {"Bullish", "Bearish"}
 mtf_pass = overall_alignment >= 2
 oi_pass = np.isfinite(support) and np.isfinite(resistance) and support < spot < resistance
 vwap_value = safe_float(tf5.get("vwap"), spot)
-if best_plan:
-    if best_plan["side"] == "CE":
+if active_plan:
+    if active_plan["side"] == "CE":
         vwap_pass = spot >= vwap_value * 0.997
     else:
         vwap_pass = spot <= vwap_value * 1.003
 else:
     vwap_pass = False
-breakout_state = "PASS" if best_plan and best_plan.get("trigger_hit") and best_plan.get("candle_confirmed") and best_plan.get("volume_confirmed") else "WAIT"
+breakout_state = "PASS" if active_plan and active_plan.get("trigger_hit") and active_plan.get("candle_confirmed") and active_plan.get("volume_confirmed") else "WAIT"
 
-st.markdown("<div class='section-heading'>🧠 TRADE CHECKLIST</div>", unsafe_allow_html=True)
-check_html = (
-    _check_row("Market Direction", "PASS" if direction_pass else "FAIL", f"{overall_direction} market bias") +
-    _check_row("Multi-Timeframe", "PASS" if mtf_pass else "FAIL", f"{overall_alignment}/3 timeframes aligned") +
-    _check_row("OI Structure", "PASS" if oi_pass else "FAIL", f"Support {fmt_price(support)} • Resistance {fmt_price(resistance)}") +
-    _check_row("VWAP", "PASS" if vwap_pass else "FAIL", f"5m VWAP {fmt_price(vwap_value)}") +
-    _check_row("Breakout Confirmation", breakout_state, "Trigger + 5m momentum + volume confirmation")
-)
-check_overall = sum([direction_pass, mtf_pass, oi_pass, vwap_pass, breakout_state == "PASS"])
-st.markdown(
-    f"<div class='check-card'>{check_html}<div class='check-total'><span>OVERALL</span><b>{check_overall}/5</b></div></div>",
-    unsafe_allow_html=True,
-)
+st.markdown("<div class='section-heading'>🧠 DECISION CHECKLIST</div>", unsafe_allow_html=True)
+check_items = [
+    ("Market Direction", "PASS" if direction_pass else "FAIL", overall_direction),
+    ("Multi-Timeframe", "PASS" if mtf_pass else "FAIL", f"{overall_alignment}/3 timeframes aligned"),
+    ("OI Structure", "PASS" if oi_pass else "FAIL", f"Support {fmt_price(support)} • Resistance {fmt_price(resistance)}"),
+    ("VWAP", "PASS" if vwap_pass else "FAIL", f"5m VWAP {fmt_price(vwap_value)}"),
+    ("Entry Confirmation", breakout_state, "Trigger + 5m momentum + volume"),
+]
+check_overall = sum(1 for _, state, _ in check_items if state == "PASS")
+with st.container(border=True):
+    for title, state, note in check_items:
+        c1, c2, c3 = st.columns([1.5, 0.65, 2.8])
+        with c1:
+            st.write(f"**{title}**")
+        with c2:
+            if state == "PASS":
+                st.success("PASS")
+            elif state == "WAIT":
+                st.warning("WAIT")
+            else:
+                st.error("FAIL")
+        with c3:
+            st.caption(note)
+    st.divider()
+    st.metric("CHECKLIST", f"{check_overall}/{len(check_items)}")
 
 # ---------- Trade plan ----------
 st.markdown("<div class='section-heading'>🎯 TRADE PLAN</div>", unsafe_allow_html=True)
+selected_side = active_plan["side"] if active_plan else None
 
-def render_plan_native(plan, label, selected=True):
-    """Render ONLY the single master-selected setup.
-
-    A rejected opposite-side candidate is deliberately not rendered here.
-    This prevents PoP/strike differences from creating two competing actions.
-    """
-    if not plan:
-        st.info("No valid trade plan is available. The engine is currently saying NO TRADE.")
-        return
-
-    side = plan["side"]
+if active_plan:
+    side = active_plan["side"]
     icon = "🟢" if side == "CE" else "🔴"
     contract = "CE" if side == "CE" else "PE"
-    status = str(plan.get("readiness", "NO TRADE"))
-    status_icon = "🟢" if status == "READY" else "🟡" if "WAIT" in status else "🔴"
-
+    plan_state = "ACTIVE TRADE PLAN" if decision in {"CALL BUY", "PUT BUY"} else "MONITORING SETUP — NOT ACTIVE"
     with st.container(border=True):
-        header_left, header_right = st.columns([3, 1])
-        with header_left:
-            st.markdown(f"### {icon} {label} BUY")
-        with header_right:
-            st.markdown("**★ MASTER SELECTION**")
+        h1, h2 = st.columns([3, 1])
+        with h1:
+            st.markdown(f"### {icon} {active_plan['strike']:.0f} {contract}")
+        with h2:
+            st.markdown(f"**{plan_state}**")
 
-        st.markdown(f"## {plan['strike']:.0f} {contract}")
-
-        pop_valid = bool(plan.get("pop_data_valid", False))
-        pop_text = f"{_num_or_dash(plan.get('pop'), 1)}%" if pop_valid else "N/A"
-        iv_text = f"{_num_or_dash(plan.get('iv'), 1)}%" if np.isfinite(safe_float(plan.get('iv'))) else "N/A"
-
-        values = [
-            ("Entry", fmt_price(plan.get("entry"))),
-            ("Stop Loss", fmt_price(plan.get("sl"))),
-            ("Target 1", fmt_price(plan.get("target1"))),
-            ("Target 2", fmt_price(plan.get("target2"))),
-            ("PoP", pop_text),
-            ("Delta", _num_or_dash(plan.get("delta"), 2)),
-            ("IV", iv_text),
-            ("R:R T2", f"1:{_num_or_dash(plan.get('rr2'), 2)}"),
-        ]
-        cols = st.columns(4)
-        for col, (title, value) in zip(cols, values[:4]):
-            with col:
-                st.metric(title, value)
-        cols = st.columns(4)
-        for col, (title, value) in zip(cols, values[4:]):
+        p1, p2, p3, p4 = st.columns(4)
+        for col, title, value in [
+            (p1, "ENTRY", fmt_price(active_plan.get("entry"))),
+            (p2, "STOP LOSS", fmt_price(active_plan.get("sl"))),
+            (p3, "TARGET 1", fmt_price(active_plan.get("target1"))),
+            (p4, "TARGET 2", fmt_price(active_plan.get("target2"))),
+        ]:
             with col:
                 st.metric(title, value)
 
-        if not pop_valid:
-            st.warning("⚠️ Option-data quality is insufficient for a reliable PoP. PoP is excluded from the decision.")
-        elif status == "READY":
-            st.success(f"{status_icon} {status} — This is the single active setup.")
-        elif "WAIT" in status:
-            st.warning(f"{status_icon} {status} — This is the single setup being monitored; no entry yet.")
+        g1, g2, g3, g4 = st.columns(4)
+        for col, title, value in [
+            (g1, "MODEL PoP", f"{_num_or_dash(active_plan.get('pop'), 1)}%"),
+            (g2, "DELTA", _num_or_dash(active_plan.get("delta"), 2)),
+            (g3, "IV", f"{_num_or_dash(active_plan.get('iv'), 1)}%"),
+            (g4, "R:R T2", f"1:{_num_or_dash(active_plan.get('rr2'), 2)}"),
+        ]:
+            with col:
+                st.metric(title, value)
+
+        if decision in {"CALL BUY", "PUT BUY"}:
+            st.success("Use this plan only after the entry condition above is confirmed.")
         else:
-            st.error(f"{status_icon} NO TRADE")
-
-if decision == "NO TRADE":
-    st.warning("⚪ NO TRADE — No CALL or PUT plan passes the complete quality gate. The app will not present either side as a competing candidate.")
-elif best_plan:
-    render_plan_native(best_plan, "CALL" if best_plan["side"] == "CE" else "PUT")
+            st.warning("This is a monitoring setup only. It is not an active trade until the master decision changes.")
 else:
-    st.warning("🟡 WAIT — The engine has not selected a valid option setup yet.")
+    with st.container(border=True):
+        st.markdown("### 🚫 NO ACTIONABLE TRADE")
+        st.caption("Entry, stop loss and targets are not shown because the engine currently says NO TRADE.")
 
 # ---------- Entry / Exit ----------
 st.markdown("<div class='section-heading'>📍 ENTRY / EXIT</div>", unsafe_allow_html=True)
-if best_plan:
-    entry_distance = abs(spot - best_plan["trigger_level"])
+if active_plan:
+    entry_distance = abs(spot - active_plan["trigger_level"])
     e1, e2, e3, e4, e5 = st.columns(5)
-    values = [
-        ("CURRENT PRICE", fmt_price(spot), "Underlying"),
-        ("ENTRY TRIGGER", fmt_price(best_plan["trigger_level"]), f"Distance {fmt_price(entry_distance)}"),
-        ("STOP LOSS", fmt_price(best_plan["sl"]), "Option premium"),
-        ("TARGET 1", fmt_price(best_plan["target1"]), "Partial exit"),
-        ("TARGET 2", fmt_price(best_plan["target2"]), "Final target"),
-    ]
-    for col, (title, value, note) in zip([e1,e2,e3,e4,e5], values):
+    for col, title, value, note in [
+        (e1, "CURRENT PRICE", fmt_price(spot), "Underlying"),
+        (e2, "ENTRY TRIGGER", fmt_price(active_plan["trigger_level"]), f"Distance {fmt_price(entry_distance)}"),
+        (e3, "STOP LOSS", fmt_price(active_plan["sl"]), "Option premium"),
+        (e4, "TARGET 1", fmt_price(active_plan["target1"]), "Partial exit"),
+        (e5, "TARGET 2", fmt_price(active_plan["target2"]), "Final target"),
+    ]:
         with col:
-            st.markdown(f"<div class='entry-card'><span>{title}</span><b>{value}</b><small>{note}</small></div>", unsafe_allow_html=True)
-    st.markdown(f"<div class='exit-rule'><span>EXIT RULE</span><b>{best_plan['exit']}</b></div>", unsafe_allow_html=True)
+            st.metric(title, value, help=note)
+    with st.container(border=True):
+        st.markdown("**EXIT RULE**")
+        st.write(active_plan["exit"])
 else:
-    st.info("No valid trade plan is available from the current option chain.")
+    st.info("No entry or exit levels are displayed because there is no actionable trade.")
 
-# ---------- Why this trade ----------
-st.markdown("<div class='section-heading'>💡 WHY THIS TRADE?</div>", unsafe_allow_html=True)
-why_items = []
-if best_plan:
-    side_name = "CALL" if best_plan["side"] == "CE" else "PUT"
-    desired = "Bullish" if best_plan["side"] == "CE" else "Bearish"
-    why_items += [
+# ---------- Why this setup ----------
+st.markdown("<div class='section-heading'>💡 WHY THE ENGINE REACHED THIS DECISION</div>", unsafe_allow_html=True)
+if active_plan:
+    side_name = "CALL" if active_plan["side"] == "CE" else "PUT"
+    why_items = [
         f"{tf5['trend']} 5m trend supports the {side_name} direction.",
         f"{tf30['trend']} 30m trend and {daily_tech['trend']} daily trend are part of the multi-timeframe check.",
         f"Price is {'above' if spot >= vwap_value else 'below'} the 5m VWAP at {fmt_price(vwap_value)}.",
         f"OI structure shows support at {fmt_price(support)} and resistance at {fmt_price(resistance)}.",
-        f"Selected option PoP is {_num_or_dash(best_plan['pop'], 1)}% with Delta {_num_or_dash(best_plan['delta'], 2)}.",
-        f"Option spread is {_num_or_dash(best_plan['spread_pct'], 1)}% with volume {fmt_num(best_plan['volume'])}.",
+        f"Model PoP for the selected contract is {_num_or_dash(active_plan['pop'], 1)}%; PoP is supporting information, not a guarantee of profit.",
+        f"Option spread is {_num_or_dash(active_plan['spread_pct'], 1)}% with volume {fmt_num(active_plan['volume'])}.",
     ]
-    if best_plan["fail_reasons"]:
-        why_items.append("⚠ " + "; ".join(best_plan["fail_reasons"]))
+    if active_plan.get("fail_reasons"):
+        why_items.append("Engine warnings: " + "; ".join(active_plan["fail_reasons"]))
 else:
-    why_items = ["No valid option plan is currently available."]
+    why_items = [
+        "Market direction is not sufficiently aligned for an actionable trade.",
+        f"Multi-timeframe alignment is {overall_alignment}/3.",
+        "The current candidate is intentionally hidden from the trade plan because the master decision is NO TRADE.",
+    ]
+with st.container(border=True):
+    for item in why_items:
+        st.write(f"• {item}")
 
-why_html_parts = []
-for item in why_items:
-    warning_class = "why-warning" if item.startswith("⚠") else ""
-    icon = "⚠" if item.startswith("⚠") else "✓"
-    clean_item = item.lstrip("⚠ ")
-    why_html_parts.append(
-        f"<div class='why-item {warning_class}'>{icon} {clean_item}</div>"
-    )
-why_html = "".join(why_html_parts)
-st.markdown(f"<div class='why-card'>{why_html}</div>", unsafe_allow_html=True)
-
-# ---------- OI map ----------
-st.markdown("<div class='section-heading'>📍 SUPPORT / RESISTANCE + OI MAP</div>", unsafe_allow_html=True)
+# ---------- Support / Resistance + OI ----------
+st.markdown("<div class='section-heading'>📍 SUPPORT / RESISTANCE + OI</div>", unsafe_allow_html=True)
 put_row = nearest_row(chain, support)
 call_row = nearest_row(chain, resistance)
 put_oi = put_row["PE OI"] if put_row is not None else np.nan
 call_oi = call_row["CE OI"] if call_row is not None else np.nan
 support_room = max((spot - support) / max(spot,1) * 100, 0) if np.isfinite(support) else np.nan
 resistance_room = max((resistance - spot) / max(spot,1) * 100, 0) if np.isfinite(resistance) else np.nan
-
-st.markdown(
-    f"""
-<div class='sr-map'>
-    <div class='sr-side sr-resistance'>
-        <span>🔴 CALL OI WALL</span><b>{fmt_price(resistance)}</b><small>OI {fmt_num(call_oi)}</small>
-    </div>
-    <div class='sr-line'>
-        <div class='room-label'>+{_num_or_dash(resistance_room,2)}%</div>
-        <div class='current-marker'>● {fmt_price(spot)} <span>CURRENT</span></div>
-        <div class='room-label'>-{_num_or_dash(support_room,2)}%</div>
-    </div>
-    <div class='sr-side sr-support'>
-        <span>🟢 PUT OI WALL</span><b>{fmt_price(support)}</b><small>OI {fmt_num(put_oi)}</small>
-    </div>
-</div>
-""",
-    unsafe_allow_html=True,
-)
+with st.container(border=True):
+    r1, r2, r3 = st.columns(3)
+    with r1:
+        st.metric("SUPPORT", fmt_price(support), f"PUT OI {fmt_num(put_oi)}")
+    with r2:
+        st.metric("CURRENT", fmt_price(spot))
+    with r3:
+        st.metric("RESISTANCE", fmt_price(resistance), f"CALL OI {fmt_num(call_oi)}")
+    st.caption(f"Room to support: {_num_or_dash(support_room,2)}%  •  Room to resistance: {_num_or_dash(resistance_room,2)}%")
 
 # ---------- Tabs ----------
 tab1, tab2, tab3, tab4 = st.tabs([
