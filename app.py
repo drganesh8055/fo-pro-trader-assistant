@@ -1588,7 +1588,6 @@ with m6:
 
 # ---------- Trade decision ----------
 decision_icon = "🟢" if decision == "CALL BUY" else "🔴" if decision == "PUT BUY" else "🟡" if "WAIT" in decision else "⚪"
-decision_state_css = "decision-call" if decision == "CALL BUY" else "decision-put" if decision == "PUT BUY" else "decision-neutral"
 decision_sub = {
     "CALL BUY": "Bullish conditions aligned — entry confirmation required by the engine.",
     "PUT BUY": "Bearish conditions aligned — entry confirmation required by the engine.",
@@ -1598,48 +1597,22 @@ decision_sub = {
 }.get(decision, "Review the live conditions before taking action.")
 
 st.markdown("<div class='section-heading'>🎯 TRADE DECISION</div>", unsafe_allow_html=True)
-st.markdown(
-    f"""
-<div class="decision-card {decision_state_css}">
-    <div class="decision-main">{decision_icon} {decision}</div>
 
-    <div class="decision-sub">{decision_sub}</div>
+# Use native Streamlit layout for this section instead of nested HTML.
+# This prevents Streamlit from ever displaying HTML tags as literal text.
+with st.container(border=True):
+    st.markdown(f"### {decision_icon} {decision}")
+    st.caption(decision_sub)
 
-    <div class="decision-stats">
-
-        <div>
-            <span>BULL SCORE</span>
-            <div class="decision-value">
-                {ce_score:.0f}<span>/100</span>
-            </div>
-        </div>
-
-        <div>
-            <span>BEAR SCORE</span>
-            <div class="decision-value">
-                {pe_score:.0f}<span>/100</span>
-            </div>
-        </div>
-
-        <div>
-            <span>TREND</span>
-            <div class="decision-value">
-                {overall_direction.upper()}
-            </div>
-        </div>
-
-        <div>
-            <span>CONFIDENCE</span>
-            <div class="decision-value">
-                {confidence}<span>/100</span>
-            </div>
-        </div>
-
-    </div>
-</div>
-""",
-    unsafe_allow_html=True,
-)
+    d1, d2, d3, d4 = st.columns(4)
+    with d1:
+        st.metric("BULL SCORE", f"{ce_score:.0f}/100")
+    with d2:
+        st.metric("BEAR SCORE", f"{pe_score:.0f}/100")
+    with d3:
+        st.metric("TREND", overall_direction.upper())
+    with d4:
+        st.metric("CONFIDENCE", f"{confidence}/100")
 
 # ---------- Trade status ----------
 st.markdown("<div class='section-heading'>🚦 TRADE STATUS</div>", unsafe_allow_html=True)
