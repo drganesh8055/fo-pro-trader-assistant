@@ -108,9 +108,7 @@ st.markdown(
 .decision-sub {text-align:center;color:#667085;margin:9px 0 20px;font-size:13px;}
 .decision-stats {display:grid;grid-template-columns:repeat(4,1fr);gap:10px;}
 .decision-stats>div {background:rgba(255,255,255,.78);border:1px solid #edf0f3;border-radius:10px;padding:11px;text-align:center;}
-.decision-stats b {display:block;font-size:19px;margin-top:5px;color:#182230;}
-.decision-stats .decision-value {display:block;font-size:19px;font-weight:800;margin-top:5px;color:#182230;}
-.decision-stats .decision-value span {display:inline;font-size:11px;font-weight:600;color:#98a2b3;margin-left:3px;}
+.decision-stats b {display:block;font-size:19px;margin-top:5px;color:#182230;}.decision-stats em {font-size:11px;font-style:normal;color:#98a2b3;}
 .status-panel {border-radius:14px;padding:18px 20px;border:1px solid #e4e7ec;background:#fff;box-shadow:0 2px 8px rgba(16,42,67,.035);}
 .status-green {border-color:#bde5c9;background:#f4fbf6;}.status-yellow {border-color:#f1d79b;background:#fffbf1;}.status-red {border-color:#f2c5c8;background:#fff6f6;}.status-grey {border-color:#dfe3e8;background:#f8fafc;}
 .status-title {font-size:22px;font-weight:900;text-align:center;margin-bottom:15px;}
@@ -841,8 +839,16 @@ def score_option(row, side, spot, pcr, tf5, tf30, daily, chain,
 
     strike_quality = strike_points + room_points
 
-    # 10 points: PoP is useful but capped so it cannot dominate direction.
-    pop_points = float(np.clip((pop - 55) / 3.0, 0, 10)) if np.isfinite(pop) else 0
+    # PoP is supporting evidence only.  Upstox can occasionally return
+    # mathematically unusable combinations (for example IV=0 with Delta=1,
+    # or an extreme IV value).  Never let such a PoP influence the score.
+    pop_data_valid = (
+        np.isfinite(pop) and 0.0 < pop <= 100.0 and
+        np.isfinite(iv) and 0.01 <= iv <= 200.0 and
+        np.isfinite(abs_delta) and 0.05 <= abs_delta <= 0.95
+    )
+    pop_points = (float(np.clip((pop - 55) / 3.0, 0, 10))
+                  if pop_data_valid else 0.0)
 
     # Total: 30 + 15 + 10 + 10 + 5 + 20 + 10 + 10 = 110.
     raw_score = (
@@ -857,6 +863,7 @@ def score_option(row, side, spot, pcr, tf5, tf30, daily, chain,
         "delta": delta,
         "iv": iv,
         "pop": pop,
+        "pop_data_valid": pop_data_valid,
         "chg_oi": chg_oi,
         "volume": volume,
         "oi": oi,
@@ -951,17 +958,21 @@ def build_plan(row, side, spot, support, resistance, pcr, tf5, tf30, daily,
     desired = "Bullish" if side == "CE" else "Bearish"
     opposite = "Bearish" if side == "CE" else "Bullish"
 
-    # IMPORTANT: Do not use the setup score, timeframe alignment or Upstox PoP
-    # as binary hard-fails. Doing so made the previous engine reject almost
-    # every developing setup and turned useful information into NO TRADE.
-    # These are now quality gates used by the decision engine below.
     hard_fail = []
-    if tf5.get("trend") == opposite:
-        hard_fail.append("5m trend conflict")
+    if scored["score"] < 72:
+        hard_fail.append("setup score below 72")
+    if scored["alignment"] < 2:
+        hard_fail.append("fewer than 2 aligned timeframes")
+    if tf5.get("trend") == opposite or tf30.get("trend") == opposite:
+        hard_fail.append("short-term trend conflict")
     if scored["spread_pct"] > 3:
         hard_fail.append("wide option spread")
     if not np.isfinite(scored["delta"]) or not (0.35 <= abs(scored["delta"]) <= 0.80):
         hard_fail.append("poor delta")
+    if not scored.get("pop_data_valid", False):
+        hard_fail.append("unreliable option Greeks/PoP data")
+    elif scored["pop"] < 55:
+        hard_fail.append("low Upstox PoP")
     if scored["volume"] < 1000:
         hard_fail.append("weak option liquidity")
     if not np.isfinite(scored["oi"]) or scored["oi"] <= 0:
@@ -985,25 +996,16 @@ def build_plan(row, side, spot, support, resistance, pcr, tf5, tf30, daily,
         if spot > support and wall_room < 0.50:
             hard_fail.append("support too close")
 
-    # Readiness is deliberately separated from the final decision. A setup can
-    # be a legitimate developing candidate even when it is not yet actionable.
-    # The old logic converted every quality shortfall directly into NO TRADE.
-    # That was too restrictive for a live scanner/decision assistant.
+    # A breakout can qualify as READY only after candle confirmation. A raw
+    # price touch is not enough.
     if not trigger_hit:
         trigger_state = "WAIT FOR TRIGGER"
     elif not candle_confirmed or not volume_confirmed:
         trigger_state = "WAIT FOR CONFIRMATION"
     else:
-        trigger_state = "READY"
+        trigger_state = "READY" if not hard_fail else "NO TRADE"
 
-    readiness = trigger_state
-
-    # Descriptive quality flags used by the main decision layer.
-    score_gate = scored["score"] >= 65
-    watch_score_gate = scored["score"] >= 58
-    alignment_gate = scored["alignment"] >= 2
-    pop_ok = np.isfinite(scored["pop"]) and scored["pop"] >= 45
-    strong_pop = np.isfinite(scored["pop"]) and scored["pop"] >= 55
+    readiness = trigger_state if not hard_fail else "NO TRADE"
 
     return {
         "side": side,
@@ -1013,6 +1015,7 @@ def build_plan(row, side, spot, support, resistance, pcr, tf5, tf30, daily,
         "target1": target1,
         "target2": target2,
         "pop": scored["pop"],
+        "pop_data_valid": scored.get("pop_data_valid", False),
         "delta": scored["delta"],
         "iv": scored["iv"],
         "score": scored["score"],
@@ -1025,11 +1028,6 @@ def build_plan(row, side, spot, support, resistance, pcr, tf5, tf30, daily,
         "volume_confirmed": volume_confirmed,
         "readiness": readiness,
         "fail_reasons": hard_fail,
-        "score_gate": score_gate,
-        "watch_score_gate": watch_score_gate,
-        "alignment_gate": alignment_gate,
-        "pop_ok": pop_ok,
-        "strong_pop": strong_pop,
         "exit": exit_rule,
         "oi": row[f"{side} OI"],
         "chg_oi": scored["chg_oi"],
@@ -1477,97 +1475,57 @@ pe_plan = build_plan(
 ce_score = ce_plan["score"] if ce_plan else 0
 pe_score = pe_plan["score"] if pe_plan else 0
 
-# ============================================================
-# DECISION ENGINE — ACTIONABLE / WAIT / WATCH / NO TRADE
-# ============================================================
-# The previous version required score >=72, 2/3 timeframe alignment and
-# PoP >=55 as hard conditions simultaneously. That is appropriate for an
-# extremely selective filter, but it can suppress too many legitimate
-# developing setups.
-#
-# New hierarchy:
-#   1. CALL BUY / PUT BUY  = strong, aligned and confirmed
-#   2. WAIT FOR TRIGGER     = quality candidate, trigger not reached
-#   3. WAIT FOR CONFIRMATION= trigger reached, candle/volume still missing
-#   4. WATCHLIST             = promising but not strong enough to wait for entry
-#   5. NO TRADE              = conflicting/poor-quality setup
-#
-# No signal is created merely to increase trade frequency.
+# ------------------------------------------------------------------
+# MASTER DECISION
+# ------------------------------------------------------------------
+# The dashboard must have exactly one source of truth.  An option with a
+# spectacular-looking PoP is NOT allowed to override direction, data quality,
+# trigger confirmation or the overall setup score.  If the selected side fails
+# the quality gate, it is not shown as a competing trade candidate.
 overall_direction, overall_alignment = overall_trend(tf5, tf30, daily_tech)
 
-def _direction_for_plan(plan):
-    return "Bullish" if plan and plan.get("side") == "CE" else "Bearish" if plan else "Mixed"
-
-def _severe_reasons(plan):
-    if not plan:
-        return ["no valid option plan"]
-    return list(plan.get("fail_reasons") or [])
-
-def _actionable(plan, score, side):
+def _eligible_plan(plan, direction):
     if not plan:
         return False
-    desired_direction = "Bullish" if side == "CE" else "Bearish"
-    return (
-        score >= 65
-        and plan.get("alignment", 0) >= 2
-        and overall_direction == desired_direction
-        and not _severe_reasons(plan)
-        and plan.get("pop_ok", False)
-        and plan.get("readiness") == "READY"
-    )
-
-def _wait_candidate(plan, score, side):
-    if not plan or score < 58 or _severe_reasons(plan):
+    expected = "CE" if direction == "Bullish" else "PE"
+    if direction not in {"Bullish", "Bearish"} or plan.get("side") != expected:
         return False
-    desired_direction = "Bullish" if side == "CE" else "Bearish"
-    # At least one timeframe must support the direction; the 5m timeframe
-    # must not be directly opposite. This prevents random WAIT signals.
-    return (
-        plan.get("alignment", 0) >= 1
-        and tf5.get("trend") != ("Bearish" if side == "CE" else "Bullish")
-        and (overall_direction in {desired_direction, "Mixed"} or plan.get("alignment", 0) >= 2)
-        and plan.get("pop_ok", False)
-    )
+    if plan.get("readiness") == "NO TRADE":
+        return False
+    return True
 
-ce_actionable = _actionable(ce_plan, ce_score, "CE")
-pe_actionable = _actionable(pe_plan, pe_score, "PE")
+ce_ready = _eligible_plan(ce_plan, overall_direction)
+pe_ready = _eligible_plan(pe_plan, overall_direction)
 
-# Prefer the stronger side when both qualify. A minimum score separation of
-# 5 points avoids flipping the direction on tiny scoring differences.
-if ce_actionable and (not pe_actionable or ce_score >= pe_score + 5):
-    decision = "CALL BUY"
-    decision_class = "trade-call"
+# Select only from the side that matches the underlying market direction.
+# This prevents a CALL and PUT from simultaneously competing on the UI.
+if overall_direction == "Bullish" and ce_ready and ce_score >= 72:
+    decision = "CALL BUY" if ce_plan["readiness"] == "READY" else ce_plan["readiness"]
     best_plan = ce_plan
-elif pe_actionable and (not ce_actionable or pe_score >= ce_score + 5):
-    decision = "PUT BUY"
-    decision_class = "trade-put"
+elif overall_direction == "Bearish" and pe_ready and pe_score >= 72:
+    decision = "PUT BUY" if pe_plan["readiness"] == "READY" else pe_plan["readiness"]
     best_plan = pe_plan
 else:
-    # Developing candidates are shown as WAIT rather than being falsely
-    # presented as executable trades.
-    ce_wait = _wait_candidate(ce_plan, ce_score, "CE")
-    pe_wait = _wait_candidate(pe_plan, pe_score, "PE")
-
-    if ce_wait or pe_wait:
-        if ce_wait and (not pe_wait or ce_score >= pe_score):
-            best_plan = ce_plan
-        else:
-            best_plan = pe_plan
-
-        if best_plan.get("readiness") == "READY":
-            # READY but blocked by a non-actionable quality condition: monitor
-            # it rather than converting it into a BUY.
-            decision = "WATCHLIST"
-        else:
-            decision = best_plan.get("readiness", "WAIT FOR TRIGGER")
-        decision_class = "trade-neutral"
+    # If direction is clear but the setup is developing, monitor ONE side only.
+    # Otherwise there is no actionable/monitoring plan to display.
+    best_plan = None
+    if overall_direction == "Bullish" and ce_plan and ce_plan.get("readiness") in {"WAIT FOR TRIGGER", "WAIT FOR CONFIRMATION"} and ce_plan.get("score", 0) >= 60 and ce_plan.get("pop_data_valid", False):
+        decision = ce_plan["readiness"]
+        best_plan = ce_plan
+    elif overall_direction == "Bearish" and pe_plan and pe_plan.get("readiness") in {"WAIT FOR TRIGGER", "WAIT FOR CONFIRMATION"} and pe_plan.get("score", 0) >= 60 and pe_plan.get("pop_data_valid", False):
+        decision = pe_plan["readiness"]
+        best_plan = pe_plan
     else:
         decision = "NO TRADE"
-        decision_class = "trade-neutral"
-        best_plan = ce_plan if ce_score >= pe_score else pe_plan
 
-# Confidence is intentionally a separate descriptive measure.
-best_score = best_plan["score"] if best_plan else 0
+decision_class = (
+    "trade-call" if decision == "CALL BUY" else
+    "trade-put" if decision == "PUT BUY" else
+    "trade-neutral"
+)
+
+# Confidence is descriptive, not a win probability.
+best_score = best_plan["score"] if best_plan else max(ce_score, pe_score)
 best_alignment = best_plan["alignment"] if best_plan else 0
 confidence = int(np.clip(
     best_score * 0.70 + (best_alignment / 3) * 20 +
@@ -1673,27 +1631,22 @@ with m6:
 # ---------- Trade decision ----------
 decision_icon = "🟢" if decision == "CALL BUY" else "🔴" if decision == "PUT BUY" else "🟡" if "WAIT" in decision else "⚪"
 decision_sub = {
-    "CALL BUY": "Bullish conditions aligned — entry confirmation required by the engine.",
-    "PUT BUY": "Bearish conditions aligned — entry confirmation required by the engine.",
-    "WAIT FOR TRIGGER": "Setup is developing. Do not enter until the trigger is reached.",
-    "WAIT FOR CONFIRMATION": "Trigger reached, but confirmation conditions are not complete.",
-    "WATCHLIST": "Promising setup, but quality is not strong enough for an entry yet.",
-    "NO TRADE": "Conditions are not sufficiently aligned for a valid setup.",
+    "CALL BUY": "One master decision: CALL. Enter only when the displayed trigger is satisfied.",
+    "PUT BUY": "One master decision: PUT. Enter only when the displayed trigger is satisfied.",
+    "WAIT FOR TRIGGER": "One setup is being monitored. Do not enter until the displayed trigger is reached.",
+    "WAIT FOR CONFIRMATION": "One setup is being monitored. Trigger reached, but confirmation is incomplete.",
+    "NO TRADE": "No option setup currently passes the complete quality gate. Do not enter.",
 }.get(decision, "Review the live conditions before taking action.")
 
 st.markdown("<div class='section-heading'>🎯 TRADE DECISION</div>", unsafe_allow_html=True)
-
-# Use native Streamlit layout for this section instead of nested HTML.
-# This prevents Streamlit from ever displaying HTML tags as literal text.
 with st.container(border=True):
     st.markdown(f"### {decision_icon} {decision}")
     st.caption(decision_sub)
-
     d1, d2, d3, d4 = st.columns(4)
     with d1:
-        st.metric("BULL SCORE", f"{ce_score:.0f}/100")
+        st.metric("CALL SCORE", f"{ce_score:.0f}/100")
     with d2:
-        st.metric("BEAR SCORE", f"{pe_score:.0f}/100")
+        st.metric("PUT SCORE", f"{pe_score:.0f}/100")
     with d3:
         st.metric("TREND", overall_direction.upper())
     with d4:
@@ -1703,36 +1656,16 @@ with st.container(border=True):
 st.markdown("<div class='section-heading'>🚦 TRADE STATUS</div>", unsafe_allow_html=True)
 status_plan = best_plan
 if status_plan:
-    # IMPORTANT: best_plan can be the strongest *candidate* even when the
-    # quality gate rejects it.  Never present that candidate as an active trade.
-    actionable_decision = decision in {"CALL BUY", "PUT BUY"}
-    status = decision if actionable_decision else "NO TRADE"
-    if decision in {"WAIT FOR TRIGGER", "WAIT FOR CONFIRMATION", "WATCHLIST"}:
-        status = decision
-
+    status = status_plan["readiness"]
+    if decision == "NO TRADE":
+        status = "NO TRADE"
     status_title = {
-        "CALL BUY": "🟢 CALL BUY — ACTIONABLE",
-        "PUT BUY": "🔴 PUT BUY — ACTIONABLE",
-        "WAIT FOR TRIGGER": "🟡 WAIT FOR TRIGGER — DO NOT ENTER",
-        "WAIT FOR CONFIRMATION": "🟡 WAIT FOR CONFIRMATION — DO NOT ENTER",
-        "WATCHLIST": "🟠 WATCHLIST — DO NOT ENTER",
-        "NO TRADE": "🔴 NO TRADE — DO NOT ENTER",
-    }.get(status, "🔴 NO TRADE — DO NOT ENTER")
+        "READY": "🟢 READY TO ENTER",
+        "WAIT FOR TRIGGER": "🟡 WAIT FOR TRIGGER",
+        "WAIT FOR CONFIRMATION": "🟡 WAIT FOR CONFIRMATION",
+        "NO TRADE": "🔴 NO TRADE",
+    }.get(status, status)
     trigger_distance = abs(spot - status_plan["trigger_level"])
-
-    if status == "NO TRADE":
-        status_note = (
-            f"Do not enter this setup. The {'CALL' if status_plan['side'] == 'CE' else 'PUT'} side is currently too weak or conflicting. "
-            f"Wait for a materially better setup."
-        )
-    elif status == "WATCHLIST":
-        status_note = (
-            f"Do not enter. Monitor the {'CALL' if status_plan['side'] == 'CE' else 'PUT'} candidate. "
-            f"It needs stronger alignment/quality before becoming actionable."
-        )
-    else:
-        status_note = status_plan["trigger"]
-
     st.markdown(
         f"""
 <div class='status-panel {_status_class(status)}'>
@@ -1742,13 +1675,13 @@ if status_plan:
         <div><span>TRIGGER</span><b>{fmt_price(status_plan['trigger_level'])}</b></div>
         <div><span>DISTANCE</span><b>{fmt_price(trigger_distance)}</b></div>
     </div>
-    <div class='status-note'>{status_note}</div>
+    <div class='status-note'>{status_plan['trigger']}</div>
 </div>
 """,
         unsafe_allow_html=True,
     )
 else:
-    st.markdown("<div class='status-panel status-grey'><div class='status-title'>⚪ NO VALID PLAN</div><div class='status-note'>No usable option contract was returned by the live chain. No trade should be considered.</div></div>", unsafe_allow_html=True)
+    st.markdown("<div class='status-panel status-grey'><div class='status-title'>⚪ NO VALID PLAN</div><div class='status-note'>No usable option contract was returned by the live chain.</div></div>", unsafe_allow_html=True)
 
 # ---------- Checklist ----------
 direction_pass = overall_direction in {"Bullish", "Bearish"}
@@ -1781,20 +1714,14 @@ st.markdown(
 # ---------- Trade plan ----------
 st.markdown("<div class='section-heading'>🎯 TRADE PLAN</div>", unsafe_allow_html=True)
 
-# A plan is only an active trade when the decision is CALL BUY or PUT BUY.
-# For WAIT/NO TRADE states, the highest-scoring plan is shown only as a
-# reference candidate so the user can see what must improve before entry.
-active_side = "CE" if decision == "CALL BUY" else "PE" if decision == "PUT BUY" else None
-candidate_side = best_plan["side"] if best_plan else None
+def render_plan_native(plan, label, selected=True):
+    """Render ONLY the single master-selected setup.
 
-def render_plan_native(plan, label, active=False, candidate=False):
-    """Render the trade plan with native Streamlit components.
-
-    This intentionally avoids nested HTML divs because Streamlit's Markdown/HTML
-    sanitizer can render portions of complex nested cards as literal code.
+    A rejected opposite-side candidate is deliberately not rendered here.
+    This prevents PoP/strike differences from creating two competing actions.
     """
     if not plan:
-        st.info(f"{label} BUY — No valid option plan returned.")
+        st.info("No valid trade plan is available. The engine is currently saying NO TRADE.")
         return
 
     side = plan["side"]
@@ -1808,25 +1735,22 @@ def render_plan_native(plan, label, active=False, candidate=False):
         with header_left:
             st.markdown(f"### {icon} {label} BUY")
         with header_right:
-            if active:
-                st.markdown("**★ ACTIVE TRADE**")
-            elif candidate:
-                st.markdown("**◉ CANDIDATE ONLY**")
+            st.markdown("**★ MASTER SELECTION**")
 
         st.markdown(f"## {plan['strike']:.0f} {contract}")
-        if active:
-            st.success("ACTIONABLE: follow the entry trigger and risk levels below.")
-        elif candidate:
-            st.info("REFERENCE ONLY: this is the strongest current candidate, but the engine says NO TRADE. Do not enter.")
+
+        pop_valid = bool(plan.get("pop_data_valid", False))
+        pop_text = f"{_num_or_dash(plan.get('pop'), 1)}%" if pop_valid else "N/A"
+        iv_text = f"{_num_or_dash(plan.get('iv'), 1)}%" if np.isfinite(safe_float(plan.get('iv'))) else "N/A"
 
         values = [
             ("Entry", fmt_price(plan.get("entry"))),
             ("Stop Loss", fmt_price(plan.get("sl"))),
             ("Target 1", fmt_price(plan.get("target1"))),
             ("Target 2", fmt_price(plan.get("target2"))),
-            ("PoP", f"{_num_or_dash(plan.get('pop'), 1)}%"),
+            ("PoP", pop_text),
             ("Delta", _num_or_dash(plan.get("delta"), 2)),
-            ("IV", f"{_num_or_dash(plan.get('iv'), 1)}%"),
+            ("IV", iv_text),
             ("R:R T2", f"1:{_num_or_dash(plan.get('rr2'), 2)}"),
         ]
         cols = st.columns(4)
@@ -1838,22 +1762,25 @@ def render_plan_native(plan, label, active=False, candidate=False):
             with col:
                 st.metric(title, value)
 
-        if status == "READY":
-            st.success(f"{status_icon} {status}")
+        if not pop_valid:
+            st.warning("⚠️ Option-data quality is insufficient for a reliable PoP. PoP is excluded from the decision.")
+        elif status == "READY":
+            st.success(f"{status_icon} {status} — This is the single active setup.")
         elif "WAIT" in status:
-            st.warning(f"{status_icon} {status}")
+            st.warning(f"{status_icon} {status} — This is the single setup being monitored; no entry yet.")
         else:
-            st.error(f"{status_icon} {status}")
+            st.error(f"{status_icon} NO TRADE")
 
-p1, p2 = st.columns(2)
-with p1:
-    render_plan_native(ce_plan, "CALL", active_side == "CE", candidate_side == "CE" and active_side is None)
-with p2:
-    render_plan_native(pe_plan, "PUT", active_side == "PE", candidate_side == "PE" and active_side is None)
+if decision == "NO TRADE":
+    st.warning("⚪ NO TRADE — No CALL or PUT plan passes the complete quality gate. The app will not present either side as a competing candidate.")
+elif best_plan:
+    render_plan_native(best_plan, "CALL" if best_plan["side"] == "CE" else "PUT")
+else:
+    st.warning("🟡 WAIT — The engine has not selected a valid option setup yet.")
 
 # ---------- Entry / Exit ----------
 st.markdown("<div class='section-heading'>📍 ENTRY / EXIT</div>", unsafe_allow_html=True)
-if best_plan and decision in {"CALL BUY", "PUT BUY"}:
+if best_plan:
     entry_distance = abs(spot - best_plan["trigger_level"])
     e1, e2, e3, e4, e5 = st.columns(5)
     values = [
@@ -1868,35 +1795,22 @@ if best_plan and decision in {"CALL BUY", "PUT BUY"}:
             st.markdown(f"<div class='entry-card'><span>{title}</span><b>{value}</b><small>{note}</small></div>", unsafe_allow_html=True)
     st.markdown(f"<div class='exit-rule'><span>EXIT RULE</span><b>{best_plan['exit']}</b></div>", unsafe_allow_html=True)
 else:
-    if best_plan:
-        st.warning("DO NOT ENTER: entry, stop-loss and target levels are reference levels only. Wait for CALL BUY or PUT BUY before taking the trade.")
-    else:
-        st.info("No valid trade plan is available from the current option chain.")
+    st.info("No valid trade plan is available from the current option chain.")
 
 # ---------- Why this trade ----------
-section_title = "💡 WHY THIS TRADE?" if decision in {"CALL BUY", "PUT BUY"} else "💡 WHY NO TRADE?"
-st.markdown(f"<div class='section-heading'>{section_title}</div>", unsafe_allow_html=True)
+st.markdown("<div class='section-heading'>💡 WHY THIS TRADE?</div>", unsafe_allow_html=True)
 why_items = []
 if best_plan:
     side_name = "CALL" if best_plan["side"] == "CE" else "PUT"
-    if decision in {"CALL BUY", "PUT BUY"}:
-        why_items += [
-            f"{tf5['trend']} 5m trend supports the {side_name} direction.",
-            f"{tf30['trend']} 30m trend and {daily_tech['trend']} daily trend are part of the multi-timeframe check.",
-            f"Price is {'above' if spot >= vwap_value else 'below'} the 5m VWAP at {fmt_price(vwap_value)}.",
-            f"OI structure shows support at {fmt_price(support)} and resistance at {fmt_price(resistance)}.",
-            f"Active option PoP is {_num_or_dash(best_plan['pop'], 1)}% with Delta {_num_or_dash(best_plan['delta'], 2)}.",
-            f"Option spread is {_num_or_dash(best_plan['spread_pct'], 1)}% with volume {fmt_num(best_plan['volume'])}.",
-        ]
-    else:
-        why_items += [
-            f"The {side_name} is only the strongest current candidate; it is NOT an approved entry.",
-            f"Market direction is {overall_direction} and only {overall_alignment}/3 timeframes align with the candidate.",
-            f"5m trend is {tf5['trend']}; 30m is {tf30['trend']}; daily is {daily_tech['trend']}.",
-            f"Price is {'above' if spot >= vwap_value else 'below'} the 5m VWAP at {fmt_price(vwap_value)}.",
-            f"OI structure shows support at {fmt_price(support)} and resistance at {fmt_price(resistance)}.",
-            f"Candidate option PoP is {_num_or_dash(best_plan['pop'], 1)}% with Delta {_num_or_dash(best_plan['delta'], 2)}.",
-        ]
+    desired = "Bullish" if best_plan["side"] == "CE" else "Bearish"
+    why_items += [
+        f"{tf5['trend']} 5m trend supports the {side_name} direction.",
+        f"{tf30['trend']} 30m trend and {daily_tech['trend']} daily trend are part of the multi-timeframe check.",
+        f"Price is {'above' if spot >= vwap_value else 'below'} the 5m VWAP at {fmt_price(vwap_value)}.",
+        f"OI structure shows support at {fmt_price(support)} and resistance at {fmt_price(resistance)}.",
+        f"Selected option PoP is {_num_or_dash(best_plan['pop'], 1)}% with Delta {_num_or_dash(best_plan['delta'], 2)}.",
+        f"Option spread is {_num_or_dash(best_plan['spread_pct'], 1)}% with volume {fmt_num(best_plan['volume'])}.",
+    ]
     if best_plan["fail_reasons"]:
         why_items.append("⚠ " + "; ".join(best_plan["fail_reasons"]))
 else:
@@ -1948,9 +1862,7 @@ tab1, tab2, tab3, tab4 = st.tabs([
 
 with tab1:
     if decision == "NO TRADE":
-        st.markdown("<div class='tab-alert tab-danger'><b>🔴 NO TRADE</b><br>Conditions are currently too weak or conflicting. Do not enter.</div>", unsafe_allow_html=True)
-    elif decision == "WATCHLIST":
-        st.markdown("<div class='tab-alert tab-danger'><b>🟠 WATCHLIST</b><br>Promising candidate, but do not enter until the engine changes to CALL BUY or PUT BUY.</div>", unsafe_allow_html=True)
+        st.markdown("<div class='tab-alert tab-danger'><b>⚪ NO TRADE</b><br>Conditions do not currently meet the quality gate. Wait for a new setup rather than forcing an entry.</div>", unsafe_allow_html=True)
     elif best_plan:
         tab_icon = "🟢" if best_plan["side"] == "CE" else "🔴"
         st.markdown(f"<div class='tab-alert tab-positive'><b>{tab_icon} {decision}</b><br>Strike {best_plan['strike']:.0f} • Entry {fmt_price(best_plan['entry'])} • SL {fmt_price(best_plan['sl'])} • T1 {fmt_price(best_plan['target1'])} • T2 {fmt_price(best_plan['target2'])}</div>", unsafe_allow_html=True)
