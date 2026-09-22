@@ -1618,16 +1618,33 @@ with st.container(border=True):
 st.markdown("<div class='section-heading'>🚦 TRADE STATUS</div>", unsafe_allow_html=True)
 status_plan = best_plan
 if status_plan:
-    status = status_plan["readiness"]
-    if decision == "NO TRADE":
-        status = "NO TRADE"
+    # IMPORTANT: best_plan can be the strongest *candidate* even when the
+    # quality gate rejects it.  Never present that candidate as an active trade.
+    actionable_decision = decision in {"CALL BUY", "PUT BUY"}
+    status = decision if actionable_decision else "NO TRADE"
+    if decision == "WAIT FOR TRIGGER":
+        status = "WAIT FOR TRIGGER"
+    elif decision == "WAIT FOR CONFIRMATION":
+        status = "WAIT FOR CONFIRMATION"
+
     status_title = {
-        "READY": "🟢 READY TO ENTER",
-        "WAIT FOR TRIGGER": "🟡 WAIT FOR TRIGGER",
-        "WAIT FOR CONFIRMATION": "🟡 WAIT FOR CONFIRMATION",
-        "NO TRADE": "🔴 NO TRADE",
-    }.get(status, status)
+        "CALL BUY": "🟢 CALL BUY — ACTIONABLE",
+        "PUT BUY": "🔴 PUT BUY — ACTIONABLE",
+        "WAIT FOR TRIGGER": "🟡 WAIT FOR TRIGGER — DO NOT ENTER",
+        "WAIT FOR CONFIRMATION": "🟡 WAIT FOR CONFIRMATION — DO NOT ENTER",
+        "NO TRADE": "🔴 NO TRADE — DO NOT ENTER",
+    }.get(status, "🔴 NO TRADE — DO NOT ENTER")
     trigger_distance = abs(spot - status_plan["trigger_level"])
+
+    if status == "NO TRADE":
+        status_note = (
+            f"Do not enter this setup now. Monitor the {'CALL' if status_plan['side'] == 'CE' else 'PUT'} candidate only. "
+            f"The trigger is {fmt_price(status_plan['trigger_level'])}, but the quality gate is not satisfied. "
+            f"Re-evaluate after a fresh live update and only enter if the engine changes to an actionable state."
+        )
+    else:
+        status_note = status_plan["trigger"]
+
     st.markdown(
         f"""
 <div class='status-panel {_status_class(status)}'>
@@ -1637,13 +1654,13 @@ if status_plan:
         <div><span>TRIGGER</span><b>{fmt_price(status_plan['trigger_level'])}</b></div>
         <div><span>DISTANCE</span><b>{fmt_price(trigger_distance)}</b></div>
     </div>
-    <div class='status-note'>{status_plan['trigger']}</div>
+    <div class='status-note'>{status_note}</div>
 </div>
 """,
         unsafe_allow_html=True,
     )
 else:
-    st.markdown("<div class='status-panel status-grey'><div class='status-title'>⚪ NO VALID PLAN</div><div class='status-note'>No usable option contract was returned by the live chain.</div></div>", unsafe_allow_html=True)
+    st.markdown("<div class='status-panel status-grey'><div class='status-title'>⚪ NO VALID PLAN</div><div class='status-note'>No usable option contract was returned by the live chain. No trade should be considered.</div></div>", unsafe_allow_html=True)
 
 # ---------- Checklist ----------
 direction_pass = overall_direction in {"Bullish", "Bearish"}
@@ -1675,9 +1692,14 @@ st.markdown(
 
 # ---------- Trade plan ----------
 st.markdown("<div class='section-heading'>🎯 TRADE PLAN</div>", unsafe_allow_html=True)
-selected_side = best_plan["side"] if best_plan else None
 
-def render_plan_native(plan, label, selected=False):
+# A plan is only an active trade when the decision is CALL BUY or PUT BUY.
+# For WAIT/NO TRADE states, the highest-scoring plan is shown only as a
+# reference candidate so the user can see what must improve before entry.
+active_side = "CE" if decision == "CALL BUY" else "PE" if decision == "PUT BUY" else None
+candidate_side = best_plan["side"] if best_plan else None
+
+def render_plan_native(plan, label, active=False, candidate=False):
     """Render the trade plan with native Streamlit components.
 
     This intentionally avoids nested HTML divs because Streamlit's Markdown/HTML
@@ -1698,10 +1720,16 @@ def render_plan_native(plan, label, selected=False):
         with header_left:
             st.markdown(f"### {icon} {label} BUY")
         with header_right:
-            if selected:
-                st.markdown("**★ SELECTED**")
+            if active:
+                st.markdown("**★ ACTIVE TRADE**")
+            elif candidate:
+                st.markdown("**◉ CANDIDATE ONLY**")
 
         st.markdown(f"## {plan['strike']:.0f} {contract}")
+        if active:
+            st.success("ACTIONABLE: follow the entry trigger and risk levels below.")
+        elif candidate:
+            st.info("REFERENCE ONLY: this is the strongest current candidate, but the engine says NO TRADE. Do not enter.")
 
         values = [
             ("Entry", fmt_price(plan.get("entry"))),
@@ -1731,13 +1759,13 @@ def render_plan_native(plan, label, selected=False):
 
 p1, p2 = st.columns(2)
 with p1:
-    render_plan_native(ce_plan, "CALL", selected_side == "CE")
+    render_plan_native(ce_plan, "CALL", active_side == "CE", candidate_side == "CE" and active_side is None)
 with p2:
-    render_plan_native(pe_plan, "PUT", selected_side == "PE")
+    render_plan_native(pe_plan, "PUT", active_side == "PE", candidate_side == "PE" and active_side is None)
 
 # ---------- Entry / Exit ----------
 st.markdown("<div class='section-heading'>📍 ENTRY / EXIT</div>", unsafe_allow_html=True)
-if best_plan:
+if best_plan and decision in {"CALL BUY", "PUT BUY"}:
     entry_distance = abs(spot - best_plan["trigger_level"])
     e1, e2, e3, e4, e5 = st.columns(5)
     values = [
@@ -1752,22 +1780,35 @@ if best_plan:
             st.markdown(f"<div class='entry-card'><span>{title}</span><b>{value}</b><small>{note}</small></div>", unsafe_allow_html=True)
     st.markdown(f"<div class='exit-rule'><span>EXIT RULE</span><b>{best_plan['exit']}</b></div>", unsafe_allow_html=True)
 else:
-    st.info("No valid trade plan is available from the current option chain.")
+    if best_plan:
+        st.warning("NO TRADE: entry, stop-loss and target levels are shown only as reference. Wait for the engine to produce CALL BUY or PUT BUY before entering.")
+    else:
+        st.info("No valid trade plan is available from the current option chain.")
 
 # ---------- Why this trade ----------
-st.markdown("<div class='section-heading'>💡 WHY THIS TRADE?</div>", unsafe_allow_html=True)
+section_title = "💡 WHY THIS TRADE?" if decision in {"CALL BUY", "PUT BUY"} else "💡 WHY NO TRADE?"
+st.markdown(f"<div class='section-heading'>{section_title}</div>", unsafe_allow_html=True)
 why_items = []
 if best_plan:
     side_name = "CALL" if best_plan["side"] == "CE" else "PUT"
-    desired = "Bullish" if best_plan["side"] == "CE" else "Bearish"
-    why_items += [
-        f"{tf5['trend']} 5m trend supports the {side_name} direction.",
-        f"{tf30['trend']} 30m trend and {daily_tech['trend']} daily trend are part of the multi-timeframe check.",
-        f"Price is {'above' if spot >= vwap_value else 'below'} the 5m VWAP at {fmt_price(vwap_value)}.",
-        f"OI structure shows support at {fmt_price(support)} and resistance at {fmt_price(resistance)}.",
-        f"Selected option PoP is {_num_or_dash(best_plan['pop'], 1)}% with Delta {_num_or_dash(best_plan['delta'], 2)}.",
-        f"Option spread is {_num_or_dash(best_plan['spread_pct'], 1)}% with volume {fmt_num(best_plan['volume'])}.",
-    ]
+    if decision in {"CALL BUY", "PUT BUY"}:
+        why_items += [
+            f"{tf5['trend']} 5m trend supports the {side_name} direction.",
+            f"{tf30['trend']} 30m trend and {daily_tech['trend']} daily trend are part of the multi-timeframe check.",
+            f"Price is {'above' if spot >= vwap_value else 'below'} the 5m VWAP at {fmt_price(vwap_value)}.",
+            f"OI structure shows support at {fmt_price(support)} and resistance at {fmt_price(resistance)}.",
+            f"Active option PoP is {_num_or_dash(best_plan['pop'], 1)}% with Delta {_num_or_dash(best_plan['delta'], 2)}.",
+            f"Option spread is {_num_or_dash(best_plan['spread_pct'], 1)}% with volume {fmt_num(best_plan['volume'])}.",
+        ]
+    else:
+        why_items += [
+            f"The {side_name} is only the strongest current candidate; it is NOT an approved entry.",
+            f"Market direction is {overall_direction} and only {overall_alignment}/3 timeframes align with the candidate.",
+            f"5m trend is {tf5['trend']}; 30m is {tf30['trend']}; daily is {daily_tech['trend']}.",
+            f"Price is {'above' if spot >= vwap_value else 'below'} the 5m VWAP at {fmt_price(vwap_value)}.",
+            f"OI structure shows support at {fmt_price(support)} and resistance at {fmt_price(resistance)}.",
+            f"Candidate option PoP is {_num_or_dash(best_plan['pop'], 1)}% with Delta {_num_or_dash(best_plan['delta'], 2)}.",
+        ]
     if best_plan["fail_reasons"]:
         why_items.append("⚠ " + "; ".join(best_plan["fail_reasons"]))
 else:
