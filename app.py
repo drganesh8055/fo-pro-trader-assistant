@@ -3,7 +3,6 @@ import json
 import threading
 import time
 from datetime import date, datetime, timedelta
-from urllib.parse import quote
 from zoneinfo import ZoneInfo
 
 import numpy as np
@@ -11,6 +10,7 @@ import pandas as pd
 import requests
 import streamlit as st
 
+# Optional auto refresh
 try:
     from streamlit_autorefresh import st_autorefresh
 except Exception:
@@ -18,7 +18,7 @@ except Exception:
 
 
 # ============================================================
-# FO PRO TRADER ASSISTANT — LIVE UPSTOX VERSION
+# PAGE CONFIG
 # ============================================================
 
 st.set_page_config(
@@ -28,797 +28,499 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
-API_BASE = "https://api.upstox.com"
+
+# ============================================================
+# GLOBAL SETTINGS
+# ============================================================
+
 IST = ZoneInfo("Asia/Kolkata")
+
+FNO_MASTER_URL = (
+    "https://assets.upstox.com/market-quote/instruments/exchange/NSE.json.gz"
+)
+
+API_BASE = "https://api.upstox.com"
+
+_API_REQUEST_LOCK = threading.Lock()
+_LAST_API_REQUEST = 0.0
+_MIN_API_GAP = 0.50
 
 
 # ============================================================
-# COMPACT 3:4 STYLE / RESPONSIVE UI
+# CSS
 # ============================================================
 
 st.markdown(
     """
 <style>
 
+html, body, [class*="css"] {
+    font-family: Inter, -apple-system, BlinkMacSystemFont, "Segoe UI",
+                 Roboto, Helvetica, Arial, sans-serif;
+}
+
 .stApp {
-    background:#f4f7fa;
+    background: #f4f7fb;
 }
 
 .block-container {
-    max-width:1080px !important;
-    padding-top:0.65rem !important;
-    padding-bottom:1.8rem !important;
-    padding-left:1rem !important;
-    padding-right:1rem !important;
+    max-width: 1180px;
+    margin: 0 auto;
+    padding: 0.65rem 0.85rem 2rem;
 }
 
-/* ---------- Sidebar ---------- */
-
-[data-testid="stSidebar"] {
-    background:#f8fafc;
-    border-right:1px solid #e5e9ef;
+/* Remove excessive Streamlit spacing */
+div[data-testid="stVerticalBlock"] {
+    gap: 0.55rem;
 }
 
-[data-testid="stSidebar"] .block-container {
-    padding-top:1rem !important;
-    max-width:none !important;
+div[data-testid="stHorizontalBlock"] {
+    gap: 0.65rem;
 }
 
-/* ---------- Header ---------- */
-
-.topbar {
-    background:linear-gradient(135deg,#0d2742 0%,#173f63 58%,#21577f 100%);
-    color:#fff;
-    border-radius:16px;
-    padding:18px 20px;
-    margin-bottom:14px;
-    box-shadow:0 5px 18px rgba(13,39,66,.12);
+/* Header */
+.fo-header {
+    background: linear-gradient(135deg, #071a33 0%, #0d2a4f 100%);
+    color: white;
+    border-radius: 18px;
+    padding: 18px 21px;
+    margin-bottom: 12px;
+    box-shadow: 0 8px 24px rgba(7, 26, 51, 0.14);
 }
 
-.topbar-inner {
-    display:flex;
-    justify-content:space-between;
-    align-items:center;
-    gap:15px;
+.fo-header-title {
+    font-size: 25px;
+    font-weight: 800;
+    letter-spacing: -0.4px;
+    margin: 0;
 }
 
-.topbar-title {
-    font-size:25px;
-    line-height:1.1;
-    font-weight:900;
-    letter-spacing:-.4px;
+.fo-header-sub {
+    font-size: 12px;
+    opacity: 0.78;
+    margin-top: 4px;
 }
 
-.topbar-sub {
-    margin-top:5px;
-    font-size:11px;
-    opacity:.78;
+/* Status */
+.status-live {
+    background: linear-gradient(135deg, #e8f8ef, #dff5e8);
+    border: 1px solid #b7e5c8;
+    color: #126b39;
+    border-radius: 14px;
+    padding: 12px 15px;
+    margin-bottom: 10px;
 }
 
-.data-status-live,
-.data-status-closed {
-    min-width:150px;
-    text-align:center;
-    padding:12px 15px;
-    border-radius:11px;
-    color:white;
-    font-size:11px;
-    font-weight:900;
-    letter-spacing:.6px;
+.status-closed {
+    background: linear-gradient(135deg, #f2f4f7, #e9edf2);
+    border: 1px solid #d6dce4;
+    color: #536273;
+    border-radius: 14px;
+    padding: 12px 15px;
+    margin-bottom: 10px;
 }
 
-.data-status-live {
-    background:#16a34a;
-    box-shadow:0 3px 12px rgba(22,163,74,.28);
-}
-
-.data-status-closed {
-    background:#dc2626;
-    box-shadow:0 3px 12px rgba(220,38,38,.22);
-}
-
-/* ---------- Instrument Hero ---------- */
-
-.instrument-card {
-    background:#fff;
-    border:1px solid #e4e9ef;
-    border-radius:15px;
-    padding:15px 18px;
-    margin-bottom:12px;
-    box-shadow:0 2px 9px rgba(16,42,67,.035);
-}
-
-.instrument-name {
-    font-size:21px;
-    font-weight:900;
-    color:#17212f;
-}
-
-.instrument-sub {
-    color:#7b8794;
-    font-size:11px;
-    margin-top:3px;
-}
-
-.hero-price {
-    font-size:26px;
-    font-weight:900;
-    color:#17212f;
-    line-height:1;
-}
-
-.change-positive {
-    color:#16803c;
-    font-weight:800;
-    font-size:11px;
-}
-
-.change-negative {
-    color:#b4232f;
-    font-weight:800;
-    font-size:11px;
-}
-
-/* ---------- Section ---------- */
-
-.section-heading {
-    font-size:16px;
-    font-weight:900;
-    color:#182230;
-    margin:18px 0 8px;
-    letter-spacing:.15px;
-}
-
-/* ---------- Metric Cards ---------- */
-
-.metric-card {
-    background:#fff;
-    border:1px solid #e5e9ef;
-    border-radius:13px;
-    padding:13px 14px;
-    min-height:94px;
-    box-shadow:0 2px 8px rgba(16,42,67,.035);
-}
-
-.metric-card span {
-    display:block;
-    color:#7b8794;
-    font-size:9px;
-    font-weight:900;
-    letter-spacing:.65px;
-}
-
-.metric-card b {
-    display:block;
-    color:#17212f;
-    font-size:18px;
-    font-weight:900;
-    margin-top:7px;
-    line-height:1.1;
-}
-
-.metric-card small {
-    display:block;
-    color:#a0a8b2;
-    font-size:9px;
-    margin-top:6px;
-}
-
-.metric-positive b,
-.metric-support b {
-    color:#16803c;
-}
-
-.metric-negative b,
-.metric-resistance b {
-    color:#b4232f;
-}
-
-/* ---------- Decision ---------- */
-
-.decision-card {
-    background:#fff;
-    border:1px solid #e2e7ed;
-    border-radius:16px;
-    padding:20px;
-    box-shadow:0 3px 12px rgba(16,42,67,.045);
-}
-
-.decision-call {
-    border-color:#b9e2c7;
-    background:linear-gradient(180deg,#f3fbf6,#fff);
-}
-
-.decision-put {
-    border-color:#efc1c6;
-    background:linear-gradient(180deg,#fff6f7,#fff);
-}
-
-.decision-neutral {
-    background:#fbfcfd;
-}
-
-.decision-main {
-    text-align:center;
-    font-size:28px;
-    font-weight:950;
-    line-height:1.1;
-}
-
-.decision-call .decision-main {
-    color:#147a3d;
-}
-
-.decision-put .decision-main {
-    color:#b4232f;
-}
-
-.decision-neutral .decision-main {
-    color:#475467;
-}
-
-.decision-sub {
-    text-align:center;
-    color:#667085;
-    font-size:11px;
-    margin:7px 0 16px;
-}
-
-.decision-stat {
-    background:#fff;
-    border:1px solid #e8ebef;
-    border-radius:10px;
-    padding:10px;
-    text-align:center;
-}
-
-.decision-stat span {
-    display:block;
-    color:#7b8794;
-    font-size:9px;
-    font-weight:900;
-}
-
-.decision-stat b {
-    display:block;
-    margin-top:5px;
-    color:#17212f;
-    font-size:17px;
-}
-
-/* ---------- Status ---------- */
-
-.status-panel {
-    border-radius:14px;
-    padding:16px;
-    border:1px solid #e2e7ed;
-    background:#fff;
-}
-
-.status-green {
-    border-color:#b9e2c7;
-    background:#f4fbf6;
-}
-
-.status-yellow {
-    border-color:#f1d79b;
-    background:#fffbf1;
-}
-
-.status-red {
-    border-color:#efc1c6;
-    background:#fff6f7;
-}
-
-.status-grey {
-    border-color:#dfe4ea;
-    background:#f8fafc;
+.status-error {
+    background: #fff0f0;
+    border: 1px solid #f1c1c1;
+    color: #a52222;
+    border-radius: 14px;
+    padding: 12px 15px;
+    margin-bottom: 10px;
 }
 
 .status-title {
-    text-align:center;
-    font-size:19px;
-    font-weight:950;
-    margin-bottom:13px;
+    font-size: 11px;
+    text-transform: uppercase;
+    font-weight: 700;
+    letter-spacing: 0.6px;
 }
 
-.status-green .status-title {
-    color:#147a3d;
+.status-value {
+    font-size: 17px;
+    font-weight: 800;
+    margin-top: 2px;
 }
 
-.status-yellow .status-title {
-    color:#9a6700;
+/* Cards */
+.card {
+    background: white;
+    border: 1px solid #e5eaf0;
+    border-radius: 16px;
+    padding: 15px;
+    box-shadow: 0 3px 12px rgba(15, 31, 51, 0.045);
+    margin-bottom: 10px;
 }
 
-.status-red .status-title {
-    color:#b4232f;
+.card-title {
+    color: #14253d;
+    font-size: 14px;
+    font-weight: 800;
+    margin-bottom: 8px;
 }
 
-.status-grey .status-title {
-    color:#475467;
+.card-subtitle {
+    color: #728096;
+    font-size: 11px;
 }
 
-.status-grid {
-    display:grid;
-    grid-template-columns:repeat(3,1fr);
-    gap:9px;
+/* Decision */
+.decision-card {
+    background: white;
+    border: 1px solid #e3e8ee;
+    border-radius: 18px;
+    padding: 18px;
+    box-shadow: 0 5px 18px rgba(15, 31, 51, 0.06);
+    margin-bottom: 11px;
 }
 
-.status-box {
-    background:#fff;
-    border:1px solid #e7ebef;
-    border-radius:9px;
-    padding:10px;
-    text-align:center;
+.decision-no {
+    border-left: 6px solid #718096;
 }
 
-.status-box span {
-    display:block;
-    font-size:9px;
-    font-weight:900;
-    color:#7b8794;
+.decision-call {
+    border-left: 6px solid #149447;
 }
 
-.status-box b {
-    display:block;
-    font-size:16px;
-    color:#17212f;
-    margin-top:5px;
+.decision-put {
+    border-left: 6px solid #d23b3b;
 }
 
-.status-note {
-    text-align:center;
-    color:#667085;
-    font-size:10px;
-    line-height:1.5;
-    margin-top:10px;
+.decision-wait {
+    border-left: 6px solid #d79b18;
 }
 
-/* ---------- Checklist ---------- */
-
-.check-card {
-    background:#fff;
-    border:1px solid #e5e9ef;
-    border-radius:14px;
-    padding:7px 15px;
+.decision-label {
+    font-size: 10px;
+    color: #738095;
+    text-transform: uppercase;
+    font-weight: 800;
+    letter-spacing: 0.7px;
 }
 
-.check-row {
-    display:grid;
-    grid-template-columns:1.35fr .8fr 2fr;
-    gap:8px;
-    align-items:center;
-    padding:10px 2px;
-    border-bottom:1px solid #eef1f4;
+.decision-value {
+    font-size: 29px;
+    line-height: 1.05;
+    font-weight: 900;
+    color: #17283f;
+    margin-top: 3px;
 }
 
-.check-row:last-of-type {
-    border-bottom:0;
+.decision-call .decision-value {
+    color: #128441;
 }
 
-.check-label {
-    font-size:11px;
-    font-weight:800;
-    color:#344054;
+.decision-put .decision-value {
+    color: #c53232;
 }
 
-.check-state {
-    font-size:10px;
-    font-weight:900;
+.decision-wait .decision-value {
+    color: #a8790d;
 }
 
-.check-detail {
-    color:#98a2b3;
-    font-size:9px;
+.decision-sub {
+    font-size: 12px;
+    color: #6d7989;
+    margin-top: 7px;
 }
 
-.check-pass {
-    color:#16803c;
+.decision-stats {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    margin-top: 13px;
 }
 
-.check-wait {
-    color:#9a6700;
+.stat-pill {
+    background: #f5f7fa;
+    border: 1px solid #e4e9ef;
+    border-radius: 10px;
+    padding: 7px 10px;
+    min-width: 88px;
 }
 
-.check-fail {
-    color:#b4232f;
+.stat-pill span {
+    display: block;
+    font-size: 9px;
+    color: #7b8798;
+    text-transform: uppercase;
+    font-weight: 700;
 }
 
-.check-total {
-    display:flex;
-    justify-content:space-between;
-    padding:11px 2px 5px;
-    color:#7b8794;
-    font-size:10px;
-    font-weight:900;
+.stat-pill b {
+    display: block;
+    font-size: 13px;
+    color: #18283d;
+    margin-top: 2px;
 }
 
-.check-total b {
-    color:#17212f;
-    font-size:16px;
+/* Metric */
+.metric-card {
+    background: white;
+    border: 1px solid #e5eaf0;
+    border-radius: 14px;
+    padding: 12px;
+    min-height: 75px;
 }
 
-/* ---------- Plan ---------- */
+.metric-label {
+    font-size: 9px;
+    color: #7a8798;
+    text-transform: uppercase;
+    font-weight: 800;
+    letter-spacing: 0.4px;
+}
 
+.metric-value {
+    font-size: 18px;
+    color: #17283f;
+    font-weight: 850;
+    margin-top: 4px;
+}
+
+/* Trade plan */
 .plan-card {
-    background:#fff;
-    border:1px solid #e3e8ee;
-    border-radius:15px;
-    padding:15px;
-    box-shadow:0 2px 9px rgba(16,42,67,.035);
+    background: white;
+    border: 1px solid #e3e8ef;
+    border-radius: 16px;
+    padding: 15px;
+    margin-bottom: 10px;
 }
 
-.plan-call {
-    border-top:4px solid #16a34a;
-}
-
-.plan-put {
-    border-top:4px solid #dc2626;
+.plan-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 8px;
+    margin-bottom: 12px;
 }
 
 .plan-title {
-    font-size:15px;
-    font-weight:950;
-    color:#17212f;
+    font-size: 16px;
+    font-weight: 850;
+    color: #17283f;
 }
 
-.plan-call .plan-title {
-    color:#147a3d;
+.badge {
+    display: inline-block;
+    border-radius: 999px;
+    padding: 5px 9px;
+    font-size: 9px;
+    font-weight: 800;
+    letter-spacing: 0.35px;
 }
 
-.plan-put .plan-title {
-    color:#b4232f;
+.badge-green {
+    background: #e7f7ed;
+    color: #16723d;
 }
 
-.plan-strike {
-    font-size:22px;
-    font-weight:950;
-    margin:6px 0 12px;
-    color:#17212f;
+.badge-red {
+    background: #fceaea;
+    color: #a82e2e;
 }
 
-.plan-active {
-    border:1px solid #b9e2c7;
-    background:#f3fbf6;
-    border-radius:8px;
-    padding:7px;
-    text-align:center;
-    font-size:9px;
-    font-weight:900;
-    color:#147a3d;
-    margin-bottom:10px;
+.badge-yellow {
+    background: #fff5d9;
+    color: #8b6707;
+}
+
+.badge-gray {
+    background: #eef1f5;
+    color: #586779;
+}
+
+.plan-grid {
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: 7px;
+}
+
+.plan-item {
+    background: #f7f9fb;
+    border-radius: 9px;
+    padding: 8px;
+}
+
+.plan-item span {
+    display: block;
+    color: #7b8798;
+    font-size: 9px;
+    font-weight: 700;
+}
+
+.plan-item b {
+    display: block;
+    color: #17283f;
+    font-size: 13px;
+    margin-top: 3px;
+}
+
+.plan-warning {
+    margin-top: 10px;
+    background: #fff7e3;
+    border: 1px solid #f0dfad;
+    color: #7c6016;
+    border-radius: 9px;
+    padding: 8px 10px;
+    font-size: 10px;
 }
 
 .plan-reference {
-    border:1px solid #f1d79b;
-    background:#fffbf1;
-    border-radius:8px;
-    padding:7px;
-    text-align:center;
-    font-size:9px;
-    font-weight:900;
-    color:#9a6700;
-    margin-bottom:10px;
+    margin-top: 10px;
+    background: #f2f5f8;
+    border: 1px solid #e1e6ec;
+    color: #637083;
+    border-radius: 9px;
+    padding: 8px 10px;
+    font-size: 10px;
 }
 
-.plan-metric {
-    background:#f8fafc;
-    border-radius:9px;
-    padding:9px;
-    min-height:63px;
+/* Checklist */
+.check-item {
+    display: flex;
+    align-items: flex-start;
+    gap: 8px;
+    padding: 7px 0;
+    border-bottom: 1px solid #eef1f4;
 }
 
-.plan-metric span {
-    display:block;
-    color:#7b8794;
-    font-size:8px;
-    font-weight:900;
+.check-item:last-child {
+    border-bottom: 0;
 }
 
-.plan-metric b {
-    display:block;
-    color:#17212f;
-    font-size:14px;
-    margin-top:5px;
+.check-icon {
+    width: 18px;
+    height: 18px;
+    border-radius: 50%;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 10px;
+    font-weight: 900;
+    flex-shrink: 0;
 }
 
-.plan-status {
-    margin-top:10px;
-    padding:8px;
-    text-align:center;
-    border-radius:8px;
-    font-size:9px;
-    font-weight:900;
+.check-ok {
+    background: #e5f6eb;
+    color: #13743b;
 }
 
-/* ---------- Entry / Exit ---------- */
-
-.entry-card {
-    background:#fff;
-    border:1px solid #e5e9ef;
-    border-radius:12px;
-    padding:12px;
-    min-height:82px;
+.check-bad {
+    background: #fbe8e8;
+    color: #b22c2c;
 }
 
-.entry-card span {
-    display:block;
-    font-size:8px;
-    font-weight:900;
-    color:#7b8794;
-    letter-spacing:.5px;
+.check-text {
+    font-size: 11px;
+    color: #556274;
 }
 
-.entry-card b {
-    display:block;
-    font-size:16px;
-    margin-top:6px;
-    color:#17212f;
+/* OI */
+.oi-map {
+    background: #f8fafc;
+    border-radius: 12px;
+    padding: 12px;
 }
 
-.entry-card small {
-    display:block;
-    font-size:9px;
-    color:#98a2b3;
-    margin-top:5px;
+.oi-row {
+    display: flex;
+    justify-content: space-between;
+    gap: 10px;
+    padding: 6px 0;
+    font-size: 11px;
+    border-bottom: 1px solid #edf1f5;
 }
 
-.exit-rule {
-    background:#f8fafc;
-    border:1px solid #e5e9ef;
-    border-radius:11px;
-    padding:11px 13px;
-    margin-top:9px;
+.oi-row:last-child {
+    border-bottom: 0;
 }
 
-.exit-rule span {
-    display:block;
-    color:#7b8794;
-    font-size:8px;
-    font-weight:900;
+.oi-support {
+    color: #16733d;
+    font-weight: 800;
 }
 
-.exit-rule b {
-    display:block;
-    color:#344054;
-    font-size:10px;
-    line-height:1.5;
-    margin-top:4px;
+.oi-resistance {
+    color: #b32e2e;
+    font-weight: 800;
 }
 
-/* ---------- Why ---------- */
-
-.why-card {
-    background:#fff;
-    border:1px solid #e5e9ef;
-    border-radius:14px;
-    padding:7px 14px;
+/* Section title */
+.section-title {
+    font-size: 16px;
+    font-weight: 850;
+    color: #14253d;
+    margin: 12px 0 7px;
 }
 
-.why-item {
-    padding:9px 2px;
-    border-bottom:1px solid #eef1f4;
-    color:#344054;
-    font-size:10px;
-    line-height:1.45;
+/* Small explanatory text */
+.helper {
+    color: #7a8798;
+    font-size: 10px;
+    line-height: 1.45;
 }
 
-.why-item:last-child {
-    border-bottom:0;
+/* Sidebar */
+section[data-testid="stSidebar"] {
+    background: #f8fafc;
 }
 
-.why-warning {
-    color:#9a6700;
-    background:#fffbf1;
-    border-radius:7px;
-    padding:8px;
-    margin:5px 0;
+section[data-testid="stSidebar"] .block-container {
+    padding: 1rem 0.85rem;
 }
 
-/* ---------- OI Map ---------- */
-
-.sr-map {
-    display:grid;
-    grid-template-columns:1fr 1.1fr 1fr;
-    min-height:135px;
-    background:#fff;
-    border:1px solid #e5e9ef;
-    border-radius:15px;
-    overflow:hidden;
-}
-
-.sr-side {
-    display:flex;
-    flex-direction:column;
-    justify-content:center;
-    align-items:center;
-    text-align:center;
-    padding:14px;
-}
-
-.sr-side span {
-    font-size:8px;
-    font-weight:900;
-}
-
-.sr-side b {
-    font-size:21px;
-    color:#17212f;
-    margin:5px 0;
-}
-
-.sr-side small {
-    color:#7b8794;
-    font-size:9px;
-}
-
-.sr-resistance {
-    background:#fff7f7;
-}
-
-.sr-resistance span {
-    color:#b4232f;
-}
-
-.sr-support {
-    background:#f4fbf6;
-}
-
-.sr-support span {
-    color:#147a3d;
-}
-
-.sr-center {
-    display:flex;
-    flex-direction:column;
-    justify-content:center;
-    align-items:center;
-    gap:7px;
-    border-left:1px dashed #dfe4ea;
-    border-right:1px dashed #dfe4ea;
-}
-
-.room {
-    color:#98a2b3;
-    font-size:9px;
-    font-weight:800;
-}
-
-.current-price {
-    background:#f2f4f7;
-    border:1px solid #e0e5ea;
-    border-radius:18px;
-    padding:7px 11px;
-    color:#17212f;
-    font-size:13px;
-    font-weight:950;
-}
-
-/* ---------- Tabs ---------- */
-
-.stTabs [data-baseweb="tab-list"] {
-    gap:3px;
-}
-
-.stTabs [data-baseweb="tab"] {
-    font-size:10px;
-    font-weight:800;
-    padding:7px 9px;
-}
-
-/* ---------- Streamlit controls ---------- */
-
+/* Buttons */
 .stButton > button {
-    border-radius:9px;
-    font-weight:800;
+    border-radius: 10px;
+    font-weight: 750;
+    min-height: 38px;
 }
 
-div[data-testid="stMetric"] {
-    background:#fff;
-    border:1px solid #e5e9ef;
-    border-radius:10px;
-    padding:8px;
+/* Dataframe */
+div[data-testid="stDataFrame"] {
+    border-radius: 12px;
+    overflow: hidden;
 }
 
-div[data-testid="stMetricLabel"] {
-    font-size:9px !important;
+/* Inputs */
+.stTextInput input,
+.stSelectbox div[data-baseweb="select"],
+.stNumberInput input {
+    border-radius: 9px;
 }
 
-div[data-testid="stMetricValue"] {
-    font-size:18px !important;
-}
-
-.stDataFrame {
-    border-radius:10px;
-    overflow:hidden;
-}
-
-/* ---------- Mobile ---------- */
-
-@media (max-width:900px) {
+/* Mobile */
+@media (max-width: 760px) {
 
     .block-container {
-        max-width:760px !important;
-        padding-left:.7rem !important;
-        padding-right:.7rem !important;
+        padding: 0.45rem 0.55rem 1.5rem;
     }
 
-    .topbar-inner {
-        align-items:flex-start;
+    .fo-header {
+        border-radius: 13px;
+        padding: 14px;
     }
 
-    .data-status-live,
-    .data-status-closed {
-        min-width:125px;
-        font-size:9px;
-        padding:9px;
+    .fo-header-title {
+        font-size: 20px;
     }
 
-    .status-grid {
-        grid-template-columns:repeat(2,1fr);
+    .decision-card {
+        padding: 14px;
+        border-radius: 14px;
     }
 
-    .check-row {
-        grid-template-columns:1fr .9fr;
+    .decision-value {
+        font-size: 24px;
     }
 
-    .check-detail {
-        grid-column:1 / -1;
-    }
-}
-
-@media (max-width:600px) {
-
-    .block-container {
-        padding-left:.55rem !important;
-        padding-right:.55rem !important;
+    .plan-grid {
+        grid-template-columns: repeat(2, 1fr);
     }
 
-    .topbar {
-        padding:14px;
-    }
-
-    .topbar-title {
-        font-size:19px;
-    }
-
-    .topbar-sub {
-        font-size:9px;
-    }
-
-    .data-status-live,
-    .data-status-closed {
-        min-width:105px;
-        font-size:8px;
-        padding:8px;
-    }
-
-    .instrument-name {
-        font-size:17px;
-    }
-
-    .hero-price {
-        font-size:22px;
-    }
-
-    .decision-main {
-        font-size:23px;
-    }
-
-    .sr-map {
-        grid-template-columns:1fr;
-    }
-
-    .sr-center {
-        min-height:75px;
-        border-left:0;
-        border-right:0;
-        border-top:1px dashed #dfe4ea;
-        border-bottom:1px dashed #dfe4ea;
-    }
-
-    .section-heading {
-        font-size:14px;
+    .stat-pill {
+        min-width: 75px;
     }
 }
 
@@ -829,670 +531,957 @@ div[data-testid="stMetricValue"] {
 
 
 # ============================================================
+# HTML RENDER HELPER
+# ============================================================
+
+def render_html(html: str):
+    """
+    Central HTML renderer.
+
+    Important:
+    All custom HTML in this app must go through this function.
+    This prevents raw HTML from appearing as text.
+    """
+    st.markdown(html, unsafe_allow_html=True)
+
+
+# ============================================================
 # ERRORS
 # ============================================================
 
-class UpstoxError(RuntimeError):
+class UpstoxError(Exception):
     pass
 
 
 class UpstoxRateLimitError(UpstoxError):
-
-    def __init__(self, message, retry_after=30):
-        super().__init__(message)
-        self.retry_after = int(retry_after or 30)
+    pass
 
 
 # ============================================================
-# API
+# BASIC HELPERS
 # ============================================================
 
-_API_REQUEST_LOCK = threading.Lock()
-_LAST_API_REQUEST = 0.0
-_MIN_API_GAP = 0.50
+def now_ist():
+    return datetime.now(IST)
 
 
-def get_token():
-    try:
-        return str(st.secrets.get("UPSTOX_ACCESS_TOKEN", "")).strip()
-    except Exception:
-        return ""
+def market_is_open():
+    now = now_ist()
 
+    if now.weekday() >= 5:
+        return False
 
-TOKEN = get_token()
+    start = now.replace(hour=9, minute=15, second=0, microsecond=0)
+    end = now.replace(hour=15, minute=30, second=0, microsecond=0)
 
-if not TOKEN:
-    st.error(
-        "Upstox access token is not configured. Add "
-        "UPSTOX_ACCESS_TOKEN under Streamlit → App settings → Secrets."
-    )
-    st.stop()
+    return start <= now <= end
 
-
-HEADERS = {
-    "Accept": "application/json",
-    "Content-Type": "application/json",
-    "Authorization": f"Bearer {TOKEN}",
-}
-
-
-def api_get(path, params=None, timeout=20):
-
-    global _LAST_API_REQUEST
-
-    with _API_REQUEST_LOCK:
-
-        now = time.monotonic()
-        wait_for = _MIN_API_GAP - (now - _LAST_API_REQUEST)
-
-        if wait_for > 0:
-            time.sleep(wait_for)
-
-        _LAST_API_REQUEST = time.monotonic()
-
-    try:
-
-        response = requests.get(
-            f"{API_BASE}{path}",
-            headers=HEADERS,
-            params=params,
-            timeout=timeout,
-        )
-
-    except requests.RequestException as exc:
-
-        raise UpstoxError(
-            f"Network error while contacting Upstox: {exc}"
-        ) from exc
-
-    if response.status_code == 429:
-
-        retry_after = 30
-
-        try:
-            body = response.json()
-
-            if isinstance(body, dict):
-                retry_after = int(
-                    body.get("retry_after") or 30
-                )
-
-        except Exception:
-            pass
-
-        raise UpstoxRateLimitError(
-            f"Upstox rate limit reached. Please wait "
-            f"about {retry_after} seconds before refreshing.",
-            retry_after,
-        )
-
-    if response.status_code != 200:
-
-        try:
-            body = response.json()
-            message = (
-                body.get("errors")
-                or body.get("message")
-                or body
-            )
-        except Exception:
-            message = response.text[:500]
-
-        raise UpstoxError(
-            f"Upstox API {response.status_code}: {message}"
-        )
-
-    try:
-        return response.json()
-    except Exception as exc:
-        raise UpstoxError(
-            "Upstox returned invalid JSON."
-        ) from exc
-
-
-# ============================================================
-# FORMATTERS
-# ============================================================
 
 def safe_float(value, default=np.nan):
-
     try:
-        return float(value)
+        if value is None:
+            return default
+
+        if isinstance(value, str):
+            value = value.replace(",", "").replace("%", "").strip()
+
+        result = float(value)
+
+        if not np.isfinite(result):
+            return default
+
+        return result
     except Exception:
         return default
 
 
 def fmt_price(value):
+    value = safe_float(value)
 
-    x = safe_float(value)
-
-    if not np.isfinite(x):
+    if np.isnan(value):
         return "—"
 
-    if abs(x) < 1000:
-        return f"₹{x:,.2f}"
-
-    return f"₹{x:,.0f}"
+    return f"₹{value:,.2f}"
 
 
-def fmt_num(value):
+def fmt_num(value, decimals=0):
+    value = safe_float(value)
 
-    x = safe_float(value)
-
-    if not np.isfinite(x):
+    if np.isnan(value):
         return "—"
 
-    return f"{x:,.0f}"
+    if decimals == 0:
+        return f"{value:,.0f}"
+
+    return f"{value:,.{decimals}f}"
 
 
 def fmt_pct(value, decimals=1):
+    value = safe_float(value)
 
-    x = safe_float(value)
-
-    if not np.isfinite(x):
+    if np.isnan(value):
         return "—"
 
-    return f"{x:.{decimals}f}%"
+    return f"{value:.{decimals}f}%"
 
 
 def alias_symbol(symbol):
-
-    s = str(symbol).strip().upper().replace(" ", "")
-
     aliases = {
         "NIFTY50": "NIFTY",
+        "NIFTY": "NIFTY",
         "NIFTYBANK": "BANKNIFTY",
+        "BANKNIFTY": "BANKNIFTY",
         "NIFTYFIN": "FINNIFTY",
+        "FINNIFTY": "FINNIFTY",
         "MIDCAPNIFTY": "MIDCPNIFTY",
+        "MIDCPNIFTY": "MIDCPNIFTY",
     }
 
-    return aliases.get(s, s)
+    value = str(symbol or "").strip().upper()
+
+    return aliases.get(value, value)
 
 
 # ============================================================
-# SEARCH / CONTRACTS
+# UPSTOX AUTH
 # ============================================================
 
-@st.cache_data(ttl=60, show_spinner=False)
+def get_token():
+    try:
+        token = st.secrets["UPSTOX_ACCESS_TOKEN"]
+    except Exception:
+        raise UpstoxError(
+            "UPSTOX_ACCESS_TOKEN is missing from Streamlit Secrets."
+        )
+
+    token = str(token).strip()
+
+    if not token:
+        raise UpstoxError(
+            "UPSTOX_ACCESS_TOKEN is empty in Streamlit Secrets."
+        )
+
+    return token
+
+
+def get_headers():
+    return {
+        "Authorization": f"Bearer {get_token()}",
+        "Accept": "application/json",
+        "User-Agent": "FO-Pro-Trader-Assistant",
+    }
+
+
+# ============================================================
+# API REQUEST
+# ============================================================
+
+def api_get(path, params=None, timeout=20):
+    global _LAST_API_REQUEST
+
+    url = path if path.startswith("http") else API_BASE + path
+
+    with _API_REQUEST_LOCK:
+
+        elapsed = time.monotonic() - _LAST_API_REQUEST
+
+        if elapsed < _MIN_API_GAP:
+            time.sleep(_MIN_API_GAP - elapsed)
+
+        try:
+            response = requests.get(
+                url,
+                headers=get_headers(),
+                params=params or {},
+                timeout=timeout,
+            )
+        except requests.exceptions.Timeout:
+            raise UpstoxError(
+                "Network timeout while contacting Upstox. "
+                "Please try again."
+            )
+        except requests.exceptions.RequestException as exc:
+            raise UpstoxError(
+                f"Network error while contacting Upstox: {exc}"
+            )
+
+        _LAST_API_REQUEST = time.monotonic()
+
+    if response.status_code == 429:
+        raise UpstoxRateLimitError(
+            "Upstox rate limit reached. Please wait about 30 seconds "
+            "before refreshing."
+        )
+
+    if response.status_code != 200:
+        body = response.text[:500]
+
+        raise UpstoxError(
+            f"Upstox API {response.status_code}: {body}"
+        )
+
+    try:
+        return response.json()
+    except Exception:
+        raise UpstoxError(
+            "Upstox returned an invalid JSON response."
+        )
+
+
+# ============================================================
+# INSTRUMENT SEARCH
+# ============================================================
+
+@st.cache_data(ttl=600, show_spinner=False)
 def search_underlying(symbol):
-
     symbol = alias_symbol(symbol)
+
+    if not symbol:
+        raise UpstoxError("Please enter an instrument.")
 
     results = []
 
+    # First try equity/index segments
     for segment in ["EQ", "INDEX"]:
+        try:
+            response = api_get(
+                "/v2/instruments/search",
+                params={
+                    "query": symbol,
+                    "exchanges": "NSE",
+                    "segments": segment,
+                },
+            )
 
-        payload = api_get(
-            "/v2/instruments/search",
-            params={
-                "query": symbol,
-                "exchanges": "NSE",
-                "segments": segment,
-                "page_number": 1,
-                "records": 30,
-            },
-        )
+            data = response.get("data", [])
 
-        results.extend(payload.get("data", []))
+            if isinstance(data, list):
+                results.extend(data)
+
+        except UpstoxError:
+            continue
 
     if not results:
         raise UpstoxError(
-            f"No NSE instrument found for '{symbol}'."
+            f"Could not find NSE instrument for {symbol}."
         )
 
+    # Exact trading symbol first
     exact = [
         item
         for item in results
-        if str(
-            item.get("trading_symbol", "")
-        ).upper() == symbol
+        if str(item.get("trading_symbol", "")).upper() == symbol.upper()
     ]
 
     if exact:
         return exact[0]
 
-    if symbol in {
-        "NIFTY",
-        "BANKNIFTY",
-        "FINNIFTY",
-        "MIDCPNIFTY",
-    }:
-
-        indexes = [
-            x
-            for x in results
-            if x.get("segment") == "NSE_INDEX"
-        ]
-
-        if indexes:
-            return indexes[0]
-
-    equities = [
-        x
-        for x in results
-        if x.get("segment") == "NSE_EQ"
+    # Exact name
+    exact_name = [
+        item
+        for item in results
+        if str(item.get("name", "")).upper() == symbol.upper()
     ]
 
-    return equities[0] if equities else results[0]
+    if exact_name:
+        return exact_name[0]
 
+    # Prefer index
+    indexes = [
+        item
+        for item in results
+        if str(item.get("instrument_type", "")).upper() == "INDEX"
+    ]
+
+    if indexes:
+        return indexes[0]
+
+    return results[0]
+
+
+# ============================================================
+# OPTION CONTRACTS
+# ============================================================
 
 @st.cache_data(ttl=300, show_spinner=False)
 def get_contracts(underlying_key):
-
-    payload = api_get(
+    response = api_get(
         "/v2/option/contract",
         params={
-            "instrument_key": underlying_key
+            "instrument_key": underlying_key,
         },
-        timeout=30,
     )
 
-    contracts = payload.get("data", [])
+    data = response.get("data", [])
 
-    if not contracts:
-        raise UpstoxError(
-            "Upstox returned no option contracts."
-        )
+    if not isinstance(data, list):
+        raise UpstoxError("Invalid option contract response.")
 
-    return contracts
+    return data
 
 
 def available_expiries(contracts):
+    expiries = set()
 
-    today = datetime.now(IST).date().isoformat()
+    for item in contracts:
 
-    return sorted(
-        {
-            str(item.get("expiry"))
-            for item in contracts
-            if item.get("expiry")
-            and str(item.get("expiry")) >= today
-        }
-    )
+        expiry = (
+            item.get("expiry")
+            or item.get("expiry_date")
+            or item.get("expiration_date")
+        )
+
+        if expiry:
+            expiries.add(str(expiry)[:10])
+
+    today = now_ist().date()
+
+    valid = []
+
+    for expiry in expiries:
+        try:
+            d = date.fromisoformat(expiry)
+
+            if d >= today:
+                valid.append(expiry)
+
+        except Exception:
+            continue
+
+    return sorted(valid)
 
 
 # ============================================================
-# OPTION CHAIN / QUOTE
+# OPTION CHAIN
 # ============================================================
 
 @st.cache_data(ttl=45, show_spinner=False)
-def get_option_chain(
-    underlying_key,
-    expiry,
-):
-
-    payload = api_get(
+def get_option_chain(underlying_key, expiry):
+    response = api_get(
         "/v2/option/chain",
         params={
             "instrument_key": underlying_key,
             "expiry_date": expiry,
         },
-        timeout=30,
     )
 
-    rows = payload.get("data", [])
+    data = response.get("data", [])
 
-    if not rows:
-        raise UpstoxError(
-            f"No option-chain data returned for {expiry}."
+    if not isinstance(data, list):
+        raise UpstoxError("Invalid option-chain response.")
+
+    return data
+
+
+def extract_market(option):
+    if not isinstance(option, dict):
+        return {}
+
+    market = option.get("market_data")
+
+    if isinstance(market, dict):
+        return market
+
+    return option
+
+
+def extract_greeks(option):
+    if not isinstance(option, dict):
+        return {}
+
+    greeks = option.get("option_greeks")
+
+    if isinstance(greeks, dict):
+        return greeks
+
+    greeks = option.get("greeks")
+
+    if isinstance(greeks, dict):
+        return greeks
+
+    return {}
+
+
+def option_value(option, *keys):
+    market = extract_market(option)
+    greeks = extract_greeks(option)
+
+    for source in [market, greeks, option]:
+
+        if not isinstance(source, dict):
+            continue
+
+        for key in keys:
+
+            if key in source:
+                value = source.get(key)
+
+                if value is not None:
+                    return value
+
+    return None
+
+
+# ============================================================
+# NORMALIZE OPTION CHAIN
+# ============================================================
+
+def normalize_chain(rows):
+
+    columns = [
+        "Strike",
+
+        "CE Key",
+        "CE LTP",
+        "CE Bid",
+        "CE Ask",
+        "CE OI",
+        "CE Chg OI",
+        "CE Volume",
+        "CE IV",
+        "CE Delta",
+        "CE PoP",
+
+        "PE Key",
+        "PE LTP",
+        "PE Bid",
+        "PE Ask",
+        "PE OI",
+        "PE Chg OI",
+        "PE Volume",
+        "PE IV",
+        "PE Delta",
+        "PE PoP",
+    ]
+
+    records = []
+
+    if not isinstance(rows, list):
+        return pd.DataFrame(columns=columns)
+
+    for item in rows:
+
+        if not isinstance(item, dict):
+            continue
+
+        strike = safe_float(
+            item.get("strike_price")
+            or item.get("strike")
         )
 
-    return rows
+        if np.isnan(strike):
+            continue
 
+        call = (
+            item.get("call_options")
+            or item.get("ce")
+            or item.get("call")
+            or {}
+        )
+
+        put = (
+            item.get("put_options")
+            or item.get("pe")
+            or item.get("put")
+            or {}
+        )
+
+        ce_market = extract_market(call)
+        ce_greeks = extract_greeks(call)
+
+        pe_market = extract_market(put)
+        pe_greeks = extract_greeks(put)
+
+        def get_from(source1, source2, *names):
+
+            for source in [source1, source2]:
+
+                if not isinstance(source, dict):
+                    continue
+
+                for name in names:
+                    if name in source and source[name] is not None:
+                        return source[name]
+
+            return np.nan
+
+        record = {
+            "Strike": strike,
+
+            "CE Key": call.get("instrument_key"),
+            "CE LTP": safe_float(
+                get_from(ce_market, call, "ltp", "last_price")
+            ),
+            "CE Bid": safe_float(
+                get_from(ce_market, call, "bid_price", "bid")
+            ),
+            "CE Ask": safe_float(
+                get_from(ce_market, call, "ask_price", "ask")
+            ),
+            "CE OI": safe_float(
+                get_from(ce_market, call, "oi", "open_interest")
+            ),
+            "CE Chg OI": safe_float(
+                get_from(
+                    ce_market,
+                    call,
+                    "change_in_oi",
+                    "chg_oi",
+                    "oi_change",
+                )
+            ),
+            "CE Volume": safe_float(
+                get_from(ce_market, call, "volume")
+            ),
+            "CE IV": safe_float(
+                get_from(ce_greeks, ce_market, "iv", "implied_volatility")
+            ),
+            "CE Delta": safe_float(
+                get_from(ce_greeks, call, "delta")
+            ),
+            "CE PoP": safe_float(
+                get_from(
+                    ce_greeks,
+                    ce_market,
+                    "pop",
+                    "probability_of_profit",
+                    "probability_profit",
+                )
+            ),
+
+            "PE Key": put.get("instrument_key"),
+            "PE LTP": safe_float(
+                get_from(pe_market, put, "ltp", "last_price")
+            ),
+            "PE Bid": safe_float(
+                get_from(pe_market, put, "bid_price", "bid")
+            ),
+            "PE Ask": safe_float(
+                get_from(pe_market, put, "ask_price", "ask")
+            ),
+            "PE OI": safe_float(
+                get_from(pe_market, put, "oi", "open_interest")
+            ),
+            "PE Chg OI": safe_float(
+                get_from(
+                    pe_market,
+                    put,
+                    "change_in_oi",
+                    "chg_oi",
+                    "oi_change",
+                )
+            ),
+            "PE Volume": safe_float(
+                get_from(pe_market, put, "volume")
+            ),
+            "PE IV": safe_float(
+                get_from(pe_greeks, pe_market, "iv", "implied_volatility")
+            ),
+            "PE Delta": safe_float(
+                get_from(pe_greeks, put, "delta")
+            ),
+            "PE PoP": safe_float(
+                get_from(
+                    pe_greeks,
+                    pe_market,
+                    "pop",
+                    "probability_of_profit",
+                    "probability_profit",
+                )
+            ),
+        }
+
+        records.append(record)
+
+    if not records:
+        return pd.DataFrame(columns=columns)
+
+    df = pd.DataFrame(records)
+
+    for column in columns:
+        if column not in df.columns:
+            df[column] = np.nan
+
+    return df[columns].sort_values("Strike").reset_index(drop=True)
+
+
+# ============================================================
+# QUOTE
+# ============================================================
 
 @st.cache_data(ttl=30, show_spinner=False)
 def get_quote(instrument_key):
 
-    payload = api_get(
+    response = api_get(
         "/v3/market-quote/quotes",
         params={
-            "instrument_key": instrument_key
+            "instrument_key": instrument_key,
         },
     )
 
-    data = payload.get("data", {})
+    data = response.get("data", {})
 
-    if not data:
-        raise UpstoxError(
-            "No live quote returned by Upstox."
-        )
+    if not isinstance(data, dict):
+        return {}
 
-    return next(iter(data.values()))
+    # Upstox usually keys the response by instrument key
+    if instrument_key in data:
+        return data[instrument_key]
+
+    if data:
+        return next(iter(data.values()))
+
+    return {}
+
+
+def parse_quote(quote):
+
+    if not isinstance(quote, dict):
+        return np.nan, np.nan, np.nan, np.nan
+
+    last = safe_float(
+        quote.get("last_price")
+        or quote.get("ltp")
+    )
+
+    prev_close = safe_float(
+        quote.get("prev_close_price")
+        or quote.get("previous_close")
+        or quote.get("cp")
+    )
+
+    net_change = safe_float(
+        quote.get("net_change")
+        or quote.get("change")
+    )
+
+    change_pct = safe_float(
+        quote.get("percent_change")
+        or quote.get("change_percent")
+    )
+
+    ohlc = quote.get("ohlc")
+
+    if isinstance(ohlc, dict):
+
+        if np.isnan(prev_close):
+            prev_close = safe_float(
+                ohlc.get("close")
+            )
+
+        if np.isnan(last):
+            last = safe_float(
+                ohlc.get("close")
+            )
+
+    if np.isnan(net_change) and not np.isnan(last) and not np.isnan(prev_close):
+        net_change = last - prev_close
+
+    if (
+        np.isnan(change_pct)
+        and not np.isnan(last)
+        and not np.isnan(prev_close)
+        and prev_close != 0
+    ):
+        change_pct = ((last - prev_close) / prev_close) * 100
+
+    return last, prev_close, net_change, change_pct
 
 
 # ============================================================
 # CANDLES
 # ============================================================
 
-def _candle_dataframe(candles):
+def candles_to_df(response):
+
+    data = response.get("data", {})
+
+    if isinstance(data, dict):
+        candles = data.get("candles", [])
+    elif isinstance(data, list):
+        candles = data
+    else:
+        candles = []
 
     if not candles:
-        return pd.DataFrame()
-
-    df = pd.DataFrame(
-        candles,
-        columns=[
-            "timestamp",
-            "open",
-            "high",
-            "low",
-            "close",
-            "volume",
-            "oi",
-        ],
-    )
-
-    for col in [
-        "open",
-        "high",
-        "low",
-        "close",
-        "volume",
-        "oi",
-    ]:
-
-        df[col] = pd.to_numeric(
-            df[col],
-            errors="coerce",
+        return pd.DataFrame(
+            columns=[
+                "timestamp",
+                "open",
+                "high",
+                "low",
+                "close",
+                "volume",
+                "oi",
+            ]
         )
+
+    records = []
+
+    for candle in candles:
+
+        if not isinstance(candle, (list, tuple)):
+            continue
+
+        if len(candle) < 6:
+            continue
+
+        records.append(
+            {
+                "timestamp": candle[0],
+                "open": safe_float(candle[1]),
+                "high": safe_float(candle[2]),
+                "low": safe_float(candle[3]),
+                "close": safe_float(candle[4]),
+                "volume": safe_float(candle[5]),
+                "oi": safe_float(candle[6]) if len(candle) > 6 else np.nan,
+            }
+        )
+
+    df = pd.DataFrame(records)
+
+    if df.empty:
+        return df
 
     df["timestamp"] = pd.to_datetime(
         df["timestamp"],
         errors="coerce",
     )
 
-    return (
-        df
-        .dropna(subset=["timestamp"])
-        .sort_values("timestamp")
-        .reset_index(drop=True)
-    )
+    df = df.dropna(subset=["timestamp", "close"])
+
+    return df.sort_values("timestamp").reset_index(drop=True)
 
 
 @st.cache_data(ttl=90, show_spinner=False)
-def get_intraday_candles(
-    instrument_key,
-    interval=5,
-):
+def get_intraday_candles(instrument_key):
 
-    path = (
-        f"/v3/historical-candle/intraday/"
-        f"{quote(instrument_key, safe='')}/minutes/{interval}"
+    response = api_get(
+        f"/v3/historical-candle/intraday/{instrument_key}/minutes/5",
     )
 
-    payload = api_get(
-        path,
-        timeout=30,
-    )
-
-    return _candle_dataframe(
-        payload.get("data", {}).get("candles", [])
-    )
+    return candles_to_df(response)
 
 
 @st.cache_data(ttl=600, show_spinner=False)
 def get_30m_candles(instrument_key):
 
-    end_date = datetime.now(IST).date()
+    end_date = now_ist().date()
     start_date = end_date - timedelta(days=90)
 
-    path = (
-        f"/v3/historical-candle/"
-        f"{quote(instrument_key, safe='')}/minutes/30/"
-        f"{end_date.isoformat()}/{start_date.isoformat()}"
+    response = api_get(
+        f"/v3/historical-candle/{instrument_key}/30minute/"
+        f"{end_date}/{start_date}",
     )
 
-    payload = api_get(
-        path,
-        timeout=30,
-    )
-
-    return _candle_dataframe(
-        payload.get("data", {}).get("candles", [])
-    )
+    return candles_to_df(response)
 
 
 @st.cache_data(ttl=1800, show_spinner=False)
 def get_daily_candles(instrument_key):
 
-    end_date = datetime.now(IST).date()
+    end_date = now_ist().date()
     start_date = end_date - timedelta(days=220)
 
-    path = (
-        f"/v3/historical-candle/"
-        f"{quote(instrument_key, safe='')}/days/1/"
-        f"{end_date.isoformat()}/{start_date.isoformat()}"
+    response = api_get(
+        f"/v3/historical-candle/{instrument_key}/day/"
+        f"{end_date}/{start_date}",
     )
 
-    payload = api_get(
-        path,
-        timeout=30,
-    )
-
-    return _candle_dataframe(
-        payload.get("data", {}).get("candles", [])
-    )
+    return candles_to_df(response)
 
 
 # ============================================================
-# TECHNICAL ENGINE
+# TECHNICALS
 # ============================================================
 
-def _rsi(close, period=14):
+def _rsi(series, period=14):
 
-    delta = close.diff()
+    series = pd.Series(series, dtype="float64")
 
-    gain = (
-        delta.clip(lower=0)
-        .ewm(alpha=1 / period, adjust=False)
-        .mean()
-    )
+    delta = series.diff()
 
-    loss = (
-        (-delta.clip(upper=0))
-        .ewm(alpha=1 / period, adjust=False)
-        .mean()
-    )
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
 
-    rs = gain / loss.replace(0, np.nan)
+    avg_gain = gain.rolling(period).mean()
+    avg_loss = loss.rolling(period).mean()
 
-    return 100 - (100 / (1 + rs))
+    rs = avg_gain / avg_loss.replace(0, np.nan)
+
+    rsi = 100 - (100 / (1 + rs))
+
+    return rsi
 
 
-def technicals(df, spot):
+def calculate_adx(df, period=14):
 
-    if df.empty or len(df) < 20:
+    if df is None or len(df) < period + 2:
+        return np.nan
 
-        return {
-            "rsi": 50.0,
-            "ema20": spot,
-            "ema50": spot,
-            "atr": max(spot * .01, .01),
-            "trend": "Unavailable",
-            "adx": 0.0,
-            "momentum": 0.0,
-            "volume_ratio": 1.0,
-            "vwap": spot,
-        }
-
-    close = df["close"].astype(float)
-    high = df["high"].astype(float)
-    low = df["low"].astype(float)
-    volume = df["volume"].fillna(0).astype(float)
-
-    rsi = _rsi(close)
-
-    ema20 = close.ewm(
-        span=20,
-        adjust=False,
-    ).mean()
-
-    ema50 = close.ewm(
-        span=50,
-        adjust=False,
-    ).mean()
-
-    previous_close = close.shift(1)
-
-    tr = pd.concat(
-        [
-            high - low,
-            (high - previous_close).abs(),
-            (low - previous_close).abs(),
-        ],
-        axis=1,
-    ).max(axis=1)
-
-    atr = tr.ewm(
-        alpha=1 / 14,
-        adjust=False,
-    ).mean()
+    high = df["high"]
+    low = df["low"]
+    close = df["close"]
 
     up_move = high.diff()
     down_move = -low.diff()
 
-    plus_dm = pd.Series(
-        np.where(
-            (up_move > down_move) & (up_move > 0),
-            up_move,
-            0.0,
-        ),
-        index=df.index,
-    )
-
-    minus_dm = pd.Series(
-        np.where(
-            (down_move > up_move) & (down_move > 0),
-            down_move,
-            0.0,
-        ),
-        index=df.index,
-    )
-
-    atr_safe = atr.replace(0, np.nan)
-
-    plus_di = (
-        100
-        * plus_dm.ewm(
-            alpha=1 / 14,
-            adjust=False,
-        ).mean()
-        / atr_safe
-    )
-
-    minus_di = (
-        100
-        * minus_dm.ewm(
-            alpha=1 / 14,
-            adjust=False,
-        ).mean()
-        / atr_safe
-    )
-
-    dx = (
-        100
-        * (plus_di - minus_di).abs()
-        / (plus_di + minus_di).replace(0, np.nan)
-    )
-
-    adx = dx.ewm(
-        alpha=1 / 14,
-        adjust=False,
-    ).mean()
-
-    typical = (
-        high + low + close
-    ) / 3
-
-    if volume.sum() > 0:
-
-        vwap = (
-            typical * volume
-        ).cumsum() / volume.cumsum().replace(
-            0,
-            np.nan,
-        )
-
-        latest_vwap = safe_float(
-            vwap.iloc[-1],
-            spot,
-        )
-
-    else:
-        latest_vwap = spot
-
-    lookback = min(10, len(close) - 1)
-
-    if lookback > 0 and close.iloc[-1 - lookback] != 0:
-
-        momentum = (
-            close.iloc[-1]
-            / close.iloc[-1 - lookback]
-            - 1
-        ) * 100
-
-    else:
-        momentum = 0.0
-
-    vol_base = (
-        volume
-        .rolling(20)
-        .median()
-        .iloc[-1]
-    )
-
-    volume_ratio = (
-        volume.iloc[-1] / vol_base
-        if vol_base and np.isfinite(vol_base)
-        else 1.0
-    )
-
-    e20 = safe_float(
-        ema20.iloc[-1],
-        spot,
-    )
-
-    e50 = safe_float(
-        ema50.iloc[-1],
-        spot,
-    )
-
-    r = safe_float(
-        rsi.iloc[-1],
-        50,
-    )
-
-    a = safe_float(
-        atr.iloc[-1],
-        spot * .01,
-    )
-
-    adx_value = safe_float(
-        adx.iloc[-1],
+    plus_dm = np.where(
+        (up_move > down_move) & (up_move > 0),
+        up_move,
         0,
     )
 
-    bullish = spot > e20 > e50
-    bearish = spot < e20 < e50
+    minus_dm = np.where(
+        (down_move > up_move) & (down_move > 0),
+        down_move,
+        0,
+    )
 
-    if bullish:
-        trend = "Bullish"
-    elif bearish:
-        trend = "Bearish"
-    else:
-        trend = "Sideways"
+    tr1 = high - low
+    tr2 = (high - close.shift()).abs()
+    tr3 = (low - close.shift()).abs()
 
-    return {
-        "rsi": r,
-        "ema20": e20,
-        "ema50": e50,
-        "atr": max(a, spot * .001),
-        "trend": trend,
-        "adx": adx_value,
-        "momentum": momentum,
-        "volume_ratio": volume_ratio,
-        "vwap": latest_vwap,
+    tr = pd.concat(
+        [tr1, tr2, tr3],
+        axis=1,
+    ).max(axis=1)
+
+    atr = tr.rolling(period).mean()
+
+    plus_di = (
+        pd.Series(plus_dm, index=df.index)
+        .rolling(period)
+        .mean()
+        / atr
+    ) * 100
+
+    minus_di = (
+        pd.Series(minus_dm, index=df.index)
+        .rolling(period)
+        .mean()
+        / atr
+    ) * 100
+
+    dx = (
+        (plus_di - minus_di).abs()
+        / (plus_di + minus_di).replace(0, np.nan)
+    ) * 100
+
+    adx = dx.rolling(period).mean()
+
+    return safe_float(adx.iloc[-1])
+
+
+def technicals(df, spot):
+
+    result = {
+        "rsi": np.nan,
+        "ema20": np.nan,
+        "ema50": np.nan,
+        "atr": np.nan,
+        "trend": "Unknown",
+        "adx": np.nan,
+        "momentum": 0.0,
+        "volume_ratio": np.nan,
+        "vwap": np.nan,
     }
+
+    if df is None or df.empty or len(df) < 20:
+        return result
+
+    close = df["close"].astype(float)
+
+    result["rsi"] = safe_float(
+        _rsi(close).iloc[-1]
+    )
+
+    result["ema20"] = safe_float(
+        close.ewm(span=20, adjust=False).mean().iloc[-1]
+    )
+
+    result["ema50"] = safe_float(
+        close.ewm(span=50, adjust=False).mean().iloc[-1]
+    )
+
+    tr1 = df["high"] - df["low"]
+    tr2 = (df["high"] - df["close"].shift()).abs()
+    tr3 = (df["low"] - df["close"].shift()).abs()
+
+    tr = pd.concat(
+        [tr1, tr2, tr3],
+        axis=1,
+    ).max(axis=1)
+
+    result["atr"] = safe_float(
+        tr.rolling(14).mean().iloc[-1]
+    )
+
+    spot_value = safe_float(spot)
+
+    if not np.isnan(spot_value):
+        if (
+            not np.isnan(result["ema20"])
+            and not np.isnan(result["ema50"])
+        ):
+            if spot_value > result["ema20"] > result["ema50"]:
+                result["trend"] = "Bullish"
+            elif spot_value < result["ema20"] < result["ema50"]:
+                result["trend"] = "Bearish"
+            else:
+                result["trend"] = "Sideways"
+
+    if len(close) >= 6:
+        previous = safe_float(close.iloc[-6])
+
+        if previous != 0 and not np.isnan(previous):
+            result["momentum"] = (
+                (safe_float(close.iloc[-1]) - previous)
+                / previous
+            ) * 100
+
+    if "volume" in df.columns:
+
+        volume = df["volume"].astype(float)
+
+        recent_volume = safe_float(volume.iloc[-1])
+
+        average_volume = safe_float(
+            volume.tail(20).mean()
+        )
+
+        if (
+            not np.isnan(recent_volume)
+            and not np.isnan(average_volume)
+            and average_volume > 0
+        ):
+            result["volume_ratio"] = (
+                recent_volume / average_volume
+            )
+
+    typical_price = (
+        df["high"] + df["low"] + df["close"]
+    ) / 3
+
+    if "volume" in df.columns:
+
+        volume = df["volume"].fillna(0)
+
+        cumulative_volume = volume.cumsum()
+
+        cumulative_value = (
+            typical_price * volume
+        ).cumsum()
+
+        if safe_float(cumulative_volume.iloc[-1]) > 0:
+            result["vwap"] = safe_float(
+                cumulative_value.iloc[-1]
+                / cumulative_volume.iloc[-1]
+            )
+
+    result["adx"] = calculate_adx(df)
+
+    return result
 
 
 def overall_trend(tf5, tf30, daily):
@@ -1507,383 +1496,208 @@ def overall_trend(tf5, tf30, daily):
     bearish = trends.count("Bearish")
 
     if bullish >= 2 and bearish == 0:
-        return "Bullish", bullish
+        return "Bullish"
 
     if bearish >= 2 and bullish == 0:
-        return "Bearish", bearish
+        return "Bearish"
 
-    return "Mixed", max(bullish, bearish)
+    return "Mixed"
 
 
-def timeframe_score(
-    side,
-    tf5,
-    tf30,
-    daily,
-):
+def timeframe_score(side, tf5, tf30, daily):
 
-    desired = (
-        "Bullish"
-        if side == "CE"
-        else "Bearish"
-    )
-
-    opposite = (
-        "Bearish"
-        if side == "CE"
-        else "Bullish"
-    )
+    desired = "Bullish" if side == "CE" else "Bearish"
 
     score = 0
-    alignment = 0
 
     for tf in [tf5, tf30, daily]:
 
-        if tf.get("trend") == desired:
+        trend = tf.get("trend")
 
+        if trend == desired:
             score += 10
-            alignment += 1
 
-        elif tf.get("trend") == "Sideways":
-
+        elif trend == "Sideways":
             score += 3
 
-        elif tf.get("trend") == opposite:
-
+        elif trend in {"Bullish", "Bearish"}:
             score -= 8
 
-    return float(
-        np.clip(score, 0, 30)
-    ), alignment
+    return int(np.clip(score, 0, 30))
 
 
 # ============================================================
-# OI
+# OI LEVELS
 # ============================================================
 
 def oi_levels(chain, spot):
 
-    valid = chain.dropna(
-        subset=["Strike"]
-    ).copy()
+    spot = safe_float(spot)
 
-    if valid.empty or not np.isfinite(spot):
+    result = {
+        "support": np.nan,
+        "resistance": np.nan,
+        "major_support": np.nan,
+        "major_resistance": np.nan,
+        "pcr": np.nan,
+        "support_walls": [],
+        "resistance_walls": [],
+    }
 
-        return (
-            spot,
-            spot,
-            np.nan,
-            {
-                "put_walls": [],
-                "call_walls": [],
-                "major_support": spot,
-                "major_resistance": spot,
-                "nearest_support": spot,
-                "nearest_resistance": spot,
-            },
-        )
+    if chain is None or chain.empty:
+        return result
 
-    band = valid[
-        (valid["Strike"] >= spot * .90)
-        & (valid["Strike"] <= spot * 1.10)
+    if np.isnan(spot):
+        return result
+
+    local = chain[
+        (chain["Strike"] >= spot * 0.90)
+        & (chain["Strike"] <= spot * 1.10)
     ].copy()
 
-    if band.empty:
-        band = valid.copy()
+    if local.empty:
+        local = chain.copy()
 
-    for col in [
-        "PE OI",
-        "CE OI",
-        "PE Chg OI",
-        "CE Chg OI",
-    ]:
+    puts_below = local[
+        local["Strike"] <= spot
+    ].copy()
 
-        band[col] = pd.to_numeric(
-            band[col],
-            errors="coerce",
-        ).fillna(0)
+    calls_above = local[
+        local["Strike"] >= spot
+    ].copy()
 
-    below = band[
-        band["Strike"] <= spot
-    ]
+    if not puts_below.empty:
 
-    above = band[
-        band["Strike"] >= spot
-    ]
+        puts_below = puts_below.dropna(
+            subset=["PE OI"]
+        )
 
-    nearest_support = (
-        float(below["Strike"].max())
-        if not below.empty
-        else float(band["Strike"].min())
-    )
+        if not puts_below.empty:
 
-    nearest_resistance = (
-        float(above["Strike"].min())
-        if not above.empty
-        else float(band["Strike"].max())
-    )
-
-    support_row = (
-        below.loc[below["PE OI"].idxmax()]
-        if not below.empty
-        else band.loc[band["PE OI"].idxmax()]
-    )
-
-    resistance_row = (
-        above.loc[above["CE OI"].idxmax()]
-        if not above.empty
-        else band.loc[band["CE OI"].idxmax()]
-    )
-
-    major_support = float(
-        support_row["Strike"]
-    )
-
-    major_resistance = float(
-        resistance_row["Strike"]
-    )
-
-    call_oi = float(
-        band["CE OI"].sum()
-    )
-
-    put_oi = float(
-        band["PE OI"].sum()
-    )
-
-    pcr = (
-        put_oi / call_oi
-        if call_oi > 0
-        else np.nan
-    )
-
-    return (
-        major_support,
-        major_resistance,
-        pcr,
-        {
-            "put_walls": band.nlargest(
-                3,
+            row = puts_below.sort_values(
                 "PE OI",
-            )[
-                ["Strike", "PE OI", "PE Chg OI"]
-            ].to_dict("records"),
+                ascending=False,
+            ).iloc[0]
 
-            "call_walls": band.nlargest(
-                3,
+            result["major_support"] = safe_float(
+                row["Strike"]
+            )
+
+    if not calls_above.empty:
+
+        calls_above = calls_above.dropna(
+            subset=["CE OI"]
+        )
+
+        if not calls_above.empty:
+
+            row = calls_above.sort_values(
                 "CE OI",
-            )[
-                ["Strike", "CE OI", "CE Chg OI"]
-            ].to_dict("records"),
+                ascending=False,
+            ).iloc[0]
 
-            "major_support": major_support,
-            "major_resistance": major_resistance,
-            "nearest_support": nearest_support,
-            "nearest_resistance": nearest_resistance,
-
-            "support_room_pct":
-                max(
-                    (spot - major_support)
-                    / max(spot, 1)
-                    * 100,
-                    0,
-                ),
-
-            "resistance_room_pct":
-                max(
-                    (major_resistance - spot)
-                    / max(spot, 1)
-                    * 100,
-                    0,
-                ),
-        },
-    )
-
-
-# ============================================================
-# NORMALIZE CHAIN
-# ============================================================
-
-def normalize_chain(rows):
-
-    records = []
-
-    for item in rows:
-
-        strike = safe_float(
-            item.get("strike_price")
-        )
-
-        call = (
-            item.get("call_options")
-            or {}
-        )
-
-        put = (
-            item.get("put_options")
-            or {}
-        )
-
-        call_market = (
-            call.get("market_data")
-            or {}
-        )
-
-        call_greeks = (
-            call.get("option_greeks")
-            or {}
-        )
-
-        put_market = (
-            put.get("market_data")
-            or {}
-        )
-
-        put_greeks = (
-            put.get("option_greeks")
-            or {}
-        )
-
-        call_oi = safe_float(
-            call_market.get("oi"),
-            0,
-        )
-
-        put_oi = safe_float(
-            put_market.get("oi"),
-            0,
-        )
-
-        call_prev_oi = safe_float(
-            call_market.get("prev_oi"),
-            0,
-        )
-
-        put_prev_oi = safe_float(
-            put_market.get("prev_oi"),
-            0,
-        )
-
-        records.append(
-            {
-                "Strike": strike,
-
-                "CE Key":
-                    call.get("instrument_key"),
-
-                "CE LTP":
-                    safe_float(
-                        call_market.get("ltp")
-                    ),
-
-                "CE Bid":
-                    safe_float(
-                        call_market.get("bid_price")
-                    ),
-
-                "CE Ask":
-                    safe_float(
-                        call_market.get("ask_price")
-                    ),
-
-                "CE OI": call_oi,
-
-                "CE Chg OI":
-                    call_oi - call_prev_oi,
-
-                "CE Volume":
-                    safe_float(
-                        call_market.get("volume"),
-                        0,
-                    ),
-
-                "CE IV":
-                    safe_float(
-                        call_greeks.get("iv")
-                    ),
-
-                "CE Delta":
-                    safe_float(
-                        call_greeks.get("delta")
-                    ),
-
-                "CE PoP":
-                    safe_float(
-                        call_greeks.get("pop")
-                    ),
-
-                "PE Key":
-                    put.get("instrument_key"),
-
-                "PE LTP":
-                    safe_float(
-                        put_market.get("ltp")
-                    ),
-
-                "PE Bid":
-                    safe_float(
-                        put_market.get("bid_price")
-                    ),
-
-                "PE Ask":
-                    safe_float(
-                        put_market.get("ask_price")
-                    ),
-
-                "PE OI": put_oi,
-
-                "PE Chg OI":
-                    put_oi - put_prev_oi,
-
-                "PE Volume":
-                    safe_float(
-                        put_market.get("volume"),
-                        0,
-                    ),
-
-                "PE IV":
-                    safe_float(
-                        put_greeks.get("iv")
-                    ),
-
-                "PE Delta":
-                    safe_float(
-                        put_greeks.get("delta")
-                    ),
-
-                "PE PoP":
-                    safe_float(
-                        put_greeks.get("pop")
-                    ),
-            }
-        )
-
-    df = pd.DataFrame(records)
-
-    if df.empty:
-        return df
-
-    return (
-        df
-        .dropna(subset=["Strike"])
-        .sort_values("Strike")
-        .reset_index(drop=True)
-    )
-
-
-def nearest_row(chain, strike):
+            result["major_resistance"] = safe_float(
+                row["Strike"]
+            )
 
     if (
-        chain.empty
-        or not np.isfinite(strike)
+        not np.isnan(result["major_support"])
     ):
+        result["support"] = result["major_support"]
+    else:
+        lower = local[
+            local["Strike"] <= spot
+        ]
+
+        if not lower.empty:
+            result["support"] = safe_float(
+                lower["Strike"].max()
+            )
+
+    if (
+        not np.isnan(result["major_resistance"])
+    ):
+        result["resistance"] = result["major_resistance"]
+    else:
+        upper = local[
+            local["Strike"] >= spot
+        ]
+
+        if not upper.empty:
+            result["resistance"] = safe_float(
+                upper["Strike"].min()
+            )
+
+    ce_oi = safe_float(
+        chain["CE OI"].fillna(0).sum(),
+        0,
+    )
+
+    pe_oi = safe_float(
+        chain["PE OI"].fillna(0).sum(),
+        0,
+    )
+
+    if ce_oi > 0:
+        result["pcr"] = pe_oi / ce_oi
+
+    # OI walls
+    for _, row in local.sort_values(
+        "PE OI",
+        ascending=False,
+    ).head(5).iterrows():
+
+        strike = safe_float(row["Strike"])
+        oi = safe_float(row["PE OI"])
+
+        if (
+            not np.isnan(strike)
+            and not np.isnan(oi)
+            and oi > 0
+        ):
+            result["support_walls"].append(
+                (strike, oi)
+            )
+
+    for _, row in local.sort_values(
+        "CE OI",
+        ascending=False,
+    ).head(5).iterrows():
+
+        strike = safe_float(row["Strike"])
+        oi = safe_float(row["CE OI"])
+
+        if (
+            not np.isnan(strike)
+            and not np.isnan(oi)
+            and oi > 0
+        ):
+            result["resistance_walls"].append(
+                (strike, oi)
+            )
+
+    return result
+
+
+# ============================================================
+# NEAREST OPTION
+# ============================================================
+
+def nearest_row(chain, spot):
+
+    if chain is None or chain.empty:
         return None
 
-    idx = (
-        chain["Strike"] - strike
+    spot = safe_float(spot)
+
+    if np.isnan(spot):
+        return None
+
+    index = (
+        chain["Strike"] - spot
     ).abs().idxmin()
 
-    return chain.loc[idx]
+    return chain.loc[index]
 
 
 # ============================================================
@@ -1891,356 +1705,295 @@ def nearest_row(chain, strike):
 # ============================================================
 
 def score_option(
-    row,
+    chain_row,
     side,
     spot,
-    pcr,
     tf5,
     tf30,
     daily,
-    chain,
-    support=None,
-    resistance=None,
-    oi_wall_info=None,
+    pcr,
+    support,
+    resistance,
 ):
+    prefix = "CE" if side == "CE" else "PE"
 
-    if side == "CE":
+    score = 0.0
 
-        premium = safe_float(row["CE LTP"])
-        delta = safe_float(row["CE Delta"])
-        iv = safe_float(row["CE IV"])
-        pop = safe_float(row["CE PoP"])
-        chg_oi = safe_float(
-            row["CE Chg OI"],
-            0,
-        )
-        volume = safe_float(
-            row["CE Volume"],
-            0,
-        )
-        oi = safe_float(
-            row["CE OI"],
-            0,
-        )
-        bid = safe_float(row["CE Bid"])
-        ask = safe_float(row["CE Ask"])
-
-    else:
-
-        premium = safe_float(row["PE LTP"])
-        delta = safe_float(row["PE Delta"])
-        iv = safe_float(row["PE IV"])
-        pop = safe_float(row["PE PoP"])
-        chg_oi = safe_float(
-            row["PE Chg OI"],
-            0,
-        )
-        volume = safe_float(
-            row["PE Volume"],
-            0,
-        )
-        oi = safe_float(
-            row["PE OI"],
-            0,
-        )
-        bid = safe_float(row["PE Bid"])
-        ask = safe_float(row["PE Ask"])
-
-    desired = (
-        "Bullish"
-        if side == "CE"
-        else "Bearish"
+    premium = safe_float(
+        chain_row.get(f"{prefix} Ask")
     )
 
-    opposite = (
-        "Bearish"
-        if side == "CE"
-        else "Bullish"
+    if np.isnan(premium) or premium <= 0:
+        premium = safe_float(
+            chain_row.get(f"{prefix} LTP")
+        )
+
+    bid = safe_float(
+        chain_row.get(f"{prefix} Bid")
     )
 
-    tf_points, alignment = timeframe_score(
+    ask = safe_float(
+        chain_row.get(f"{prefix} Ask")
+    )
+
+    oi = safe_float(
+        chain_row.get(f"{prefix} OI"),
+        0,
+    )
+
+    chg_oi = safe_float(
+        chain_row.get(f"{prefix} Chg OI")
+    )
+
+    volume = safe_float(
+        chain_row.get(f"{prefix} Volume"),
+        0,
+    )
+
+    iv = safe_float(
+        chain_row.get(f"{prefix} IV")
+    )
+
+    delta = safe_float(
+        chain_row.get(f"{prefix} Delta")
+    )
+
+    pop = safe_float(
+        chain_row.get(f"{prefix} PoP")
+    )
+
+    strike = safe_float(
+        chain_row.get("Strike")
+    )
+
+    # --------------------------------------------------------
+    # Timeframe alignment — 30 points
+    # --------------------------------------------------------
+
+    alignment = timeframe_score(
         side,
         tf5,
         tf30,
         daily,
     )
 
-    momentum_points = 0
+    score += alignment
 
-    if tf5.get("trend") == desired:
-        momentum_points += 5
+    # --------------------------------------------------------
+    # Momentum / trend strength — 15
+    # --------------------------------------------------------
 
-    rsi = tf5.get("rsi", 50)
+    desired = "Bullish" if side == "CE" else "Bearish"
 
-    if side == "CE":
+    momentum = (
+        tf5.get("momentum", 0)
+        + tf30.get("momentum", 0)
+    ) / 2
 
-        if 52 <= rsi <= 68:
-            momentum_points += 3
+    momentum_score = 0
 
-        elif 50 <= rsi < 52:
-            momentum_points += 1
-
-        if tf5.get("momentum", 0) > 0:
-            momentum_points += 3
-
+    if (
+        desired == "Bullish"
+        and momentum > 0.15
+    ):
+        momentum_score = 15
+    elif (
+        desired == "Bearish"
+        and momentum < -0.15
+    ):
+        momentum_score = 15
+    elif abs(momentum) < 0.15:
+        momentum_score = 7
     else:
+        momentum_score = 0
 
-        if 32 <= rsi <= 48:
-            momentum_points += 3
+    score += momentum_score
 
-        elif 48 < rsi <= 50:
-            momentum_points += 1
-
-        if tf5.get("momentum", 0) < 0:
-            momentum_points += 3
-
-    if tf5.get("adx", 0) >= 25:
-        momentum_points += 4
-
-    elif tf5.get("adx", 0) >= 20:
-        momentum_points += 2
-
-    momentum_points = min(
-        momentum_points,
-        15,
-    )
+    # --------------------------------------------------------
+    # VWAP — 10
+    # --------------------------------------------------------
 
     vwap = safe_float(
-        tf5.get("vwap"),
-        spot,
+        tf5.get("vwap")
     )
 
-    vwap_points = 0
+    vwap_gap_pct = np.nan
 
-    if np.isfinite(vwap) and vwap > 0:
-
+    if (
+        not np.isnan(vwap)
+        and vwap != 0
+        and not np.isnan(spot)
+    ):
         vwap_gap_pct = (
             (spot - vwap)
-            / spot
-            * 100
-        )
+            / vwap
+        ) * 100
+
+        if (
+            side == "CE"
+            and spot > vwap
+        ):
+            score += 10
+
+        elif (
+            side == "PE"
+            and spot < vwap
+        ):
+            score += 10
+
+        elif abs(vwap_gap_pct) < 0.20:
+            score += 5
+
+    # --------------------------------------------------------
+    # PCR — 10
+    # --------------------------------------------------------
+
+    if not np.isnan(pcr):
 
         if side == "CE":
 
-            if (
-                spot > vwap
-                and tf5.get("momentum", 0) > 0
-            ):
-                vwap_points = 10
-
-            elif spot > vwap:
-                vwap_points = 6
-
-            elif spot >= vwap * .997:
-                vwap_points = 2
+            if 0.85 <= pcr <= 1.30:
+                score += 10
+            elif pcr > 1.30:
+                score += 6
+            elif pcr < 0.70:
+                score += 2
+            else:
+                score += 5
 
         else:
 
-            if (
-                spot < vwap
-                and tf5.get("momentum", 0) < 0
-            ):
-                vwap_points = 10
+            if 0.70 <= pcr <= 1.15:
+                score += 10
+            elif pcr < 0.70:
+                score += 7
+            elif pcr > 1.40:
+                score += 3
+            else:
+                score += 5
 
-            elif spot < vwap:
-                vwap_points = 6
+    # --------------------------------------------------------
+    # Option OI change — 5
+    # --------------------------------------------------------
 
-            elif spot <= vwap * 1.003:
-                vwap_points = 2
+    if not np.isnan(chg_oi):
 
-    else:
-        vwap_gap_pct = 0
+        if chg_oi > 0:
+            score += 5
+        elif chg_oi > -100:
+            score += 2
 
-    pcr_points = 0
-
-    if np.isfinite(pcr):
-
-        if side == "CE":
-
-            if .90 <= pcr <= 1.35:
-                pcr_points = 10
-
-            elif .80 <= pcr < .90:
-                pcr_points = 5
-
-        else:
-
-            if .65 <= pcr <= 1.10:
-                pcr_points = 10
-
-            elif 1.10 < pcr <= 1.25:
-                pcr_points = 5
-
-    oi_points = 5 if chg_oi < 0 else 3 if chg_oi == 0 else 1
+    # --------------------------------------------------------
+    # Option quality / liquidity — 20
+    # --------------------------------------------------------
 
     quality = 0
 
-    abs_delta = (
-        abs(delta)
-        if np.isfinite(delta)
-        else np.nan
-    )
-
-    if np.isfinite(abs_delta):
-
-        if .45 <= abs_delta <= .65:
-            quality += 6
-
-        elif (
-            .40 <= abs_delta < .45
-            or .65 < abs_delta <= .75
-        ):
-            quality += 4
-
-        elif (
-            .35 <= abs_delta < .40
-            or .75 < abs_delta <= .80
-        ):
-            quality += 2
-
-    spread_pct = (
-        max(ask - bid, 0)
-        / max((ask + bid) / 2, .01)
-        * 100
-        if (
-            np.isfinite(ask)
-            and np.isfinite(bid)
-            and ask > 0
-            and bid > 0
-        )
-        else 999
-    )
-
-    if spread_pct <= 1:
-        quality += 5
-
-    elif spread_pct <= 2:
-        quality += 4
-
-    elif spread_pct <= 3:
-        quality += 2
-
     if volume >= 10000:
-        quality += 5
-
+        quality += 8
     elif volume >= 5000:
-        quality += 4
-
+        quality += 6
     elif volume >= 1000:
-        quality += 2
-
-    if oi >= 10000:
         quality += 4
-
-    elif oi >= 3000:
-        quality += 3
-
-    elif oi > 0:
+    elif volume > 0:
         quality += 1
 
-    distance_pct = (
-        abs(float(row["Strike"]) - spot)
-        / max(spot, 1)
-        * 100
-    )
+    if oi >= 10000:
+        quality += 6
+    elif oi >= 5000:
+        quality += 4
+    elif oi >= 1000:
+        quality += 2
 
-    if distance_pct <= 1:
-        strike_points = 6
-
-    elif distance_pct <= 2:
-        strike_points = 5
-
-    elif distance_pct <= 3:
-        strike_points = 3
-
-    elif distance_pct <= 5:
-        strike_points = 1
-
-    else:
-        strike_points = 0
-
-    room_points = 0
-    room_pct = np.nan
+    spread_pct = np.nan
 
     if (
-        side == "CE"
-        and np.isfinite(resistance)
+        not np.isnan(bid)
+        and not np.isnan(ask)
+        and ask > 0
     ):
+        spread_pct = (
+            (ask - bid)
+            / ask
+        ) * 100
 
-        room_pct = max(
-            (resistance - spot)
-            / max(spot, 1)
-            * 100,
-            0,
-        )
+        if spread_pct <= 1:
+            quality += 6
+        elif spread_pct <= 2:
+            quality += 4
+        elif spread_pct <= 3:
+            quality += 2
 
-        if spot >= resistance:
-            room_points = 4
+    score += min(20, quality)
 
-        elif room_pct >= 2:
-            room_points = 4
+    # --------------------------------------------------------
+    # Strike placement + room — 10
+    # --------------------------------------------------------
 
-        elif room_pct >= 1:
-            room_points = 2
+    distance_pct = np.nan
+    room_pct = np.nan
+    strike_quality = 0
 
-    elif (
-        side == "PE"
-        and np.isfinite(support)
+    if (
+        not np.isnan(strike)
+        and not np.isnan(spot)
+        and spot != 0
     ):
+        distance_pct = (
+            abs(strike - spot)
+            / spot
+        ) * 100
 
-        room_pct = max(
-            (spot - support)
-            / max(spot, 1)
-            * 100,
-            0,
-        )
+        if distance_pct <= 1:
+            strike_quality = 10
+        elif distance_pct <= 2:
+            strike_quality = 8
+        elif distance_pct <= 3:
+            strike_quality = 5
+        elif distance_pct <= 5:
+            strike_quality = 2
 
-        if spot <= support:
-            room_points = 4
+        if side == "CE" and not np.isnan(resistance):
+            room_pct = (
+                (resistance - spot)
+                / spot
+            ) * 100
 
-        elif room_pct >= 2:
-            room_points = 4
+        elif side == "PE" and not np.isnan(support):
+            room_pct = (
+                (spot - support)
+                / spot
+            ) * 100
 
-        elif room_pct >= 1:
-            room_points = 2
+    score += strike_quality
 
-    strike_quality = (
-        strike_points + room_points
-    )
+    # --------------------------------------------------------
+    # PoP — up to 10
+    # --------------------------------------------------------
 
-    pop_points = (
-        float(
-            np.clip(
-                (pop - 55) / 3,
-                0,
-                10,
-            )
-        )
-        if np.isfinite(pop)
-        else 0
-    )
+    if not np.isnan(pop):
 
-    raw_score = (
-        tf_points
-        + momentum_points
-        + vwap_points
-        + pcr_points
-        + oi_points
-        + quality
-        + strike_quality
-        + pop_points
-    )
+        if pop >= 75:
+            score += 10
+        elif pop >= 70:
+            score += 8
+        elif pop >= 65:
+            score += 6
+        elif pop >= 60:
+            score += 4
+        elif pop >= 55:
+            score += 2
 
-    score = float(
+    final_score = int(
         np.clip(
-            raw_score / 110 * 100,
+            (score / 110) * 100,
             0,
             100,
         )
     )
 
     return {
-        "score": score,
+        "score": final_score,
         "premium": premium,
         "delta": delta,
         "iv": iv,
@@ -2264,356 +2017,346 @@ def score_option(
 # ============================================================
 
 def build_plan(
-    row,
+    chain_row,
     side,
+    score_data,
     spot,
     support,
     resistance,
-    pcr,
     tf5,
-    tf30,
-    daily,
     risk_profile,
-    chain,
-    oi_wall_info=None,
 ):
-
-    if row is None:
+    if chain_row is None:
         return None
 
-    scored = score_option(
-        row,
-        side,
-        spot,
-        pcr,
-        tf5,
-        tf30,
-        daily,
-        chain,
-        support=support,
-        resistance=resistance,
-        oi_wall_info=oi_wall_info,
-    )
-
-    ask = safe_float(
-        row[f"{side} Ask"]
-    )
-
-    ltp = safe_float(
-        row[f"{side} LTP"]
-    )
-
-    entry = (
-        ask
-        if np.isfinite(ask) and ask > 0
-        else ltp
-    )
-
-    if (
-        not np.isfinite(entry)
-        or entry <= 0
-    ):
-        return None
-
-    risk_settings = {
-        "Conservative": (
-            .72,
-            1.25,
-            1.55,
-        ),
-        "Balanced": (
-            .70,
-            1.35,
-            1.75,
-        ),
-        "Aggressive": (
-            .65,
-            1.50,
-            2.00,
-        ),
+    risk_profiles = {
+        "Conservative": (0.72, 1.25, 1.55),
+        "Balanced": (0.70, 1.35, 1.75),
+        "Aggressive": (0.65, 1.50, 2.00),
     }
 
-    (
-        sl_factor,
-        target1_factor,
-        target2_factor,
-    ) = risk_settings[risk_profile]
-
-    sl = round(
-        entry * sl_factor,
-        2,
+    sl_factor, t1_factor, t2_factor = risk_profiles.get(
+        risk_profile,
+        risk_profiles["Balanced"],
     )
 
-    target1 = round(
-        entry * target1_factor,
-        2,
+    score = safe_float(
+        score_data.get("score")
     )
 
-    target2 = round(
-        entry * target2_factor,
-        2,
+    premium = safe_float(
+        score_data.get("premium")
     )
+
+    if np.isnan(premium) or premium <= 0:
+        return None
+
+    delta = safe_float(
+        score_data.get("delta")
+    )
+
+    iv = safe_float(
+        score_data.get("iv")
+    )
+
+    pop = safe_float(
+        score_data.get("pop")
+    )
+
+    spread_pct = safe_float(
+        score_data.get("spread_pct")
+    )
+
+    volume = safe_float(
+        score_data.get("volume"),
+        0,
+    )
+
+    oi = safe_float(
+        score_data.get("oi"),
+        0,
+    )
+
+    alignment = safe_float(
+        score_data.get("alignment"),
+        0,
+    )
+
+    vwap = safe_float(
+        score_data.get("vwap")
+    )
+
+    room_pct = safe_float(
+        score_data.get("room_pct")
+    )
+
+    strike = safe_float(
+        chain_row.get("Strike")
+    )
+
+    chg_oi = safe_float(
+        score_data.get("chg_oi")
+    )
+
+    atr = safe_float(
+        tf5.get("atr")
+    )
+
+    # --------------------------------------------------------
+    # Risk calculations
+    # --------------------------------------------------------
+
+    sl = premium * sl_factor
+    target1 = premium * t1_factor
+    target2 = premium * t2_factor
+
+    risk = premium - sl
+
+    reward1 = target1 - premium
+    reward2 = target2 - premium
 
     rr1 = (
-        target1 - entry
-    ) / max(
-        entry - sl,
-        .01,
+        reward1 / risk
+        if risk > 0
+        else np.nan
     )
 
     rr2 = (
-        target2 - entry
-    ) / max(
-        entry - sl,
-        .01,
+        reward2 / risk
+        if risk > 0
+        else np.nan
     )
 
-    atr = max(
-        tf5.get("atr", spot * .01),
-        spot * .001,
-    )
+    # --------------------------------------------------------
+    # Trigger
+    # --------------------------------------------------------
 
-    trigger_buffer = max(
-        atr * .15,
-        spot * .0015,
+    atr_buffer = (
+        atr * 0.15
+        if not np.isnan(atr)
+        else spot * 0.0015
     )
-
-    candle_confirmed = False
-    volume_confirmed = False
 
     if side == "CE":
 
-        trigger_level = (
-            resistance
-            + trigger_buffer
-        )
-
-        trigger_hit = (
-            spot >= trigger_level
-        )
-
-        if trigger_hit:
-
-            candle_confirmed = (
-                tf5.get("trend")
-                == "Bullish"
-                and tf5.get("momentum", 0) > 0
-                and tf5.get("rsi", 50) >= 52
-            )
-
-            volume_confirmed = (
-                tf5.get(
-                    "volume_ratio",
-                    1,
-                ) >= 1.10
-            )
+        if not np.isnan(resistance):
+            trigger_level = resistance + atr_buffer
+        else:
+            trigger_level = spot + atr_buffer
 
         trigger = (
-            f"Enter only after spot breaks and sustains "
-            f"above {fmt_price(trigger_level)} with 5m "
-            "bullish confirmation and preferably above-average volume."
-        )
-
-        exit_rule = (
-            f"Exit if spot loses support {fmt_price(support)} "
-            f"or premium hits {fmt_price(sl)}. After Target 1, "
-            "book partial profit and trail."
+            f"Break & hold above "
+            f"{fmt_price(trigger_level)}"
         )
 
     else:
 
-        trigger_level = (
-            support
-            - trigger_buffer
-        )
-
-        trigger_hit = (
-            spot <= trigger_level
-        )
-
-        if trigger_hit:
-
-            candle_confirmed = (
-                tf5.get("trend")
-                == "Bearish"
-                and tf5.get("momentum", 0) < 0
-                and tf5.get("rsi", 50) <= 48
-            )
-
-            volume_confirmed = (
-                tf5.get(
-                    "volume_ratio",
-                    1,
-                ) >= 1.10
-            )
+        if not np.isnan(support):
+            trigger_level = support - atr_buffer
+        else:
+            trigger_level = spot - atr_buffer
 
         trigger = (
-            f"Enter only after spot breaks and sustains "
-            f"below {fmt_price(trigger_level)} with 5m "
-            "bearish confirmation and preferably above-average volume."
+            f"Break & hold below "
+            f"{fmt_price(trigger_level)}"
         )
 
-        exit_rule = (
-            f"Exit if spot reclaims resistance {fmt_price(resistance)} "
-            f"or premium hits {fmt_price(sl)}. After Target 1, "
-            "book partial profit and trail."
-        )
+    trigger_hit = False
 
-    opposite = (
-        "Bearish"
-        if side == "CE"
-        else "Bullish"
+    if not np.isnan(spot):
+
+        if side == "CE":
+            trigger_hit = spot >= trigger_level
+        else:
+            trigger_hit = spot <= trigger_level
+
+    # --------------------------------------------------------
+    # Candle confirmation
+    # --------------------------------------------------------
+
+    short_term_trend = tf5.get("trend")
+
+    momentum = safe_float(
+        tf5.get("momentum"),
+        0,
     )
 
-    hard_fail = []
-
-    if scored["score"] < 72:
-        hard_fail.append(
-            "setup score below 72"
-        )
-
-    if scored["alignment"] < 2:
-        hard_fail.append(
-            "fewer than 2 aligned timeframes"
-        )
-
-    if (
-        tf5.get("trend") == opposite
-        or tf30.get("trend") == opposite
-    ):
-        hard_fail.append(
-            "short-term trend conflict"
-        )
-
-    if scored["spread_pct"] > 3:
-        hard_fail.append(
-            "wide option spread"
-        )
-
-    if (
-        not np.isfinite(scored["delta"])
-        or not (
-            .35
-            <= abs(scored["delta"])
-            <= .80
-        )
-    ):
-        hard_fail.append(
-            "poor delta"
-        )
-
-    if (
-        not np.isfinite(scored["pop"])
-        or scored["pop"] < 55
-    ):
-        hard_fail.append(
-            "low Upstox PoP"
-        )
-
-    if scored["volume"] < 1000:
-        hard_fail.append(
-            "weak option liquidity"
-        )
-
-    if (
-        not np.isfinite(scored["oi"])
-        or scored["oi"] <= 0
-    ):
-        hard_fail.append(
-            "no option OI"
-        )
-
-    vwap = safe_float(
-        tf5.get("vwap"),
-        spot,
+    rsi = safe_float(
+        tf5.get("rsi")
     )
 
-    if np.isfinite(vwap) and vwap > 0:
+    volume_ratio = safe_float(
+        tf5.get("volume_ratio")
+    )
+
+    candle_confirmed = False
+
+    if side == "CE":
+
+        candle_confirmed = (
+            short_term_trend == "Bullish"
+            and momentum > 0
+            and (
+                np.isnan(rsi)
+                or rsi >= 50
+            )
+        )
+
+    else:
+
+        candle_confirmed = (
+            short_term_trend == "Bearish"
+            and momentum < 0
+            and (
+                np.isnan(rsi)
+                or rsi <= 50
+            )
+        )
+
+    volume_confirmed = (
+        np.isnan(volume_ratio)
+        or volume_ratio >= 1.10
+    )
+
+    # --------------------------------------------------------
+    # Hard fails
+    # --------------------------------------------------------
+
+    fail_reasons = []
+
+    if score < 72:
+        fail_reasons.append(
+            "Score below 72"
+        )
+
+    if alignment < 2:
+        fail_reasons.append(
+            "Insufficient timeframe alignment"
+        )
+
+    if side == "CE" and short_term_trend == "Bearish":
+        fail_reasons.append(
+            "5-minute trend conflicts with CALL"
+        )
+
+    if side == "PE" and short_term_trend == "Bullish":
+        fail_reasons.append(
+            "5-minute trend conflicts with PUT"
+        )
+
+    if (
+        not np.isnan(spread_pct)
+        and spread_pct > 3
+    ):
+        fail_reasons.append(
+            "Option spread above 3%"
+        )
+
+    if (
+        not np.isnan(delta)
+        and not (
+            0.35 <= abs(delta) <= 0.80
+        )
+    ):
+        fail_reasons.append(
+            "Delta outside preferred range"
+        )
+
+    if (
+        np.isnan(pop)
+        or pop < 55
+    ):
+        fail_reasons.append(
+            "PoP below 55%"
+        )
+
+    if volume < 1000:
+        fail_reasons.append(
+            "Option volume too low"
+        )
+
+    if oi <= 0:
+        fail_reasons.append(
+            "Option OI unavailable"
+        )
+
+    # VWAP conflict
+    if not np.isnan(vwap):
 
         if (
             side == "CE"
-            and spot < vwap * .997
+            and spot < vwap
         ):
-            hard_fail.append(
-                "price below VWAP"
+            fail_reasons.append(
+                "Price below VWAP"
             )
 
         if (
             side == "PE"
-            and spot > vwap * 1.003
+            and spot > vwap
         ):
-            hard_fail.append(
-                "price above VWAP"
+            fail_reasons.append(
+                "Price above VWAP"
             )
+
+    # OI wall too close
+    if (
+        not np.isnan(room_pct)
+        and room_pct < 0.5
+    ):
+        fail_reasons.append(
+            "OI wall too close"
+        )
+
+    # --------------------------------------------------------
+    # Readiness
+    # --------------------------------------------------------
+
+    if fail_reasons:
+        readiness = "NO TRADE"
+
+    elif not trigger_hit:
+        readiness = "WAIT FOR TRIGGER"
+
+    elif not candle_confirmed:
+        readiness = "WAIT FOR CONFIRMATION"
+
+    elif not volume_confirmed:
+        readiness = "WAIT FOR CONFIRMATION"
+
+    else:
+        readiness = "READY"
+
+    # --------------------------------------------------------
+    # Exit rule
+    # --------------------------------------------------------
 
     if side == "CE":
-
-        wall_room = (
-            resistance - spot
-        ) / max(spot, 1) * 100
-
-        if (
-            spot < resistance
-            and wall_room < .50
-        ):
-            hard_fail.append(
-                "resistance too close"
-            )
-
+        exit_rule = (
+            f"Exit if price closes below "
+            f"{fmt_price(vwap)} VWAP or SL is hit"
+            if not np.isnan(vwap)
+            else "Exit if momentum reverses or SL is hit"
+        )
     else:
-
-        wall_room = (
-            spot - support
-        ) / max(spot, 1) * 100
-
-        if (
-            spot > support
-            and wall_room < .50
-        ):
-            hard_fail.append(
-                "support too close"
-            )
-
-    if not trigger_hit:
-
-        trigger_state = (
-            "WAIT FOR TRIGGER"
+        exit_rule = (
+            f"Exit if price closes above "
+            f"{fmt_price(vwap)} VWAP or SL is hit"
+            if not np.isnan(vwap)
+            else "Exit if momentum reverses or SL is hit"
         )
-
-    elif (
-        not candle_confirmed
-        or not volume_confirmed
-    ):
-
-        trigger_state = (
-            "WAIT FOR CONFIRMATION"
-        )
-
-    else:
-
-        trigger_state = (
-            "READY"
-            if not hard_fail
-            else "NO TRADE"
-        )
-
-    readiness = (
-        trigger_state
-        if not hard_fail
-        else "NO TRADE"
-    )
 
     return {
         "side": side,
-        "strike": float(row["Strike"]),
-        "entry": float(entry),
+        "strike": strike,
+        "entry": premium,
         "sl": sl,
         "target1": target1,
         "target2": target2,
-        "pop": scored["pop"],
-        "delta": scored["delta"],
-        "iv": scored["iv"],
-        "score": scored["score"],
+        "pop": pop,
+        "delta": delta,
+        "iv": iv,
+        "score": score,
         "rr1": rr1,
         "rr2": rr2,
         "trigger": trigger,
@@ -2622,420 +2365,1018 @@ def build_plan(
         "candle_confirmed": candle_confirmed,
         "volume_confirmed": volume_confirmed,
         "readiness": readiness,
-        "fail_reasons": hard_fail,
+        "fail_reasons": fail_reasons,
         "exit": exit_rule,
-        "oi": row[f"{side} OI"],
-        "chg_oi": scored["chg_oi"],
-        "volume": scored["volume"],
-        "spread_pct": scored["spread_pct"],
-        "alignment": scored["alignment"],
-        "vwap": scored["vwap"],
-        "room_pct": scored["room_pct"],
+        "oi": oi,
+        "chg_oi": chg_oi,
+        "volume": volume,
+        "spread_pct": spread_pct,
+        "alignment": alignment,
+        "vwap": vwap,
+        "room_pct": room_pct,
     }
 
 
 # ============================================================
-# F&O SCANNER
+# FULL F&O MASTER
 # ============================================================
-
-FNO_MASTER_URL = (
-    "https://assets.upstox.com/"
-    "market-quote/instruments/exchange/NSE.json.gz"
-)
-
 
 @st.cache_data(ttl=3600, show_spinner=False)
 def get_fno_underlyings():
 
     try:
-
         response = requests.get(
             FNO_MASTER_URL,
             timeout=30,
+            headers={
+                "User-Agent": "FO-Pro-Trader-Assistant"
+            },
+        )
+    except requests.exceptions.RequestException as exc:
+        raise UpstoxError(
+            f"Unable to download NSE F&O instrument list: {exc}"
         )
 
-        response.raise_for_status()
+    if response.status_code != 200:
+        raise UpstoxError(
+            f"NSE F&O instrument list returned "
+            f"HTTP {response.status_code}."
+        )
 
+    try:
         raw = gzip.decompress(
             response.content
         )
 
-        payload = json.loads(
+        data = json.loads(
             raw.decode("utf-8")
         )
 
     except Exception as exc:
-
         raise UpstoxError(
-            "Unable to load the Upstox NSE F&O instrument list: "
-            f"{exc}"
-        ) from exc
-
-    if isinstance(payload, dict):
-
-        records = payload.get(
-            "data",
-            payload.get(
-                "instruments",
-                [],
-            ),
+            f"Unable to read NSE F&O instrument list: {exc}"
         )
 
-    else:
-        records = payload
+    if not isinstance(data, list):
+        raise UpstoxError(
+            "Invalid NSE F&O instrument list."
+        )
 
-    today = (
-        datetime.now(IST)
-        .date()
-        .isoformat()
-    )
+    today = now_ist().date()
 
-    universe = {}
+    underlyings = {}
 
-    for item in records:
+    for item in data:
 
         if not isinstance(item, dict):
             continue
 
-        if item.get("segment") != "NSE_FO":
+        segment = str(
+            item.get("segment", "")
+        ).upper()
+
+        if segment != "NSE_FO":
             continue
 
-        if item.get("instrument_type") not in {
+        instrument_type = str(
+            item.get("instrument_type", "")
+        ).upper()
+
+        if instrument_type not in {
             "CE",
             "PE",
             "FUT",
         }:
             continue
 
-        if item.get("underlying_type") != "EQUITY":
+        underlying_type = str(
+            item.get("underlying_type", "")
+        ).upper()
+
+        if underlying_type and underlying_type != "EQUITY":
             continue
 
-        expiry = str(
-            item.get("expiry", "")
+        underlying_key = (
+            item.get("underlying_key")
+            or item.get("underlying_instrument_key")
         )
 
-        if not expiry:
+        symbol = (
+            item.get("underlying_symbol")
+            or item.get("underlying_trading_symbol")
+            or item.get("trading_symbol")
+        )
+
+        expiry = item.get("expiry")
+
+        if not underlying_key or not symbol or not expiry:
             continue
 
-        if expiry.isdigit():
-
-            try:
-
-                expiry_date = (
-                    datetime.fromtimestamp(
-                        int(expiry) / 1000,
-                        tz=IST,
-                    )
-                    .date()
-                    .isoformat()
-                )
-
-            except Exception:
-                continue
-
-        else:
-            expiry_date = expiry[:10]
+        try:
+            expiry_date = date.fromisoformat(
+                str(expiry)[:10]
+            )
+        except Exception:
+            continue
 
         if expiry_date < today:
             continue
 
-        underlying_key = item.get(
-            "underlying_key"
-        )
+        key = str(underlying_key)
 
-        symbol = str(
-            item.get(
-                "underlying_symbol",
-                "",
-            )
-        ).strip().upper()
+        underlyings[key] = {
+            "underlying_key": key,
+            "symbol": str(symbol).upper(),
+            "expiry": str(expiry)[:10],
+        }
 
-        if not underlying_key or not symbol:
-            continue
+    return list(underlyings.values())
 
-        current = universe.get(
-            underlying_key
-        )
 
-        if (
-            current is None
-            or expiry_date < current["expiry"]
-        ):
-
-            universe[underlying_key] = {
-                "symbol": symbol,
-                "underlying_key":
-                    underlying_key,
-                "expiry": expiry_date,
-            }
-
-    return sorted(
-        universe.values(),
-        key=lambda x: x["symbol"],
-    )
-
+# ============================================================
+# SCANNER
+# ============================================================
 
 def scan_full_fno_pop_market(
-    min_pop=75.0
+    min_pop=75.0,
+    max_stocks=None,
 ):
 
     universe = get_fno_underlyings()
 
-    candidates = []
+    if max_stocks:
+        universe = universe[:max_stocks]
 
-    scanned = 0
-    failed = 0
+    results = []
 
     progress = st.progress(
         0,
-        text="Starting full F&O market scan...",
+        text="Preparing F&O scanner...",
     )
 
-    for idx, item in enumerate(
-        universe,
-        start=1,
-    ):
+    total = len(universe)
+
+    for index, item in enumerate(universe):
+
+        symbol = item["symbol"]
+        underlying_key = item["underlying_key"]
 
         try:
 
-            if idx > 1:
-                time.sleep(.80)
-
-            rows = get_option_chain(
-                item["underlying_key"],
-                item["expiry"],
+            progress.progress(
+                min(
+                    int(
+                        ((index + 1) / max(total, 1))
+                        * 100
+                    ),
+                    100,
+                ),
+                text=(
+                    f"Scanning {symbol} "
+                    f"({index + 1}/{total})"
+                ),
             )
 
-            if not rows:
+            contracts = get_contracts(
+                underlying_key
+            )
 
-                failed += 1
+            expiries = available_expiries(
+                contracts
+            )
+
+            if not expiries:
                 continue
 
-            spot_values = [
-                safe_float(
-                    row.get(
-                        "underlying_spot_price"
-                    )
-                )
-                for row in rows
-                if np.isfinite(
-                    safe_float(
-                        row.get(
-                            "underlying_spot_price"
-                        )
-                    )
-                )
-            ]
+            expiry = expiries[0]
 
-            spot_value = (
-                spot_values[0]
-                if spot_values
-                else np.nan
+            raw_chain = get_option_chain(
+                underlying_key,
+                expiry,
             )
 
-            best_for_stock = None
+            chain = normalize_chain(
+                raw_chain
+            )
 
-            for raw in rows:
+            if chain.empty:
+                continue
 
-                strike = safe_float(
-                    raw.get("strike_price")
+            spot = safe_float(
+                chain["Strike"].median()
+            )
+
+            # Better spot from quote
+            try:
+                quote = get_quote(
+                    underlying_key
                 )
 
-                if not np.isfinite(strike):
-                    continue
+                quote_spot, _, _, _ = parse_quote(
+                    quote
+                )
 
-                for side, action in [
-                    ("CE", "CALL BUY"),
-                    ("PE", "PUT BUY"),
-                ]:
+                if not np.isnan(quote_spot):
+                    spot = quote_spot
 
-                    option = (
-                        raw.get(
-                            "call_options"
-                            if side == "CE"
-                            else "put_options"
-                        )
-                        or {}
-                    )
+            except Exception:
+                pass
 
-                    market = (
-                        option.get(
-                            "market_data"
-                        )
-                        or {}
-                    )
+            if np.isnan(spot):
+                continue
 
-                    greeks = (
-                        option.get(
-                            "option_greeks"
-                        )
-                        or {}
-                    )
+            best = None
+
+            for _, row in chain.iterrows():
+
+                for side in ["CE", "PE"]:
+
+                    prefix = side
 
                     pop = safe_float(
-                        greeks.get("pop")
+                        row.get(f"{prefix} PoP")
                     )
 
                     if (
-                        not np.isfinite(pop)
-                        or pop <= min_pop
+                        np.isnan(pop)
+                        or pop < min_pop
                     ):
                         continue
 
-                    ltp = safe_float(
-                        market.get("ltp")
+                    premium = safe_float(
+                        row.get(f"{prefix} Ask")
                     )
 
-                    ask = safe_float(
-                        market.get("ask_price")
-                    )
+                    if (
+                        np.isnan(premium)
+                        or premium <= 0
+                    ):
+                        premium = safe_float(
+                            row.get(f"{prefix} LTP")
+                        )
 
-                    bid = safe_float(
-                        market.get("bid_price")
-                    )
+                    if (
+                        np.isnan(premium)
+                        or premium <= 0
+                    ):
+                        continue
 
                     volume = safe_float(
-                        market.get("volume"),
+                        row.get(f"{prefix} Volume"),
                         0,
                     )
 
                     oi = safe_float(
-                        market.get("oi"),
+                        row.get(f"{prefix} OI"),
                         0,
                     )
 
                     delta = safe_float(
-                        greeks.get("delta")
+                        row.get(f"{prefix} Delta")
                     )
 
-                    iv = safe_float(
-                        greeks.get("iv")
-                    )
-
-                    entry = (
-                        ask
-                        if np.isfinite(ask)
-                        and ask > 0
-                        else ltp
-                    )
-
-                    if (
-                        not np.isfinite(entry)
-                        or entry <= 0
-                    ):
+                    if oi <= 0:
                         continue
 
-                    distance = (
-                        abs(
-                            strike
-                            - spot_value
-                        )
-                        / max(
-                            spot_value,
-                            1,
-                        )
-                        if np.isfinite(
-                            spot_value
-                        )
-                        else 999
-                    )
+                    # Scanner uses a balanced simplified
+                    # quality calculation because full
+                    # technical analysis for every stock
+                    # would create excessive API traffic.
+                    scanner_score = 0
 
-                    sl = round(
-                        entry * .70,
-                        2,
-                    )
+                    if pop >= 80:
+                        scanner_score += 40
+                    elif pop >= 75:
+                        scanner_score += 35
 
-                    target1 = round(
-                        entry * 1.40,
-                        2,
-                    )
+                    if volume >= 10000:
+                        scanner_score += 20
+                    elif volume >= 5000:
+                        scanner_score += 15
+                    elif volume >= 1000:
+                        scanner_score += 10
 
-                    target2 = round(
-                        entry * 1.80,
-                        2,
-                    )
+                    if oi >= 10000:
+                        scanner_score += 20
+                    elif oi >= 5000:
+                        scanner_score += 15
+                    elif oi >= 1000:
+                        scanner_score += 10
+
+                    if (
+                        not np.isnan(delta)
+                        and 0.35 <= abs(delta) <= 0.80
+                    ):
+                        scanner_score += 20
 
                     candidate = {
-                        "Stock": item["symbol"],
-                        "Trade": action,
-                        "Strike": strike,
-                        "Expiry": item["expiry"],
-                        "PoP": pop,
-                        "Entry": entry,
-                        "SL": sl,
-                        "Target1": target1,
-                        "Target2": target2,
-                        "Exit":
-                            "Exit at SL or Target 2; "
-                            "trail after Target 1",
-                        "LTP": ltp,
-                        "Bid": bid,
-                        "Ask": ask,
+                        "Symbol": symbol,
+                        "Side": (
+                            "CALL BUY"
+                            if side == "CE"
+                            else "PUT BUY"
+                        ),
+                        "Strike": safe_float(
+                            row.get("Strike")
+                        ),
+                        "Expiry": expiry,
+                        "PoP %": pop,
+                        "Premium": premium,
                         "Delta": delta,
-                        "IV": iv,
                         "Volume": volume,
                         "OI": oi,
-                        "distance": distance,
+                        "Score": scanner_score,
                     }
 
                     if (
-                        best_for_stock is None
+                        best is None
+                        or candidate["PoP %"]
+                        > best["PoP %"]
                         or (
-                            candidate["PoP"],
-                            candidate["Volume"],
-                            -candidate["distance"],
-                        )
-                        >
-                        (
-                            best_for_stock["PoP"],
-                            best_for_stock["Volume"],
-                            -best_for_stock["distance"],
+                            candidate["PoP %"]
+                            == best["PoP %"]
+                            and candidate["Volume"]
+                            > best["Volume"]
                         )
                     ):
+                        best = candidate
 
-                        best_for_stock = candidate
-
-            if best_for_stock:
-                candidates.append(
-                    best_for_stock
-                )
-
-            scanned += 1
+            if best:
+                results.append(best)
 
         except UpstoxRateLimitError:
             progress.empty()
             raise
 
         except Exception:
-            failed += 1
+            pass
 
-        progress.progress(
-            idx / max(
-                len(universe),
-                1,
-            ),
-            text=(
-                f"Scanning F&O market: "
-                f"{idx}/{len(universe)} stocks"
-            ),
-        )
+        # Scanner pacing
+        time.sleep(0.8)
 
     progress.empty()
 
-    candidates.sort(
-        key=lambda x: (
-            -x["PoP"],
-            -x["Volume"],
-            x["distance"],
-        )
+    if not results:
+        return pd.DataFrame()
+
+    df = pd.DataFrame(results)
+
+    df = df.sort_values(
+        ["PoP %", "Volume", "Score"],
+        ascending=[False, False, False],
     )
 
-    return (
-        candidates[:5],
-        len(universe),
-        scanned,
-        failed,
+    # One row per unique stock
+    df = (
+        df.drop_duplicates(
+            subset=["Symbol"],
+            keep="first",
+        )
+        .head(5)
+        .reset_index(drop=True)
     )
+
+    return df
+
+
+# ============================================================
+# UI HELPERS
+# ============================================================
+
+def metric_card(label, value):
+    render_html(
+        f"""
+        <div class="metric-card">
+            <div class="metric-label">{label}</div>
+            <div class="metric-value">{value}</div>
+        </div>
+        """
+    )
+
+
+def decision_class_for(decision):
+
+    if decision == "CALL BUY":
+        return "decision-call"
+
+    if decision == "PUT BUY":
+        return "decision-put"
+
+    if decision in {
+        "WAIT FOR TRIGGER",
+        "WAIT FOR CONFIRMATION",
+    }:
+        return "decision-wait"
+
+    return "decision-no"
+
+
+def render_decision(
+    decision,
+    direction,
+    best_plan,
+    ce_score,
+    pe_score,
+    confidence,
+):
+
+    css_class = decision_class_for(
+        decision
+    )
+
+    if decision == "NO TRADE":
+        subtitle = (
+            "Conditions are not sufficiently aligned "
+            "for a valid setup."
+        )
+    elif decision == "CALL BUY":
+        subtitle = (
+            "Bullish conditions aligned with the "
+            "option-selection engine."
+        )
+    elif decision == "PUT BUY":
+        subtitle = (
+            "Bearish conditions aligned with the "
+            "option-selection engine."
+        )
+    else:
+        subtitle = (
+            "The setup is developing, but confirmation "
+            "is still required."
+        )
+
+    strike_text = "—"
+    pop_text = "—"
+    score_text = "—"
+
+    if best_plan:
+
+        if not np.isnan(
+            safe_float(best_plan.get("strike"))
+        ):
+            strike_text = (
+                f"{best_plan['strike']:.0f}"
+            )
+
+        pop_text = fmt_pct(
+            best_plan.get("pop")
+        )
+
+        score_text = (
+            f"{safe_float(best_plan.get('score'), 0):.0f}/100"
+        )
+
+    render_html(
+        f"""
+        <div class="decision-card {css_class}">
+            <div class="decision-label">
+                Trade Decision
+            </div>
+
+            <div class="decision-value">
+                {decision}
+            </div>
+
+            <div class="decision-sub">
+                {subtitle}
+            </div>
+
+            <div class="decision-stats">
+
+                <div class="stat-pill">
+                    <span>Market Bias</span>
+                    <b>{direction}</b>
+                </div>
+
+                <div class="stat-pill">
+                    <span>Confidence</span>
+                    <b>{confidence:.0f}%</b>
+                </div>
+
+                <div class="stat-pill">
+                    <span>Candidate Strike</span>
+                    <b>{strike_text}</b>
+                </div>
+
+                <div class="stat-pill">
+                    <span>PoP</span>
+                    <b>{pop_text}</b>
+                </div>
+
+                <div class="stat-pill">
+                    <span>Score</span>
+                    <b>{score_text}</b>
+                </div>
+
+                <div class="stat-pill">
+                    <span>CALL Score</span>
+                    <b>{ce_score}/100</b>
+                </div>
+
+                <div class="stat-pill">
+                    <span>PUT Score</span>
+                    <b>{pe_score}/100</b>
+                </div>
+
+            </div>
+        </div>
+        """
+    )
+
+
+def render_trade_status(decision, best_plan):
+
+    if decision == "CALL BUY":
+        title = "TRADE STATUS"
+        badge = "READY"
+        badge_class = "badge-green"
+
+    elif decision == "PUT BUY":
+        title = "TRADE STATUS"
+        badge = "READY"
+        badge_class = "badge-red"
+
+    elif decision in {
+        "WAIT FOR TRIGGER",
+        "WAIT FOR CONFIRMATION",
+    }:
+        title = "TRADE STATUS"
+        badge = decision
+        badge_class = "badge-yellow"
+
+    else:
+        title = "TRADE STATUS"
+        badge = "NO TRADE"
+        badge_class = "badge-gray"
+
+    trigger = "—"
+    readiness = "NO TRADE"
+
+    if best_plan:
+
+        trigger = best_plan.get(
+            "trigger",
+            "—",
+        )
+
+        readiness = best_plan.get(
+            "readiness",
+            "NO TRADE",
+        )
+
+    render_html(
+        f"""
+        <div class="card">
+            <div class="plan-header">
+                <div class="card-title">
+                    {title}
+                </div>
+                <span class="badge {badge_class}">
+                    {badge}
+                </span>
+            </div>
+
+            <div class="helper">
+                <b>Entry condition:</b>
+                {trigger}
+            </div>
+
+            <div class="helper" style="margin-top:6px;">
+                <b>Engine state:</b>
+                {readiness}
+            </div>
+        </div>
+        """
+    )
+
+
+def render_checklist(
+    best_plan,
+    direction,
+):
+
+    if best_plan is None:
+        items = [
+            ("bad", "No valid option candidate available.")
+        ]
+    else:
+
+        items = []
+
+        score = safe_float(
+            best_plan.get("score")
+        )
+
+        alignment = safe_float(
+            best_plan.get("alignment")
+        )
+
+        pop = safe_float(
+            best_plan.get("pop")
+        )
+
+        spread = safe_float(
+            best_plan.get("spread_pct")
+        )
+
+        volume = safe_float(
+            best_plan.get("volume")
+        )
+
+        trigger_hit = bool(
+            best_plan.get("trigger_hit")
+        )
+
+        candle_confirmed = bool(
+            best_plan.get("candle_confirmed")
+        )
+
+        volume_confirmed = bool(
+            best_plan.get("volume_confirmed")
+        )
+
+        items.append(
+            (
+                "ok" if score >= 72 else "bad",
+                f"Score ≥ 72 ({score:.0f}/100)",
+            )
+        )
+
+        items.append(
+            (
+                "ok" if alignment >= 2 else "bad",
+                f"Timeframe alignment ({alignment:.0f}/3)",
+            )
+        )
+
+        items.append(
+            (
+                "ok" if pop >= 55 else "bad",
+                f"PoP ≥ 55% ({fmt_pct(pop)})",
+            )
+        )
+
+        items.append(
+            (
+                "ok"
+                if np.isnan(spread) or spread <= 3
+                else "bad",
+                (
+                    "Spread within 3%"
+                    if np.isnan(spread)
+                    else f"Spread {spread:.2f}%"
+                ),
+            )
+        )
+
+        items.append(
+            (
+                "ok" if volume >= 1000 else "bad",
+                f"Volume ≥ 1,000 ({fmt_num(volume)})",
+            )
+        )
+
+        items.append(
+            (
+                "ok" if trigger_hit else "bad",
+                "Trigger confirmed"
+                if trigger_hit
+                else "Waiting for trigger",
+            )
+        )
+
+        items.append(
+            (
+                "ok" if candle_confirmed else "bad",
+                "5-minute confirmation"
+                if candle_confirmed
+                else "5-minute confirmation pending",
+            )
+        )
+
+        items.append(
+            (
+                "ok" if volume_confirmed else "bad",
+                "Volume confirmation"
+                if volume_confirmed
+                else "Volume confirmation pending",
+            )
+        )
+
+    html = """
+    <div class="card">
+        <div class="card-title">TRADE CHECKLIST</div>
+    """
+
+    for state, text_value in items:
+
+        icon = "✓" if state == "ok" else "!"
+
+        html += f"""
+        <div class="check-item">
+            <span class="check-icon {'check-ok' if state == 'ok' else 'check-bad'}">
+                {icon}
+            </span>
+            <span class="check-text">
+                {text_value}
+            </span>
+        </div>
+        """
+
+    html += "</div>"
+
+    render_html(html)
+
+
+def render_plan(
+    title,
+    plan,
+    reference_only=False,
+):
+
+    if plan is None:
+
+        render_html(
+            f"""
+            <div class="plan-card">
+                <div class="plan-title">
+                    {title}
+                </div>
+
+                <div class="helper">
+                    No valid option setup available.
+                </div>
+            </div>
+            """
+        )
+
+        return
+
+    readiness = plan.get(
+        "readiness",
+        "NO TRADE",
+    )
+
+    if readiness == "READY":
+        badge_class = (
+            "badge-green"
+            if plan["side"] == "CE"
+            else "badge-red"
+        )
+
+    elif readiness.startswith("WAIT"):
+        badge_class = "badge-yellow"
+
+    else:
+        badge_class = "badge-gray"
+
+    side_label = (
+        "CALL BUY"
+        if plan["side"] == "CE"
+        else "PUT BUY"
+    )
+
+    fail_text = ""
+
+    if plan.get("fail_reasons"):
+
+        fail_text = (
+            "<div class='plan-warning'>"
+            "<b>Engine checks:</b> "
+            + " • ".join(
+                str(x)
+                for x in plan["fail_reasons"]
+            )
+            + "</div>"
+        )
+
+    reference_text = ""
+
+    if reference_only:
+
+        reference_text = """
+        <div class="plan-reference">
+            REFERENCE ONLY — This candidate does not
+            represent an approved trade. Follow the
+            main Trade Decision and trigger conditions.
+        </div>
+        """
+
+    render_html(
+        f"""
+        <div class="plan-card">
+
+            <div class="plan-header">
+
+                <div class="plan-title">
+                    {title}
+                </div>
+
+                <span class="badge {badge_class}">
+                    {readiness}
+                </span>
+
+            </div>
+
+            <div class="helper" style="margin-bottom:10px;">
+                {side_label} • Strike
+                <b>{safe_float(plan.get("strike"), 0):.0f}</b>
+            </div>
+
+            <div class="plan-grid">
+
+                <div class="plan-item">
+                    <span>Entry</span>
+                    <b>{fmt_price(plan.get("entry"))}</b>
+                </div>
+
+                <div class="plan-item">
+                    <span>Stop Loss</span>
+                    <b>{fmt_price(plan.get("sl"))}</b>
+                </div>
+
+                <div class="plan-item">
+                    <span>Target 1</span>
+                    <b>{fmt_price(plan.get("target1"))}</b>
+                </div>
+
+                <div class="plan-item">
+                    <span>Target 2</span>
+                    <b>{fmt_price(plan.get("target2"))}</b>
+                </div>
+
+                <div class="plan-item">
+                    <span>PoP</span>
+                    <b>{fmt_pct(plan.get("pop"))}</b>
+                </div>
+
+                <div class="plan-item">
+                    <span>Delta</span>
+                    <b>{safe_float(plan.get("delta"), np.nan):.2f}
+                    </b>
+                </div>
+
+                <div class="plan-item">
+                    <span>IV</span>
+                    <b>{fmt_pct(plan.get("iv"))}</b>
+                </div>
+
+                <div class="plan-item">
+                    <span>Risk / Reward</span>
+                    <b>
+                        {safe_float(plan.get("rr1"), np.nan):.2f}R
+                    </b>
+                </div>
+
+            </div>
+
+            <div class="helper" style="margin-top:10px;">
+                <b>Entry Trigger:</b>
+                {plan.get("trigger", "—")}
+            </div>
+
+            <div class="helper" style="margin-top:6px;">
+                <b>Exit Rule:</b>
+                {plan.get("exit", "—")}
+            </div>
+
+            {fail_text}
+
+            {reference_text}
+
+        </div>
+        """
+    )
+
+
+def render_oi_map(oi_data, spot):
+
+    support = oi_data.get(
+        "support"
+    )
+
+    resistance = oi_data.get(
+        "resistance"
+    )
+
+    pcr = oi_data.get(
+        "pcr"
+    )
+
+    support_rows = oi_data.get(
+        "support_walls",
+        [],
+    )
+
+    resistance_rows = oi_data.get(
+        "resistance_walls",
+        [],
+    )
+
+    html = f"""
+    <div class="card">
+
+        <div class="card-title">
+            SUPPORT / RESISTANCE OI MAP
+        </div>
+
+        <div class="oi-map">
+
+            <div class="oi-row">
+                <span>Current Spot</span>
+                <b>{fmt_price(spot)}</b>
+            </div>
+
+            <div class="oi-row">
+                <span class="oi-support">
+                    Major Support
+                </span>
+                <b class="oi-support">
+                    {fmt_price(support)}
+                </b>
+            </div>
+
+            <div class="oi-row">
+                <span class="oi-resistance">
+                    Major Resistance
+                </span>
+                <b class="oi-resistance">
+                    {fmt_price(resistance)}
+                </b>
+            </div>
+
+            <div class="oi-row">
+                <span>PCR</span>
+                <b>{safe_float(pcr, np.nan):.2f}</b>
+            </div>
+
+        </div>
+    """
+
+    if support_rows:
+
+        html += """
+        <div class="helper"
+             style="margin-top:10px;margin-bottom:4px;">
+            Top Put OI walls
+        </div>
+        """
+
+        for strike, oi in support_rows[:3]:
+
+            html += f"""
+            <div class="oi-row">
+                <span>{strike:.0f} PE</span>
+                <b class="oi-support">
+                    {fmt_num(oi)}
+                </b>
+            </div>
+            """
+
+    if resistance_rows:
+
+        html += """
+        <div class="helper"
+             style="margin-top:10px;margin-bottom:4px;">
+            Top Call OI walls
+        </div>
+        """
+
+        for strike, oi in resistance_rows[:3]:
+
+            html += f"""
+            <div class="oi-row">
+                <span>{strike:.0f} CE</span>
+                <b class="oi-resistance">
+                    {fmt_num(oi)}
+                </b>
+            </div>
+            """
+
+    html += "</div>"
+
+    render_html(html)
+
+
+# ============================================================
+# HEADER
+# ============================================================
+
+render_html(
+    """
+    <div class="fo-header">
+
+        <div class="fo-header-title">
+            📊 FO PRO Trader Assistant
+        </div>
+
+        <div class="fo-header-sub">
+            LIVE UPSTOX • F&O ANALYSIS • OPTIONS PROBABILITY ENGINE
+        </div>
+
+    </div>
+    """
+)
 
 
 # ============================================================
@@ -3045,178 +3386,111 @@ def scan_full_fno_pop_market(
 with st.sidebar:
 
     st.markdown(
-        "### 🔥 Top 5 F&O PoP Scanner"
+        "## 🔥 Top 5 F&O PoP Scanner"
     )
 
     st.caption(
         "Full NSE equity F&O scan • PoP > 75%"
     )
 
-    scan_market = st.button(
+    if "scanner_results" not in st.session_state:
+        st.session_state.scanner_results = None
+
+    if "scanner_error" not in st.session_state:
+        st.session_state.scanner_error = None
+
+    if st.button(
         "🔎 Scan Full F&O Market",
         use_container_width=True,
-        type="primary",
-    )
+    ):
 
-    if scan_market:
+        st.session_state.scanner_error = None
 
         try:
-
-            with st.spinner(
-                "Scanning the full F&O market..."
-            ):
-
-                (
-                    results,
-                    total,
-                    scanned,
-                    failed,
-                ) = scan_full_fno_pop_market(
-                    75.0
+            st.session_state.scanner_results = (
+                scan_full_fno_pop_market(
+                    min_pop=75.0
                 )
-
-            st.session_state[
-                "fno_pop_results"
-            ] = results
-
-            st.session_state[
-                "fno_pop_scan_info"
-            ] = (
-                total,
-                scanned,
-                failed,
             )
-
-            st.session_state[
-                "fno_pop_scan_time"
-            ] = datetime.now(
-                IST
-            ).strftime("%H:%M:%S")
 
         except UpstoxRateLimitError as exc:
 
-            st.session_state[
-                "fno_pop_results"
-            ] = []
-
-            st.error(
-                f"⏳ Upstox rate limit reached. "
-                f"Wait about {exc.retry_after} seconds."
-            )
+            st.session_state.scanner_error = str(exc)
 
         except Exception as exc:
 
-            st.session_state[
-                "fno_pop_results"
-            ] = []
+            st.session_state.scanner_error = str(exc)
 
-            st.error(
-                f"F&O scan failed: {exc}"
-            )
+    if st.session_state.scanner_error:
 
-    pop_results = st.session_state.get(
-        "fno_pop_results",
-        [],
-    )
-
-    scan_info = st.session_state.get(
-        "fno_pop_scan_info"
-    )
-
-    scan_time = st.session_state.get(
-        "fno_pop_scan_time"
-    )
-
-    if pop_results:
-
-        st.success(
-            f"Top {len(pop_results)} trades • PoP > 75%"
+        st.error(
+            st.session_state.scanner_error
         )
 
-        if scan_info:
+    scanner_df = (
+        st.session_state.scanner_results
+    )
 
-            total, scanned, failed = scan_info
+    if (
+        scanner_df is not None
+        and not scanner_df.empty
+    ):
 
-            st.caption(
-                f"Scanned {scanned}/{total} • "
-                f"{failed} unavailable"
-            )
+        display_df = scanner_df.copy()
 
-        if scan_time:
+        display_df["Strike"] = (
+            display_df["Strike"]
+            .round(0)
+            .astype("Int64")
+        )
 
-            st.caption(
-                f"Last scan: {scan_time} IST"
-            )
+        display_df["PoP %"] = (
+            display_df["PoP %"]
+            .round(1)
+        )
 
-        scanner_display = pd.DataFrame(
-            [
-                {
-                    "Stock": row["Stock"],
-                    "Trade": row["Trade"],
-                    "Strike": int(
-                        row["Strike"]
-                    ),
-                    "PoP":
-                        f"{row['PoP']:.1f}%",
-                    "Entry":
-                        fmt_price(
-                            row["Entry"]
-                        ),
-                    "SL":
-                        fmt_price(
-                            row["SL"]
-                        ),
-                    "T1":
-                        fmt_price(
-                            row["Target1"]
-                        ),
-                    "T2":
-                        fmt_price(
-                            row["Target2"]
-                        ),
-                }
-                for row in pop_results
-            ]
+        display_df["Premium"] = (
+            display_df["Premium"]
+            .round(2)
+        )
+
+        display_df["Delta"] = (
+            display_df["Delta"]
+            .round(2)
         )
 
         st.dataframe(
-            scanner_display,
+            display_df[
+                [
+                    "Symbol",
+                    "Side",
+                    "Strike",
+                    "PoP %",
+                    "Premium",
+                ]
+            ],
             use_container_width=True,
             hide_index=True,
-            height=min(
-                350,
-                58
-                + len(scanner_display) * 50,
-            ),
         )
 
-    elif (
-        "fno_pop_results"
-        in st.session_state
-    ):
-
-        st.info(
-            "No F&O stock currently has "
-            "an option trade with PoP > 75%."
+        st.caption(
+            "Scanner results are candidates only. "
+            "Run Analyze before considering a setup."
         )
 
     st.divider()
 
     st.markdown(
-        "### 🔎 Analyze Instrument"
-    )
-
-    symbol_default = st.session_state.get(
-        "symbol",
-        "KOTAKBANK",
+        "### 🔍 Analyze Instrument"
     )
 
     symbol_input = st.text_input(
-        "Stock / Index",
-        value=symbol_default,
-        placeholder=(
-            "KOTAKBANK, HDFCBANK, NIFTY"
+        "Instrument",
+        value=st.session_state.get(
+            "selected_symbol",
+            "KOTAKBANK",
         ),
+        placeholder="e.g. KOTAKBANK",
     )
 
     risk_profile = st.selectbox(
@@ -3229,2228 +3503,1012 @@ with st.sidebar:
         index=1,
     )
 
-    analyze = st.button(
-        "🔍 Analyze",
+    analyze_clicked = st.button(
+        "📈 Analyze",
         type="primary",
         use_container_width=True,
     )
 
-    refresh = st.button(
-        "↻ Refresh Live Data",
+    if st.button(
+        "🔄 Refresh Data",
         use_container_width=True,
+    ):
+
+        st.cache_data.clear()
+        st.rerun()
+
+    auto_refresh = st.checkbox(
+        "Auto refresh every 60 seconds",
+        value=False,
     )
 
-    if st_autorefresh is not None:
+    if auto_refresh and st_autorefresh is not None:
 
-        auto_refresh = st.checkbox(
-            "Auto refresh every 60 seconds",
-            value=False,
-        )
-
-        if auto_refresh:
-
+        try:
             st_autorefresh(
                 interval=60_000,
-                key="upstox_live_refresh",
+                key="fo_auto_refresh_60",
+            )
+        except Exception:
+            st.caption(
+                "Auto-refresh component unavailable."
             )
 
-    st.divider()
+    elif auto_refresh:
+
+        st.caption(
+            "Install streamlit-autorefresh to enable "
+            "automatic refresh."
+        )
 
     st.caption(
-        "LIVE DATA • Powered by Upstox"
-    )
-
-    st.caption(
-        "No simulated market values are used."
+        "Analysis uses live Upstox REST data. "
+        "No simulated market prices are used."
     )
 
 
-if analyze:
+# ============================================================
+# SELECT SYMBOL
+# ============================================================
 
-    st.session_state[
-        "symbol"
-    ] = alias_symbol(
+if analyze_clicked:
+
+    symbol_input = alias_symbol(
         symbol_input
     )
 
-    st.rerun()
+    if symbol_input:
+        st.session_state.selected_symbol = (
+            symbol_input
+        )
 
+else:
 
-if refresh:
-
-    st.cache_data.clear()
-
-    st.rerun()
-
-
-symbol = alias_symbol(
-    st.session_state.get(
-        "symbol",
-        symbol_input or "KOTAKBANK",
+    symbol_input = st.session_state.get(
+        "selected_symbol",
+        alias_symbol(symbol_input),
     )
-)
 
 
 # ============================================================
-# LIVE DATA
+# DATA STATUS
 # ============================================================
 
-try:
+if market_is_open():
 
-    with st.spinner(
-        f"Fetching live Upstox data for {symbol}..."
-    ):
+    render_html(
+        """
+        <div class="status-live">
 
-        underlying = search_underlying(
-            symbol
-        )
+            <div class="status-title">
+                Data Status
+            </div>
 
-        underlying_key = underlying[
-            "instrument_key"
-        ]
+            <div class="status-value">
+                ● LIVE DATA
+            </div>
 
-        contracts = get_contracts(
-            underlying_key
-        )
-
-        expiries = available_expiries(
-            contracts
-        )
-
-        if not expiries:
-
-            raise UpstoxError(
-                "Upstox did not return an upcoming "
-                "F&O expiry for this instrument."
-            )
-
-        selected_expiry = expiries[0]
-
-        raw_chain = get_option_chain(
-            underlying_key,
-            selected_expiry,
-        )
-
-        chain = normalize_chain(
-            raw_chain
-        )
-
-        if chain.empty:
-
-            raise UpstoxError(
-                "Upstox returned an empty or "
-                "invalid option chain."
-            )
-
-        quote_data = get_quote(
-            underlying_key
-        )
-
-        spot = safe_float(
-            quote_data.get("last_price")
-        )
-
-        if not np.isfinite(spot) or spot <= 0:
-
-            raise UpstoxError(
-                "Upstox returned an invalid "
-                "underlying price."
-            )
-
-        previous_close = safe_float(
-            quote_data.get(
-                "prev_close_price"
-            ),
-            spot,
-        )
-
-        net_change = safe_float(
-            quote_data.get(
-                "net_change"
-            ),
-            spot - previous_close,
-        )
-
-        change_pct = (
-            net_change
-            / previous_close
-            * 100
-            if previous_close
-            else 0
-        )
-
-        candles = get_daily_candles(
-            underlying_key
-        )
-
-        candles_30m = get_30m_candles(
-            underlying_key
-        )
-
-        candles_5m = get_intraday_candles(
-            underlying_key,
-            5,
-        )
-
-        daily_tech = technicals(
-            candles,
-            spot,
-        )
-
-        tf30 = technicals(
-            candles_30m,
-            spot,
-        )
-
-        tf5 = technicals(
-            candles_5m,
-            spot,
-        )
-
-        tech = daily_tech
-
-except UpstoxRateLimitError as exc:
-
-    st.error(
-        f"⏳ Upstox rate limit reached. "
-        f"Please wait about {exc.retry_after} seconds "
-        "before refreshing."
+        </div>
+        """
     )
 
-    st.stop()
+else:
 
-except UpstoxError as exc:
+    render_html(
+        """
+        <div class="status-closed">
 
-    st.error(str(exc))
-    st.stop()
+            <div class="status-title">
+                Data Status
+            </div>
 
-except Exception as exc:
+            <div class="status-value">
+                ● MARKET CLOSED
+            </div>
 
-    st.error(
-        f"Unexpected error while loading live data: {exc}"
+        </div>
+        """
     )
-
-    st.stop()
 
 
 # ============================================================
 # ANALYSIS
 # ============================================================
 
-support, resistance, pcr, oi_wall_info = oi_levels(
-    chain,
-    spot,
-)
+try:
 
-if chain.empty:
-
-    st.error(
-        "No usable option-chain rows are available."
+    instrument = search_underlying(
+        symbol_input
     )
 
-    st.stop()
-
-
-atm_index = (
-    chain["Strike"] - spot
-).abs().idxmin()
-
-atm_strike = float(
-    chain.loc[
-        atm_index,
-        "Strike",
-    ]
-)
-
-candidate_rows = chain.iloc[
-    max(0, atm_index - 5):
-    min(len(chain), atm_index + 6)
-]
-
-
-ce_candidates = []
-pe_candidates = []
-
-
-for _, row in candidate_rows.iterrows():
-
-    ce_scored = score_option(
-        row,
-        "CE",
-        spot,
-        pcr,
-        tf5,
-        tf30,
-        daily_tech,
-        chain,
-        support=support,
-        resistance=resistance,
-        oi_wall_info=oi_wall_info,
+    underlying_key = instrument.get(
+        "instrument_key"
     )
 
-    pe_scored = score_option(
-        row,
-        "PE",
-        spot,
-        pcr,
-        tf5,
-        tf30,
-        daily_tech,
-        chain,
-        support=support,
-        resistance=resistance,
-        oi_wall_info=oi_wall_info,
+    display_symbol = (
+        instrument.get("trading_symbol")
+        or instrument.get("name")
+        or symbol_input
     )
 
-    ce_candidates.append(
-        (ce_scored, row)
-    )
-
-    pe_candidates.append(
-        (pe_scored, row)
-    )
-
-
-def candidate_key(item):
-
-    scored, _ = item
-
-    abs_delta = abs(
-        safe_float(
-            scored.get("delta"),
-            0,
+    if not underlying_key:
+        raise UpstoxError(
+            "Upstox did not return an instrument key."
         )
+
+    # --------------------------------------------------------
+    # Contracts / expiry
+    # --------------------------------------------------------
+
+    contracts = get_contracts(
+        underlying_key
     )
 
-    spread = safe_float(
-        scored.get("spread_pct"),
-        999,
+    expiries = available_expiries(
+        contracts
     )
 
-    volume = safe_float(
-        scored.get("volume"),
-        0,
+    if not expiries:
+        raise UpstoxError(
+            f"No active option expiry found for {display_symbol}."
+        )
+
+    selected_expiry = expiries[0]
+
+    # --------------------------------------------------------
+    # Chain
+    # --------------------------------------------------------
+
+    raw_chain = get_option_chain(
+        underlying_key,
+        selected_expiry,
     )
 
-    distance = safe_float(
-        scored.get("distance_pct"),
-        999,
+    chain = normalize_chain(
+        raw_chain
     )
-
-    delta_fit = -abs(
-        abs_delta - .55
-    )
-
-    return (
-        scored["score"],
-        delta_fit,
-        -spread,
-        np.log1p(
-            max(volume, 0)
-        ),
-        -distance,
-    )
-
-
-best_ce_scored, best_ce_row = max(
-    ce_candidates,
-    key=candidate_key,
-    default=(
-        {"score": 0},
-        None,
-    ),
-)
-
-best_pe_scored, best_pe_row = max(
-    pe_candidates,
-    key=candidate_key,
-    default=(
-        {"score": 0},
-        None,
-    ),
-)
-
-
-ce_plan = build_plan(
-    best_ce_row,
-    "CE",
-    spot,
-    support,
-    resistance,
-    pcr,
-    tf5,
-    tf30,
-    daily_tech,
-    risk_profile,
-    chain,
-    oi_wall_info,
-)
-
-pe_plan = build_plan(
-    best_pe_row,
-    "PE",
-    spot,
-    support,
-    resistance,
-    pcr,
-    tf5,
-    tf30,
-    daily_tech,
-    risk_profile,
-    chain,
-    oi_wall_info,
-)
-
-
-ce_score = (
-    ce_plan["score"]
-    if ce_plan
-    else 0
-)
-
-pe_score = (
-    pe_plan["score"]
-    if pe_plan
-    else 0
-)
-
-
-overall_direction, overall_alignment = overall_trend(
-    tf5,
-    tf30,
-    daily_tech,
-)
-
-
-# ============================================================
-# DECISION
-# ============================================================
-
-if (
-    ce_plan
-    and ce_score >= 72
-    and ce_score >= pe_score + 8
-    and overall_direction == "Bullish"
-    and ce_plan["readiness"]
-    in {
-        "READY",
-        "WAIT FOR TRIGGER",
-        "WAIT FOR CONFIRMATION",
-    }
-):
-
-    decision = (
-        "CALL BUY"
-        if ce_plan["readiness"] == "READY"
-        else ce_plan["readiness"]
-    )
-
-    best_plan = ce_plan
-
-elif (
-    pe_plan
-    and pe_score >= 72
-    and pe_score >= ce_score + 8
-    and overall_direction == "Bearish"
-    and pe_plan["readiness"]
-    in {
-        "READY",
-        "WAIT FOR TRIGGER",
-        "WAIT FOR CONFIRMATION",
-    }
-):
-
-    decision = (
-        "PUT BUY"
-        if pe_plan["readiness"] == "READY"
-        else pe_plan["readiness"]
-    )
-
-    best_plan = pe_plan
-
-else:
-
-    decision = "NO TRADE"
-
-    best_plan = (
-        ce_plan
-        if ce_score >= pe_score
-        else pe_plan
-    )
-
-
-best_score = (
-    best_plan["score"]
-    if best_plan
-    else 0
-)
-
-best_alignment = (
-    best_plan["alignment"]
-    if best_plan
-    else 0
-)
-
-confidence = int(
-    np.clip(
-        best_score * .70
-        + (
-            best_alignment / 3
-        ) * 20
-        + (
-            5
-            if overall_direction
-            in {"Bullish", "Bearish"}
-            else 0
-        ),
-        0,
-        100,
-    )
-)
-
-
-updated = quote_data.get(
-    "timestamp",
-    datetime.now(IST).isoformat(),
-)
-
-
-# ============================================================
-# UI HELPERS
-# ============================================================
-
-def num_or_dash(
-    value,
-    decimals=2,
-):
-
-    x = safe_float(value)
-
-    if not np.isfinite(x):
-        return "—"
-
-    return f"{x:.{decimals}f}"
-
-
-def status_class(value):
-
-    value = str(value).upper()
 
     if (
-        "READY" in value
-        or "PASS" in value
-        or "BUY" in value
+        chain.empty
+        or "Strike" not in chain.columns
     ):
-        return "status-green"
-
-    if (
-        "WAIT" in value
-        or "CAUTION" in value
-    ):
-        return "status-yellow"
-
-    if (
-        "NO TRADE" in value
-        or "FAIL" in value
-    ):
-        return "status-red"
-
-    return "status-grey"
-
-
-def check_row(
-    label,
-    state,
-    detail,
-):
-
-    if state == "PASS":
-
-        icon = "🟢"
-        css = "check-pass"
-
-    elif state == "WAIT":
-
-        icon = "🟡"
-        css = "check-wait"
-
-    else:
-
-        icon = "🔴"
-        css = "check-fail"
-
-    return (
-        "<div class='check-row'>"
-        f"<span class='check-label'>{label}</span>"
-        f"<strong class='check-state {css}'>"
-        f"{icon} {state}</strong>"
-        f"<small class='check-detail'>{detail}</small>"
-        "</div>"
-    )
-
-
-# ============================================================
-# MARKET STATUS
-# ============================================================
-
-market_now = datetime.now(IST)
-
-market_open = (
-    market_now.weekday() < 5
-    and (
-        market_now.hour,
-        market_now.minute,
-    ) >= (9, 15)
-    and (
-        market_now.hour,
-        market_now.minute,
-    ) < (15, 30)
-)
-
-
-# ============================================================
-# HEADER
-# ============================================================
-
-status_text = (
-    "● LIVE DATA"
-    if market_open
-    else "● MARKET CLOSED"
-)
-
-status_class_name = (
-    "data-status-live"
-    if market_open
-    else "data-status-closed"
-)
-
-st.markdown(
-    f"""
-<div class="topbar">
-    <div class="topbar-inner">
-        <div>
-            <div class="topbar-title">
-                📊 FO PRO Trader Assistant
-            </div>
-            <div class="topbar-sub">
-                Options Analysis • Live Upstox Market Data
-            </div>
-        </div>
-        <div class="{status_class_name}">
-            {status_text}
-        </div>
-    </div>
-</div>
-""",
-    unsafe_allow_html=True,
-)
-
-
-# ============================================================
-# INSTRUMENT HERO
-# ============================================================
-
-h1, h2, h3 = st.columns(
-    [2.2, 1, 1]
-)
-
-with h1:
-
-    st.markdown(
-        f"""
-<div class="instrument-card">
-    <div class="instrument-name">
-        {symbol} — F&O Options Analysis
-    </div>
-    <div class="instrument-sub">
-        Live underlying • Multi-timeframe confirmation • Option-chain analysis
-    </div>
-</div>
-""",
-        unsafe_allow_html=True,
-    )
-
-with h2:
-
-    change_class = (
-        "change-positive"
-        if net_change >= 0
-        else "change-negative"
-    )
-
-    st.markdown(
-        f"""
-<div class="instrument-card">
-    <div class="instrument-sub">
-        LAST TRADED
-    </div>
-    <div class="hero-price">
-        {fmt_price(spot)}
-    </div>
-    <div class="{change_class}">
-        {net_change:+.2f} ({change_pct:+.2f}%)
-    </div>
-</div>
-""",
-        unsafe_allow_html=True,
-    )
-
-with h3:
-
-    st.markdown(
-        f"""
-<div class="instrument-card">
-    <div class="instrument-sub">
-        DATA STATUS
-    </div>
-    <div class="{status_class_name}">
-        {status_text}
-    </div>
-    <div class="instrument-sub">
-        Expiry {selected_expiry}
-    </div>
-</div>
-""",
-        unsafe_allow_html=True,
-    )
-
-
-# ============================================================
-# MARKET SNAPSHOT
-# ============================================================
-
-st.markdown(
-    "<div class='section-heading'>📊 MARKET SNAPSHOT</div>",
-    unsafe_allow_html=True,
-)
-
-
-def metric_html(
-    label,
-    value,
-    note,
-    css="",
-):
-
-    return (
-        f"<div class='metric-card {css}'>"
-        f"<span>{label}</span>"
-        f"<b>{value}</b>"
-        f"<small>{note}</small>"
-        "</div>"
-    )
-
-
-m1, m2, m3 = st.columns(3)
-
-with m1:
-
-    st.markdown(
-        metric_html(
-            "LAST PRICE",
-            fmt_price(spot),
-            "LIVE PRICE",
-        ),
-        unsafe_allow_html=True,
-    )
-
-with m2:
-
-    bias_css = (
-        "metric-positive"
-        if tech["trend"] == "Bullish"
-        else "metric-negative"
-        if tech["trend"] == "Bearish"
-        else ""
-    )
-
-    st.markdown(
-        metric_html(
-            "MARKET BIAS",
-            tech["trend"],
-            "DAILY TREND",
-            bias_css,
-        ),
-        unsafe_allow_html=True,
-    )
-
-with m3:
-
-    pcr_display = (
-        f"{pcr:.2f}"
-        if np.isfinite(pcr)
-        else "—"
-    )
-
-    st.markdown(
-        metric_html(
-            "PCR",
-            pcr_display,
-            "PUT / CALL OI",
-        ),
-        unsafe_allow_html=True,
-    )
-
-
-m4, m5, m6 = st.columns(3)
-
-with m4:
-
-    st.markdown(
-        metric_html(
-            "SUPPORT",
-            fmt_price(support),
-            "PUT OI WALL",
-            "metric-support",
-        ),
-        unsafe_allow_html=True,
-    )
-
-with m5:
-
-    st.markdown(
-        metric_html(
-            "RESISTANCE",
-            fmt_price(resistance),
-            "CALL OI WALL",
-            "metric-resistance",
-        ),
-        unsafe_allow_html=True,
-    )
-
-with m6:
-
-    st.markdown(
-        metric_html(
-            "RSI",
-            f"{tech['rsi']:.1f}",
-            "DAILY RSI",
-        ),
-        unsafe_allow_html=True,
-    )
-
-
-# ============================================================
-# TRADE DECISION
-# ============================================================
-
-st.markdown(
-    "<div class='section-heading'>🎯 TRADE DECISION</div>",
-    unsafe_allow_html=True,
-)
-
-
-if decision == "CALL BUY":
-    decision_icon = "🟢"
-    decision_class = "decision-call"
-
-elif decision == "PUT BUY":
-    decision_icon = "🔴"
-    decision_class = "decision-put"
-
-elif "WAIT" in decision:
-    decision_icon = "🟡"
-    decision_class = "decision-neutral"
-
-else:
-    decision_icon = "⚪"
-    decision_class = "decision-neutral"
-
-
-decision_sub = {
-    "CALL BUY":
-        "Bullish conditions aligned — follow the entry trigger.",
-    "PUT BUY":
-        "Bearish conditions aligned — follow the entry trigger.",
-    "WAIT FOR TRIGGER":
-        "Setup is developing. Wait for the trigger before entry.",
-    "WAIT FOR CONFIRMATION":
-        "Trigger reached. Wait for confirmation before entry.",
-    "NO TRADE":
-        "Conditions are not sufficiently aligned for a valid setup.",
-}.get(
-    decision,
-    "Review live market conditions before trading.",
-)
-
-
-st.markdown(
-    f"""
-<div class="decision-card {decision_class}">
-    <div class="decision-main">
-        {decision_icon} {decision}
-    </div>
-
-    <div class="decision-sub">
-        {decision_sub}
-    </div>
-
-    <div class="decision-stats">
-        <div class="decision-stat">
-            <span>CALL SCORE</span>
-            <b>{ce_score:.0f}/100</b>
-        </div>
-
-        <div class="decision-stat">
-            <span>PUT SCORE</span>
-            <b>{pe_score:.0f}/100</b>
-        </div>
-
-        <div class="decision-stat">
-            <span>TREND</span>
-            <b>{overall_direction.upper()}</b>
-        </div>
-
-        <div class="decision-stat">
-            <span>CONFIDENCE</span>
-            <b>{confidence}/100</b>
-        </div>
-    </div>
-</div>
-""",
-    unsafe_allow_html=True,
-)
-
-
-# ============================================================
-# TRADE STATUS
-# ============================================================
-
-st.markdown(
-    "<div class='section-heading'>🚦 TRADE STATUS</div>",
-    unsafe_allow_html=True,
-)
-
-
-if best_plan:
-
-    if decision in {
-        "CALL BUY",
-        "PUT BUY",
-    }:
-
-        current_status = decision
-
-    elif decision in {
-        "WAIT FOR TRIGGER",
-        "WAIT FOR CONFIRMATION",
-    }:
-
-        current_status = decision
-
-    else:
-
-        current_status = "NO TRADE"
-
-    title_map = {
-        "CALL BUY":
-            "🟢 CALL BUY — ACTIONABLE",
-        "PUT BUY":
-            "🔴 PUT BUY — ACTIONABLE",
-        "WAIT FOR TRIGGER":
-            "🟡 WAIT FOR TRIGGER — DO NOT ENTER",
-        "WAIT FOR CONFIRMATION":
-            "🟡 WAIT FOR CONFIRMATION — DO NOT ENTER",
-        "NO TRADE":
-            "🔴 NO TRADE — DO NOT ENTER",
-    }
-
-    trigger_distance = abs(
-        spot
-        - best_plan["trigger_level"]
-    )
-
-    if current_status == "NO TRADE":
-
-        status_note = (
-            "Do not enter this setup now. "
-            "The current candidate is shown for reference only. "
-            "Wait for the engine to produce an actionable state."
+        raise UpstoxError(
+            "Upstox returned an empty or invalid option chain."
         )
 
-    else:
+    # --------------------------------------------------------
+    # Quote
+    # --------------------------------------------------------
 
-        status_note = best_plan[
-            "trigger"
-        ]
-
-    st.markdown(
-        f"""
-<div class="status-panel {status_class(current_status)}">
-
-    <div class="status-title">
-        {title_map[current_status]}
-    </div>
-
-    <div class="status-grid">
-
-        <div class="status-box">
-            <span>CURRENT PRICE</span>
-            <b>{fmt_price(spot)}</b>
-        </div>
-
-        <div class="status-box">
-            <span>TRIGGER</span>
-            <b>{fmt_price(best_plan["trigger_level"])}</b>
-        </div>
-
-        <div class="status-box">
-            <span>DISTANCE</span>
-            <b>{fmt_price(trigger_distance)}</b>
-        </div>
-
-    </div>
-
-    <div class="status-note">
-        {status_note}
-    </div>
-
-</div>
-""",
-        unsafe_allow_html=True,
+    quote = get_quote(
+        underlying_key
     )
 
-else:
-
-    st.markdown(
-        """
-<div class="status-panel status-grey">
-    <div class="status-title">
-        ⚪ NO VALID PLAN
-    </div>
-    <div class="status-note">
-        No usable option contract is currently available.
-    </div>
-</div>
-""",
-        unsafe_allow_html=True,
+    spot, previous_close, net_change, change_pct = (
+        parse_quote(quote)
     )
 
-
-# ============================================================
-# CHECKLIST
-# ============================================================
-
-direction_pass = (
-    overall_direction
-    in {"Bullish", "Bearish"}
-)
-
-mtf_pass = (
-    overall_alignment >= 2
-)
-
-oi_pass = (
-    np.isfinite(support)
-    and np.isfinite(resistance)
-    and support < spot < resistance
-)
-
-vwap_value = safe_float(
-    tf5.get("vwap"),
-    spot,
-)
-
-if best_plan:
-
-    if best_plan["side"] == "CE":
-
-        vwap_pass = (
-            spot >= vwap_value * .997
-        )
-
-    else:
-
-        vwap_pass = (
-            spot <= vwap_value * 1.003
-        )
-
-else:
-
-    vwap_pass = False
-
-
-breakout_state = (
-    "PASS"
-    if (
-        best_plan
-        and best_plan.get("trigger_hit")
-        and best_plan.get("candle_confirmed")
-        and best_plan.get("volume_confirmed")
-    )
-    else "WAIT"
-)
-
-
-st.markdown(
-    "<div class='section-heading'>🧠 TRADE CHECKLIST</div>",
-    unsafe_allow_html=True,
-)
-
-
-check_html = (
-    check_row(
-        "Market Direction",
-        "PASS"
-        if direction_pass
-        else "FAIL",
-        f"{overall_direction} market bias",
-    )
-
-    + check_row(
-        "Multi-Timeframe",
-        "PASS"
-        if mtf_pass
-        else "FAIL",
-        f"{overall_alignment}/3 timeframes aligned",
-    )
-
-    + check_row(
-        "OI Structure",
-        "PASS"
-        if oi_pass
-        else "FAIL",
-        f"Support {fmt_price(support)} • "
-        f"Resistance {fmt_price(resistance)}",
-    )
-
-    + check_row(
-        "VWAP",
-        "PASS"
-        if vwap_pass
-        else "FAIL",
-        f"5m VWAP {fmt_price(vwap_value)}",
-    )
-
-    + check_row(
-        "Breakout Confirmation",
-        breakout_state,
-        "Trigger + 5m momentum + volume",
-    )
-)
-
-
-check_overall = sum(
-    [
-        direction_pass,
-        mtf_pass,
-        oi_pass,
-        vwap_pass,
-        breakout_state == "PASS",
-    ]
-)
-
-
-st.markdown(
-    f"""
-<div class="check-card">
-    {check_html}
-
-    <div class="check-total">
-        <span>OVERALL CHECKLIST</span>
-        <b>{check_overall}/5</b>
-    </div>
-</div>
-""",
-    unsafe_allow_html=True,
-)
-
-
-# ============================================================
-# PLAN RENDERER
-# ============================================================
-
-def render_plan(
-    plan,
-    label,
-    active=False,
-    candidate=False,
-):
-
-    if not plan:
-
-        st.info(
-            f"{label} BUY — No valid option plan."
-        )
-
-        return
-
-    side = plan["side"]
-
-    icon = (
-        "🟢"
-        if side == "CE"
-        else "🔴"
-    )
-
-    contract = (
-        "CE"
-        if side == "CE"
-        else "PE"
-    )
-
-    readiness = str(
-        plan.get(
-            "readiness",
-            "NO TRADE",
-        )
-    )
-
-    plan_class = (
-        "plan-call"
-        if side == "CE"
-        else "plan-put"
-    )
-
-    notice = ""
-
-    if active:
-
-        notice = (
-            "<div class='plan-active'>"
-            "★ ACTIVE TRADE"
-            "</div>"
-        )
-
-    elif candidate:
-
-        notice = (
-            "<div class='plan-reference'>"
-            "◉ CANDIDATE ONLY — DO NOT ENTER"
-            "</div>"
-        )
-
-    status_css = status_class(
-        readiness
-    )
-
-    st.markdown(
-        f"""
-<div class="plan-card {plan_class}">
-
-    <div class="plan-title">
-        {icon} {label} BUY
-    </div>
-
-    <div class="plan-strike">
-        {plan["strike"]:.0f} {contract}
-    </div>
-
-    {notice}
-
-</div>
-""",
-        unsafe_allow_html=True,
-    )
-
-    p1, p2, p3, p4 = st.columns(4)
-
-    plan_values = [
-        (
-            "ENTRY",
-            fmt_price(
-                plan["entry"]
-            ),
-        ),
-        (
-            "STOP LOSS",
-            fmt_price(
-                plan["sl"]
-            ),
-        ),
-        (
-            "TARGET 1",
-            fmt_price(
-                plan["target1"]
-            ),
-        ),
-        (
-            "TARGET 2",
-            fmt_price(
-                plan["target2"]
-            ),
-        ),
-    ]
-
-    for col, (
-        title,
-        value,
-    ) in zip(
-        [p1, p2, p3, p4],
-        plan_values,
-    ):
-
-        with col:
-
-            st.markdown(
-                f"""
-<div class="plan-metric">
-    <span>{title}</span>
-    <b>{value}</b>
-</div>
-""",
-                unsafe_allow_html=True,
-            )
-
-    q1, q2, q3, q4 = st.columns(4)
-
-    quality_values = [
-        (
-            "POP",
-            f"{num_or_dash(plan['pop'],1)}%",
-        ),
-        (
-            "DELTA",
-            num_or_dash(
-                plan["delta"],
-                2,
-            ),
-        ),
-        (
-            "IV",
-            f"{num_or_dash(plan['iv'],1)}%",
-        ),
-        (
-            "R:R T2",
-            f"1:{num_or_dash(plan['rr2'],2)}",
-        ),
-    ]
-
-    for col, (
-        title,
-        value,
-    ) in zip(
-        [q1, q2, q3, q4],
-        quality_values,
-    ):
-
-        with col:
-
-            st.markdown(
-                f"""
-<div class="plan-metric">
-    <span>{title}</span>
-    <b>{value}</b>
-</div>
-""",
-                unsafe_allow_html=True,
-            )
-
-    if readiness == "READY":
-
-        st.success(
-            "🟢 READY"
-        )
-
-    elif "WAIT" in readiness:
-
-        st.warning(
-            f"🟡 {readiness}"
-        )
-
-    else:
-
-        st.error(
-            f"🔴 {readiness}"
-        )
-
-
-# ============================================================
-# TRADE PLAN
-# ============================================================
-
-st.markdown(
-    "<div class='section-heading'>🎯 TRADE PLAN</div>",
-    unsafe_allow_html=True,
-)
-
-
-active_side = (
-    "CE"
-    if decision == "CALL BUY"
-    else "PE"
-    if decision == "PUT BUY"
-    else None
-)
-
-candidate_side = (
-    best_plan["side"]
-    if best_plan
-    else None
-)
-
-
-p1, p2 = st.columns(2)
-
-with p1:
-
-    render_plan(
-        ce_plan,
-        "CALL",
-        active=active_side == "CE",
-        candidate=(
-            candidate_side == "CE"
-            and active_side is None
-        ),
-    )
-
-with p2:
-
-    render_plan(
-        pe_plan,
-        "PUT",
-        active=active_side == "PE",
-        candidate=(
-            candidate_side == "PE"
-            and active_side is None
-        ),
-    )
-
-
-# ============================================================
-# ENTRY / EXIT
-# ============================================================
-
-st.markdown(
-    "<div class='section-heading'>📍 ENTRY / EXIT</div>",
-    unsafe_allow_html=True,
-)
-
-
-if (
-    best_plan
-    and decision in {
-        "CALL BUY",
-        "PUT BUY",
-    }
-):
-
-    entry_distance = abs(
-        spot
-        - best_plan["trigger_level"]
-    )
-
-    entry_values = [
-        (
-            "CURRENT PRICE",
-            fmt_price(spot),
-            "Underlying",
-        ),
-        (
-            "ENTRY TRIGGER",
-            fmt_price(
-                best_plan[
-                    "trigger_level"
-                ]
-            ),
-            f"Distance {fmt_price(entry_distance)}",
-        ),
-        (
-            "STOP LOSS",
-            fmt_price(
-                best_plan["sl"]
-            ),
-            "Option premium",
-        ),
-        (
-            "TARGET 1",
-            fmt_price(
-                best_plan["target1"]
-            ),
-            "Partial exit",
-        ),
-        (
-            "TARGET 2",
-            fmt_price(
-                best_plan["target2"]
-            ),
-            "Final target",
-        ),
-    ]
-
-    e1, e2, e3 = st.columns(3)
-
-    for col, (
-        title,
-        value,
-        note,
-    ) in zip(
-        [e1, e2, e3],
-        entry_values[:3],
-    ):
-
-        with col:
-
-            st.markdown(
-                f"""
-<div class="entry-card">
-    <span>{title}</span>
-    <b>{value}</b>
-    <small>{note}</small>
-</div>
-""",
-                unsafe_allow_html=True,
-            )
-
-    e4, e5 = st.columns(2)
-
-    for col, (
-        title,
-        value,
-        note,
-    ) in zip(
-        [e4, e5],
-        entry_values[3:],
-    ):
-
-        with col:
-
-            st.markdown(
-                f"""
-<div class="entry-card">
-    <span>{title}</span>
-    <b>{value}</b>
-    <small>{note}</small>
-</div>
-""",
-                unsafe_allow_html=True,
-            )
-
-    st.markdown(
-        f"""
-<div class="exit-rule">
-    <span>EXIT RULE</span>
-    <b>{best_plan["exit"]}</b>
-</div>
-""",
-        unsafe_allow_html=True,
-    )
-
-else:
-
-    st.warning(
-        "NO TRADE: entry, stop-loss and targets are "
-        "reference levels only. Wait for CALL BUY or PUT BUY."
-    )
-
-
-# ============================================================
-# WHY TRADE / WHY NO TRADE
-# ============================================================
-
-title = (
-    "💡 WHY THIS TRADE?"
-    if decision in {
-        "CALL BUY",
-        "PUT BUY",
-    }
-    else "💡 WHY NO TRADE?"
-)
-
-st.markdown(
-    f"<div class='section-heading'>{title}</div>",
-    unsafe_allow_html=True,
-)
-
-
-why_items = []
-
-
-if best_plan:
-
-    side_name = (
-        "CALL"
-        if best_plan["side"] == "CE"
-        else "PUT"
-    )
-
-    if decision in {
-        "CALL BUY",
-        "PUT BUY",
-    }:
-
-        why_items.extend(
-            [
-                f"{tf5['trend']} 5m trend supports the {side_name} direction.",
-
-                f"{tf30['trend']} 30m trend and "
-                f"{daily_tech['trend']} daily trend are "
-                "included in the multi-timeframe confirmation.",
-
-                f"Price is "
-                f"{'above' if spot >= vwap_value else 'below'} "
-                f"the 5m VWAP at {fmt_price(vwap_value)}.",
-
-                f"OI structure shows support at "
-                f"{fmt_price(support)} and resistance at "
-                f"{fmt_price(resistance)}.",
-
-                f"Option PoP is "
-                f"{num_or_dash(best_plan['pop'],1)}% "
-                f"with Delta "
-                f"{num_or_dash(best_plan['delta'],2)}.",
-
-                f"Option spread is "
-                f"{num_or_dash(best_plan['spread_pct'],1)}% "
-                f"with volume "
-                f"{fmt_num(best_plan['volume'])}.",
-            ]
-        )
-
-    else:
-
-        why_items.extend(
-            [
-                f"The {side_name} is only the strongest "
-                "current candidate and is NOT an approved entry.",
-
-                f"Market direction is "
-                f"{overall_direction} and "
-                f"{overall_alignment}/3 timeframes align.",
-
-                f"5m: {tf5['trend']} • "
-                f"30m: {tf30['trend']} • "
-                f"Daily: {daily_tech['trend']}.",
-
-                f"Price is "
-                f"{'above' if spot >= vwap_value else 'below'} "
-                f"the 5m VWAP at {fmt_price(vwap_value)}.",
-
-                f"OI support: {fmt_price(support)} • "
-                f"OI resistance: {fmt_price(resistance)}.",
-
-                f"Candidate PoP: "
-                f"{num_or_dash(best_plan['pop'],1)}% • "
-                f"Delta: "
-                f"{num_or_dash(best_plan['delta'],2)}.",
-            ]
-        )
-
-    if best_plan["fail_reasons"]:
-
-        why_items.append(
-            "⚠ "
-            + "; ".join(
-                best_plan["fail_reasons"]
-            )
-        )
-
-else:
-
-    why_items.append(
-        "No valid option plan is currently available."
-    )
-
-
-why_html = ""
-
-for item in why_items:
-
-    warning = item.startswith("⚠")
-
-    clean = item.lstrip("⚠ ")
-
-    why_html += (
-        f"<div class='why-item "
-        f"{'why-warning' if warning else ''}'>"
-        f"{'⚠' if warning else '✓'} {clean}"
-        "</div>"
-    )
-
-
-st.markdown(
-    f"""
-<div class="why-card">
-    {why_html}
-</div>
-""",
-    unsafe_allow_html=True,
-)
-
-
-# ============================================================
-# SUPPORT / RESISTANCE OI MAP
-# ============================================================
-
-st.markdown(
-    "<div class='section-heading'>📍 SUPPORT / RESISTANCE + OI MAP</div>",
-    unsafe_allow_html=True,
-)
-
-
-put_row = nearest_row(
-    chain,
-    support,
-)
-
-call_row = nearest_row(
-    chain,
-    resistance,
-)
-
-
-put_oi = (
-    put_row["PE OI"]
-    if put_row is not None
-    else np.nan
-)
-
-call_oi = (
-    call_row["CE OI"]
-    if call_row is not None
-    else np.nan
-)
-
-
-support_room = (
-    max(
-        (spot - support)
-        / max(spot, 1)
-        * 100,
-        0,
-    )
-    if np.isfinite(support)
-    else np.nan
-)
-
-resistance_room = (
-    max(
-        (resistance - spot)
-        / max(spot, 1)
-        * 100,
-        0,
-    )
-    if np.isfinite(resistance)
-    else np.nan
-)
-
-
-st.markdown(
-    f"""
-<div class="sr-map">
-
-    <div class="sr-side sr-resistance">
-        <span>🔴 CALL OI WALL</span>
-        <b>{fmt_price(resistance)}</b>
-        <small>OI {fmt_num(call_oi)}</small>
-    </div>
-
-    <div class="sr-center">
-        <div class="room">
-            +{num_or_dash(resistance_room,2)}%
-        </div>
-
-        <div class="current-price">
-            ● {fmt_price(spot)}
-        </div>
-
-        <div class="room">
-            -{num_or_dash(support_room,2)}%
-        </div>
-    </div>
-
-    <div class="sr-side sr-support">
-        <span>🟢 PUT OI WALL</span>
-        <b>{fmt_price(support)}</b>
-        <small>OI {fmt_num(put_oi)}</small>
-    </div>
-
-</div>
-""",
-    unsafe_allow_html=True,
-)
-
-
-# ============================================================
-# TABS
-# ============================================================
-
-tab1, tab2, tab3, tab4 = st.tabs(
-    [
-        "🏆 Best Trade",
-        "🔎 Live Option Chain",
-        "📊 Market Analysis",
-        "🧠 How Engine Thinks",
-    ]
-)
-
-
-# ============================================================
-# BEST TRADE
-# ============================================================
-
-with tab1:
-
-    if decision == "NO TRADE":
-
-        st.error(
-            "⚪ NO TRADE — Current conditions "
-            "do not meet the quality gate."
-        )
-
-    elif best_plan:
-
-        icon = (
-            "🟢"
-            if best_plan["side"] == "CE"
-            else "🔴"
-        )
-
-        st.success(
-            f"{icon} {decision} • "
-            f"{best_plan['strike']:.0f} "
-            f"{'CE' if best_plan['side']=='CE' else 'PE'} • "
-            f"Entry {fmt_price(best_plan['entry'])} • "
-            f"SL {fmt_price(best_plan['sl'])} • "
-            f"T1 {fmt_price(best_plan['target1'])} • "
-            f"T2 {fmt_price(best_plan['target2'])}"
-        )
-
-    st.markdown(
-        "### Engine Summary"
-    )
-
-    s1, s2, s3, s4 = st.columns(4)
-
-    s1.metric(
-        "CALL SCORE",
-        f"{ce_score:.0f}/100",
-    )
-
-    s2.metric(
-        "PUT SCORE",
-        f"{pe_score:.0f}/100",
-    )
-
-    s3.metric(
-        "ALIGNMENT",
-        f"{overall_alignment}/3",
-    )
-
-    s4.metric(
-        "CHECKLIST",
-        f"{check_overall}/5",
-    )
-
-
-# ============================================================
-# OPTION CHAIN
-# ============================================================
-
-with tab2:
-
-    st.markdown(
-        f"### Live Option Chain — {selected_expiry}"
-    )
-
-    view = chain.copy()
-
-    display = pd.DataFrame(
-        {
-            "Strike":
-                view["Strike"]
-                .round(0)
-                .astype("Int64"),
-
-            "CE LTP":
-                view["CE LTP"]
-                .round(2),
-
-            "CE OI":
-                view["CE OI"]
-                .round(0)
-                .astype("Int64"),
-
-            "CE Chg OI":
-                view["CE Chg OI"]
-                .round(0)
-                .astype("Int64"),
-
-            "CE IV":
-                view["CE IV"]
-                .round(1),
-
-            "CE Delta":
-                view["CE Delta"]
-                .round(3),
-
-            "CE PoP":
-                view["CE PoP"]
-                .round(1),
-
-            "PE LTP":
-                view["PE LTP"]
-                .round(2),
-
-            "PE OI":
-                view["PE OI"]
-                .round(0)
-                .astype("Int64"),
-
-            "PE Chg OI":
-                view["PE Chg OI"]
-                .round(0)
-                .astype("Int64"),
-
-            "PE IV":
-                view["PE IV"]
-                .round(1),
-
-            "PE Delta":
-                view["PE Delta"]
-                .round(3),
-
-            "PE PoP":
-                view["PE PoP"]
-                .round(1),
-        }
-    )
-
-    display["_distance"] = (
-        display["Strike"]
-        .astype(float)
-        - spot
-    ).abs()
-
-    display = (
-        display
-        .sort_values("_distance")
-        .drop(columns="_distance")
-        .head(15)
-    )
-
-    def style_chain(row):
-
-        styles = [
-            ""
-            for _ in row.index
-        ]
+    # Fallback spot
+    if np.isnan(spot):
 
         try:
 
-            strike = float(
-                row["Strike"]
+            median_strike = safe_float(
+                chain["Strike"].median()
             )
 
-            if (
-                int(round(strike))
-                == int(round(atm_strike))
-            ):
-
-                styles = [
-                    "font-weight:700;"
-                    for _ in row.index
-                ]
-
-            if (
-                best_plan
-                and int(round(strike))
-                == int(
-                    round(
-                        best_plan["strike"]
-                    )
-                )
-            ):
-
-                styles = [
-                    "font-weight:900;"
-                    for _ in row.index
-                ]
+            spot = median_strike
 
         except Exception:
-            pass
+            spot = np.nan
 
-        return styles
+    if np.isnan(spot):
+        raise UpstoxError(
+            "Unable to determine current spot price."
+        )
 
-    styled_chain = (
-        display.style.apply(
-            style_chain,
-            axis=1,
+    # --------------------------------------------------------
+    # Candles / technicals
+    # --------------------------------------------------------
+
+    try:
+        df5 = get_intraday_candles(
+            underlying_key
+        )
+    except Exception:
+        df5 = pd.DataFrame()
+
+    try:
+        df30 = get_30m_candles(
+            underlying_key
+        )
+    except Exception:
+        df30 = pd.DataFrame()
+
+    try:
+        dfdaily = get_daily_candles(
+            underlying_key
+        )
+    except Exception:
+        dfdaily = pd.DataFrame()
+
+    tf5 = technicals(
+        df5,
+        spot,
+    )
+
+    tf30 = technicals(
+        df30,
+        spot,
+    )
+
+    daily = technicals(
+        dfdaily,
+        spot,
+    )
+
+    overall_direction = overall_trend(
+        tf5,
+        tf30,
+        daily,
+    )
+
+    # --------------------------------------------------------
+    # OI
+    # --------------------------------------------------------
+
+    oi_data = oi_levels(
+        chain,
+        spot,
+    )
+
+    support = oi_data.get(
+        "support"
+    )
+
+    resistance = oi_data.get(
+        "resistance"
+    )
+
+    pcr = oi_data.get(
+        "pcr"
+    )
+
+    # --------------------------------------------------------
+    # ATM / candidates
+    # --------------------------------------------------------
+
+    atm_row = nearest_row(
+        chain,
+        spot,
+    )
+
+    if atm_row is None:
+        raise UpstoxError(
+            "Unable to determine ATM option."
+        )
+
+    # Candidates within +/- 5 strikes
+    atm_index = (
+        chain["Strike"] - spot
+    ).abs().idxmin()
+
+    position = chain.index.get_loc(
+        atm_index
+    )
+
+    start = max(
+        0,
+        position - 5,
+    )
+
+    end = min(
+        len(chain),
+        position + 6,
+    )
+
+    candidate_chain = chain.iloc[
+        start:end
+    ].copy()
+
+    # --------------------------------------------------------
+    # Best CE
+    # --------------------------------------------------------
+
+    best_ce = None
+    best_ce_data = None
+
+    for _, row in candidate_chain.iterrows():
+
+        score_data = score_option(
+            row,
+            "CE",
+            spot,
+            tf5,
+            tf30,
+            daily,
+            pcr,
+            support,
+            resistance,
+        )
+
+        if (
+            best_ce_data is None
+            or score_data["score"]
+            > best_ce_data["score"]
+        ):
+
+            best_ce = row
+            best_ce_data = score_data
+
+    # --------------------------------------------------------
+    # Best PE
+    # --------------------------------------------------------
+
+    best_pe = None
+    best_pe_data = None
+
+    for _, row in candidate_chain.iterrows():
+
+        score_data = score_option(
+            row,
+            "PE",
+            spot,
+            tf5,
+            tf30,
+            daily,
+            pcr,
+            support,
+            resistance,
+        )
+
+        if (
+            best_pe_data is None
+            or score_data["score"]
+            > best_pe_data["score"]
+        ):
+
+            best_pe = row
+            best_pe_data = score_data
+
+    if best_ce is None:
+        raise UpstoxError(
+            "Unable to calculate CALL candidate."
+        )
+
+    if best_pe is None:
+        raise UpstoxError(
+            "Unable to calculate PUT candidate."
+        )
+
+    ce_score = int(
+        best_ce_data["score"]
+    )
+
+    pe_score = int(
+        best_pe_data["score"]
+    )
+
+    # --------------------------------------------------------
+    # Plans
+    # --------------------------------------------------------
+
+    ce_plan = build_plan(
+        best_ce,
+        "CE",
+        best_ce_data,
+        spot,
+        support,
+        resistance,
+        tf5,
+        risk_profile,
+    )
+
+    pe_plan = build_plan(
+        best_pe,
+        "PE",
+        best_pe_data,
+        spot,
+        support,
+        resistance,
+        tf5,
+        risk_profile,
+    )
+
+    # --------------------------------------------------------
+    # Decision logic
+    # --------------------------------------------------------
+
+    if (
+        ce_plan
+        and ce_score >= 72
+        and ce_score >= pe_score + 8
+        and overall_direction == "Bullish"
+        and ce_plan["readiness"]
+        in {
+            "READY",
+            "WAIT FOR TRIGGER",
+            "WAIT FOR CONFIRMATION",
+        }
+    ):
+
+        decision = (
+            "CALL BUY"
+            if ce_plan["readiness"] == "READY"
+            else ce_plan["readiness"]
+        )
+
+        best_plan = ce_plan
+
+    elif (
+        pe_plan
+        and pe_score >= 72
+        and pe_score >= ce_score + 8
+        and overall_direction == "Bearish"
+        and pe_plan["readiness"]
+        in {
+            "READY",
+            "WAIT FOR TRIGGER",
+            "WAIT FOR CONFIRMATION",
+        }
+    ):
+
+        decision = (
+            "PUT BUY"
+            if pe_plan["readiness"] == "READY"
+            else pe_plan["readiness"]
+        )
+
+        best_plan = pe_plan
+
+    else:
+
+        decision = "NO TRADE"
+
+        best_plan = (
+            ce_plan
+            if ce_score >= pe_score
+            else pe_plan
+        )
+
+    # --------------------------------------------------------
+    # Confidence
+    # --------------------------------------------------------
+
+    best_score = max(
+        ce_score,
+        pe_score,
+    )
+
+    best_alignment = 0
+
+    if best_plan:
+
+        best_alignment = safe_float(
+            best_plan.get("alignment"),
+            0,
+        )
+
+    confidence = (
+        best_score * 0.70
+        + (best_alignment / 3) * 20
+    )
+
+    if (
+        overall_direction in {
+            "Bullish",
+            "Bearish",
+        }
+    ):
+        confidence += 5
+
+    confidence = float(
+        np.clip(
+            confidence,
+            0,
+            100,
         )
     )
 
-    st.dataframe(
-        styled_chain,
-        use_container_width=True,
-        hide_index=True,
-        height=500,
+    # ========================================================
+    # TOP MARKET SUMMARY
+    # ========================================================
+
+    st.markdown(
+        f"### {display_symbol}"
     )
 
     st.caption(
-        "ATM and selected strikes are emphasized. "
-        "CE/PE LTP, OI, Change OI, IV, Delta and PoP are shown."
+        f"Expiry: {selected_expiry} • "
+        f"Risk Profile: {risk_profile} • "
+        f"Updated: {now_ist().strftime('%d %b %Y, %I:%M:%S %p')} IST"
     )
 
+    # --------------------------------------------------------
+    # Price metrics
+    # --------------------------------------------------------
 
-# ============================================================
-# MARKET ANALYSIS
-# ============================================================
+    metric_columns = st.columns(6)
 
-with tab3:
+    with metric_columns[0]:
+        metric_card(
+            "Spot",
+            fmt_price(spot),
+        )
 
-    a1, a2, a3, a4 = st.columns(4)
+    with metric_columns[1]:
+        metric_card(
+            "Change",
+            fmt_price(net_change),
+        )
 
-    a1.metric(
-        "EMA 20",
-        fmt_price(
-            daily_tech["ema20"]
-        ),
+    with metric_columns[2]:
+        metric_card(
+            "Change %",
+            fmt_pct(change_pct),
+        )
+
+    with metric_columns[3]:
+        metric_card(
+            "PCR",
+            (
+                f"{pcr:.2f}"
+                if not np.isnan(pcr)
+                else "—"
+            ),
+        )
+
+    with metric_columns[4]:
+        metric_card(
+            "Support",
+            fmt_price(support),
+        )
+
+    with metric_columns[5]:
+        metric_card(
+            "Resistance",
+            fmt_price(resistance),
+        )
+
+    # ========================================================
+    # DECISION
+    # ========================================================
+
+    render_decision(
+        decision,
+        overall_direction,
+        best_plan,
+        ce_score,
+        pe_score,
+        confidence,
     )
 
-    a2.metric(
-        "EMA 50",
-        fmt_price(
-            daily_tech["ema50"]
-        ),
-    )
+    # ========================================================
+    # TRADE STATUS + CHECKLIST
+    # ========================================================
 
-    a3.metric(
-        "ATR 14",
-        fmt_price(
-            daily_tech["atr"]
-        ),
+    left, right = st.columns(
+        [1.15, 0.85]
     )
-
-    a4.metric(
-        "5m VWAP",
-        fmt_price(
-            tf5["vwap"]
-        ),
-    )
-
-    st.markdown(
-        "### Multi-Timeframe Confirmation"
-    )
-
-    mtf = pd.DataFrame(
-        [
-            {
-                "Timeframe":
-                    "5 Minute",
-                "Trend":
-                    tf5["trend"],
-                "RSI":
-                    round(
-                        tf5["rsi"],
-                        1,
-                    ),
-                "ADX":
-                    round(
-                        tf5["adx"],
-                        1,
-                    ),
-                "Momentum %":
-                    round(
-                        tf5["momentum"],
-                        2,
-                    ),
-                "VWAP":
-                    fmt_price(
-                        tf5["vwap"]
-                    ),
-            },
-            {
-                "Timeframe":
-                    "30 Minute",
-                "Trend":
-                    tf30["trend"],
-                "RSI":
-                    round(
-                        tf30["rsi"],
-                        1,
-                    ),
-                "ADX":
-                    round(
-                        tf30["adx"],
-                        1,
-                    ),
-                "Momentum %":
-                    round(
-                        tf30["momentum"],
-                        2,
-                    ),
-                "VWAP":
-                    fmt_price(
-                        tf30["vwap"]
-                    ),
-            },
-            {
-                "Timeframe":
-                    "Daily",
-                "Trend":
-                    daily_tech["trend"],
-                "RSI":
-                    round(
-                        daily_tech["rsi"],
-                        1,
-                    ),
-                "ADX":
-                    round(
-                        daily_tech["adx"],
-                        1,
-                    ),
-                "Momentum %":
-                    round(
-                        daily_tech["momentum"],
-                        2,
-                    ),
-                "VWAP":
-                    fmt_price(
-                        daily_tech["vwap"]
-                    ),
-            },
-        ]
-    )
-
-    st.dataframe(
-        mtf,
-        use_container_width=True,
-        hide_index=True,
-    )
-
-    left, right = st.columns(2)
 
     with left:
 
-        st.markdown(
-            "### 🟢 Support / Put OI"
+        render_trade_status(
+            decision,
+            best_plan,
         )
-
-        st.write(
-            f"Major support: **{fmt_price(support)}**"
-        )
-
-        if put_row is not None:
-
-            st.write(
-                f"Put OI: **{fmt_num(put_row['PE OI'])}**"
-            )
-
-            st.write(
-                f"Put Chg OI: **{fmt_num(put_row['PE Chg OI'])}**"
-            )
 
     with right:
 
-        st.markdown(
-            "### 🔴 Resistance / Call OI"
+        render_checklist(
+            best_plan,
+            overall_direction,
         )
 
-        st.write(
-            f"Major resistance: **{fmt_price(resistance)}**"
-        )
-
-        if call_row is not None:
-
-            st.write(
-                f"Call OI: **{fmt_num(call_row['CE OI'])}**"
-            )
-
-            st.write(
-                f"Call Chg OI: **{fmt_num(call_row['CE Chg OI'])}**"
-            )
-
-    if not candles.empty:
-
-        chart = (
-            candles
-            .set_index("timestamp")
-            [["close"]]
-            .tail(80)
-        )
-
-        st.line_chart(
-            chart,
-            use_container_width=True,
-        )
-
-
-# ============================================================
-# HOW ENGINE THINKS
-# ============================================================
-
-with tab4:
+    # ========================================================
+    # TRADE PLAN
+    # ========================================================
 
     st.markdown(
-        "### Live-data decision framework"
+        '<div class="section-title">🎯 TRADE PLAN</div>',
+        unsafe_allow_html=True,
     )
 
+    if decision == "CALL BUY":
+
+        render_plan(
+            "CALL BUY",
+            ce_plan,
+        )
+
+    elif decision == "PUT BUY":
+
+        render_plan(
+            "PUT BUY",
+            pe_plan,
+        )
+
+    else:
+
+        # Clearly mark candidates as reference-only
+        if ce_plan:
+
+            render_plan(
+                "CALL CANDIDATE",
+                ce_plan,
+                reference_only=True,
+            )
+
+        if pe_plan:
+
+            render_plan(
+                "PUT CANDIDATE",
+                pe_plan,
+                reference_only=True,
+            )
+
+    # ========================================================
+    # SUPPORT / RESISTANCE
+    # ========================================================
+
     st.markdown(
+        '<div class="section-title">📍 OI STRUCTURE</div>',
+        unsafe_allow_html=True,
+    )
+
+    render_oi_map(
+        oi_data,
+        spot,
+    )
+
+    # ========================================================
+    # ENGINE SUMMARY
+    # ========================================================
+
+    st.markdown(
+        '<div class="section-title">🧠 ENGINE SUMMARY</div>',
+        unsafe_allow_html=True,
+    )
+
+    summary_columns = st.columns(4)
+
+    with summary_columns[0]:
+
+        metric_card(
+            "5M Trend",
+            tf5.get(
+                "trend",
+                "Unknown",
+            ),
+        )
+
+    with summary_columns[1]:
+
+        metric_card(
+            "30M Trend",
+            tf30.get(
+                "trend",
+                "Unknown",
+            ),
+        )
+
+    with summary_columns[2]:
+
+        metric_card(
+            "Daily Trend",
+            daily.get(
+                "trend",
+                "Unknown",
+            ),
+        )
+
+    with summary_columns[3]:
+
+        metric_card(
+            "RSI",
+            (
+                f"{tf5['rsi']:.1f}"
+                if not np.isnan(
+                    safe_float(tf5.get("rsi"))
+                )
+                else "—"
+            ),
+        )
+
+    # ========================================================
+    # TECHNICAL DETAILS
+    # ========================================================
+
+    details_left, details_right = st.columns(
+        2
+    )
+
+    with details_left:
+
+        render_html(
+            f"""
+            <div class="card">
+
+                <div class="card-title">
+                    Technical Snapshot
+                </div>
+
+                <div class="oi-row">
+                    <span>5M EMA20</span>
+                    <b>{fmt_price(tf5.get("ema20"))}</b>
+                </div>
+
+                <div class="oi-row">
+                    <span>5M EMA50</span>
+                    <b>{fmt_price(tf5.get("ema50"))}</b>
+                </div>
+
+                <div class="oi-row">
+                    <span>5M VWAP</span>
+                    <b>{fmt_price(tf5.get("vwap"))}</b>
+                </div>
+
+                <div class="oi-row">
+                    <span>5M ATR</span>
+                    <b>{fmt_price(tf5.get("atr"))}</b>
+                </div>
+
+                <div class="oi-row">
+                    <span>ADX</span>
+                    <b>
+                        {
+                            f"{safe_float(tf5.get('adx')):.1f}"
+                            if not np.isnan(
+                                safe_float(tf5.get("adx"))
+                            )
+                            else "—"
+                        }
+                    </b>
+                </div>
+
+                <div class="oi-row">
+                    <span>Volume Ratio</span>
+                    <b>
+                        {
+                            f"{safe_float(tf5.get('volume_ratio')):.2f}x"
+                            if not np.isnan(
+                                safe_float(tf5.get("volume_ratio"))
+                            )
+                            else "—"
+                        }
+                    </b>
+                </div>
+
+            </div>
+            """
+        )
+
+    with details_right:
+
+        render_html(
+            f"""
+            <div class="card">
+
+                <div class="card-title">
+                    Option Quality
+                </div>
+
+                <div class="oi-row">
+                    <span>CALL Score</span>
+                    <b>{ce_score}/100</b>
+                </div>
+
+                <div class="oi-row">
+                    <span>CALL PoP</span>
+                    <b>
+                        {fmt_pct(best_ce_data.get("pop"))}
+                    </b>
+                </div>
+
+                <div class="oi-row">
+                    <span>PUT Score</span>
+                    <b>{pe_score}/100</b>
+                </div>
+
+                <div class="oi-row">
+                    <span>PUT PoP</span>
+                    <b>
+                        {fmt_pct(best_pe_data.get("pop"))}
+                    </b>
+                </div>
+
+                <div class="oi-row">
+                    <span>CALL Delta</span>
+                    <b>
+                        {
+                            f"{safe_float(best_ce_data.get('delta')):.2f}"
+                            if not np.isnan(
+                                safe_float(best_ce_data.get("delta"))
+                            )
+                            else "—"
+                        }
+                    </b>
+                </div>
+
+                <div class="oi-row">
+                    <span>PUT Delta</span>
+                    <b>
+                        {
+                            f"{safe_float(best_pe_data.get('delta')):.2f}"
+                            if not np.isnan(
+                                safe_float(best_pe_data.get("delta"))
+                            )
+                            else "—"
+                        }
+                    </b>
+                </div>
+
+            </div>
+            """
+        )
+
+    # ========================================================
+    # OPTION CHAIN
+    # ========================================================
+
+    st.markdown(
+        '<div class="section-title">📋 LIVE OPTION CHAIN</div>',
+        unsafe_allow_html=True,
+    )
+
+    chain_display = candidate_chain.copy()
+
+    # Safe nullable integer conversion
+    for col in [
+        "Strike",
+        "CE OI",
+        "CE Chg OI",
+        "CE Volume",
+        "PE OI",
+        "PE Chg OI",
+        "PE Volume",
+    ]:
+
+        if col in chain_display.columns:
+            chain_display[col] = (
+                pd.to_numeric(
+                    chain_display[col],
+                    errors="coerce",
+                )
+                .round(0)
+                .astype("Int64")
+            )
+
+    # Round numerical fields
+    for col in [
+        "CE LTP",
+        "CE Bid",
+        "CE Ask",
+        "CE IV",
+        "CE Delta",
+        "CE PoP",
+        "PE LTP",
+        "PE Bid",
+        "PE Ask",
+        "PE IV",
+        "PE Delta",
+        "PE PoP",
+    ]:
+
+        if col in chain_display.columns:
+            chain_display[col] = pd.to_numeric(
+                chain_display[col],
+                errors="coerce",
+            ).round(2)
+
+    preferred_columns = [
+        "Strike",
+
+        "CE LTP",
+        "CE OI",
+        "CE Chg OI",
+        "CE Volume",
+        "CE IV",
+        "CE Delta",
+        "CE PoP",
+
+        "PE LTP",
+        "PE OI",
+        "PE Chg OI",
+        "PE Volume",
+        "PE IV",
+        "PE Delta",
+        "PE PoP",
+    ]
+
+    visible_columns = [
+        col
+        for col in preferred_columns
+        if col in chain_display.columns
+    ]
+
+    st.dataframe(
+        chain_display[visible_columns],
+        use_container_width=True,
+        hide_index=True,
+        height=430,
+    )
+
+    st.caption(
+        "Option chain is centered around the current spot "
+        "and shows approximately ±5 strikes."
+    )
+
+
+# ============================================================
+# ERROR HANDLING
+# ============================================================
+
+except UpstoxRateLimitError as exc:
+
+    render_html(
+        f"""
+        <div class="status-error">
+
+            <div class="status-title">
+                UPSTOX RATE LIMIT
+            </div>
+
+            <div class="status-value">
+                Please wait before refreshing
+            </div>
+
+            <div class="helper"
+                 style="margin-top:6px;color:#8f2c2c;">
+                {str(exc)}
+            </div>
+
+        </div>
         """
-**1. Market direction**
-
-- Live underlying price
-- 5-minute trend
-- 30-minute trend
-- Daily trend
-- EMA20 / EMA50
-- RSI
-- ADX
-- Momentum
-- Intraday VWAP
-
-**2. Option-chain structure**
-
-- Put OI
-- Put Change in OI
-- Call OI
-- Call Change in OI
-- PCR
-- OI-derived support
-- OI-derived resistance
-
-**3. Option quality**
-
-- LTP
-- Bid / Ask
-- Volume
-- IV
-- Delta
-- Upstox PoP
-- Spread
-- Strike distance
-- Room to OI wall
-
-**4. Trade plan**
-
-- Entry trigger
-- Entry price
-- Stop Loss
-- Target 1
-- Target 2
-- Exit / invalidation
-- Risk / Reward
-
-**5. Quality gate**
-
-- Minimum setup score: 72/100
-- At least 2 of 3 timeframes must agree
-- VWAP must support the direction
-- Short-term trend conflict blocks the setup
-- Delta must be within the acceptable range
-- Option liquidity and spread are checked
-- OI must be available
-- Upstox PoP must be at least 55%
-- Close OI walls can block a setup
-- Breakout requires 5m confirmation
-- The engine can return WAIT FOR TRIGGER
-- The engine can return WAIT FOR CONFIRMATION
-- The engine can return NO TRADE
-
-The score is a rule-based quality measure. It is not a backtested win rate or guarantee of profit.
-"""
     )
 
+except UpstoxError as exc:
 
-# ============================================================
-# FOOTER
-# ============================================================
+    render_html(
+        f"""
+        <div class="status-error">
 
-st.divider()
+            <div class="status-title">
+                DATA ERROR
+            </div>
 
-st.caption(
-    f"Live Upstox snapshot • {symbol} • "
-    f"Expiry {selected_expiry} • "
-    f"Updated {updated} • "
-    "Educational / decision-support use."
-)
+            <div class="status-value">
+                Unable to complete analysis
+            </div>
+
+            <div class="helper"
+                 style="margin-top:6px;color:#8f2c2c;">
+                {str(exc)}
+            </div>
+
+        </div>
+        """
+    )
+
+except Exception as exc:
+
+    render_html(
+        f"""
+        <div class="status-error">
+
+            <div class="status-title">
+                APPLICATION ERROR
+            </div>
+
+            <div class="status-value">
+                Analysis could not be completed
+            </div>
+
+            <div class="helper"
+                 style="margin-top:6px;color:#8f2c2c;">
+                {str(exc)}
+            </div>
+
+        </div>
+        """
+    )
