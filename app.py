@@ -108,7 +108,9 @@ st.markdown(
 .decision-sub {text-align:center;color:#667085;margin:9px 0 20px;font-size:13px;}
 .decision-stats {display:grid;grid-template-columns:repeat(4,1fr);gap:10px;}
 .decision-stats>div {background:rgba(255,255,255,.78);border:1px solid #edf0f3;border-radius:10px;padding:11px;text-align:center;}
-.decision-stats b {display:block;font-size:19px;margin-top:5px;color:#182230;}.decision-stats em {font-size:11px;font-style:normal;color:#98a2b3;}
+.decision-stats b {display:block;font-size:19px;margin-top:5px;color:#182230;}
+.decision-stats .decision-value {display:block;font-size:19px;font-weight:800;margin-top:5px;color:#182230;}
+.decision-stats .decision-value span {display:inline;font-size:11px;font-weight:600;color:#98a2b3;margin-left:3px;}
 .status-panel {border-radius:14px;padding:18px 20px;border:1px solid #e4e7ec;background:#fff;box-shadow:0 2px 8px rgba(16,42,67,.035);}
 .status-green {border-color:#bde5c9;background:#f4fbf6;}.status-yellow {border-color:#f1d79b;background:#fffbf1;}.status-red {border-color:#f2c5c8;background:#fff6f6;}.status-grey {border-color:#dfe3e8;background:#f8fafc;}
 .status-title {font-size:22px;font-weight:900;text-align:center;margin-bottom:15px;}
@@ -1598,14 +1600,41 @@ decision_sub = {
 st.markdown("<div class='section-heading'>🎯 TRADE DECISION</div>", unsafe_allow_html=True)
 st.markdown(
     f"""
-<div class='decision-card {decision_state_css}'>
-    <div class='decision-main'>{decision_icon} {decision}</div>
-    <div class='decision-sub'>{decision_sub}</div>
-    <div class='decision-stats'>
-        <div><span>BULL SCORE</span><b>{ce_score:.0f}<em>/100</em></b></div>
-        <div><span>BEAR SCORE</span><b>{pe_score:.0f}<em>/100</em></b></div>
-        <div><span>TREND</span><b>{overall_direction.upper()}</b></div>
-        <div><span>CONFIDENCE</span><b>{confidence}<em>/100</em></b></div>
+<div class="decision-card {decision_state_css}">
+    <div class="decision-main">{decision_icon} {decision}</div>
+
+    <div class="decision-sub">{decision_sub}</div>
+
+    <div class="decision-stats">
+
+        <div>
+            <span>BULL SCORE</span>
+            <div class="decision-value">
+                {ce_score:.0f}<span>/100</span>
+            </div>
+        </div>
+
+        <div>
+            <span>BEAR SCORE</span>
+            <div class="decision-value">
+                {pe_score:.0f}<span>/100</span>
+            </div>
+        </div>
+
+        <div>
+            <span>TREND</span>
+            <div class="decision-value">
+                {overall_direction.upper()}
+            </div>
+        </div>
+
+        <div>
+            <span>CONFIDENCE</span>
+            <div class="decision-value">
+                {confidence}<span>/100</span>
+            </div>
+        </div>
+
     </div>
 </div>
 """,
