@@ -1,22 +1,18 @@
+import html
 import threading
 import time
-from datetime import date, datetime, timedelta
-from urllib.parse import quote
+from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
+from urllib.parse import quote
 
 import numpy as np
 import pandas as pd
 import requests
 import streamlit as st
 
-try:
-    from streamlit_autorefresh import st_autorefresh
-except Exception:
-    st_autorefresh = None
-
 
 # ============================================================
-# FO PRO TRADER ASSISTANT — LIVE UPSTOX REST VERSION
+# PAGE CONFIG
 # ============================================================
 
 st.set_page_config(
@@ -26,8 +22,19 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
+
+# ============================================================
+# CONSTANTS
+# ============================================================
+
 API_BASE = "https://api.upstox.com"
 IST = ZoneInfo("Asia/Kolkata")
+
+MIN_API_GAP = 0.80
+
+_API_LOCK = threading.Lock()
+_LAST_API_REQUEST = 0.0
+_RATE_LIMIT_UNTIL = 0.0
 
 
 # ============================================================
@@ -37,670 +44,684 @@ IST = ZoneInfo("Asia/Kolkata")
 st.markdown(
     """
 <style>
+
 .stApp {
-    background:#f6f8fb;
+    background: #f6f8fb;
 }
 
 .block-container {
-    padding-top:1rem;
-    padding-bottom:2rem;
-    max-width:1500px;
+    padding-top: 1rem;
+    padding-bottom: 2rem;
+    max-width: 1500px;
 }
 
 .topbar {
-    background:linear-gradient(100deg,#102a43,#1f4b73);
-    padding:18px 24px;
-    border-radius:14px;
-    color:white;
-    margin-bottom:18px;
+    background: linear-gradient(100deg, #102a43, #1f4b73);
+    border-radius: 18px;
+    padding: 18px 22px;
+    color: white;
+    margin-bottom: 18px;
+    box-shadow: 0 8px 25px rgba(16,42,67,0.12);
 }
 
-.topbar-dashboard {
-    display:flex;
-    align-items:center;
-    justify-content:space-between;
-    gap:18px;
+.topbar-row {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 15px;
 }
 
 .topbar-title {
-    font-size:27px;
-    font-weight:800;
+    font-size: 25px;
+    font-weight: 900;
+    letter-spacing: -0.4px;
 }
 
 .topbar-sub {
-    font-size:13px;
-    opacity:.82;
-    margin-top:3px;
+    font-size: 12px;
+    margin-top: 5px;
+    opacity: 0.78;
 }
 
-.header-live,
 .live-block,
 .closed-block {
-    color:#fff;
-    padding:10px 16px;
-    border-radius:9px;
-    font-size:13px;
-    font-weight:800;
-    letter-spacing:.2px;
-    text-align:center;
-    white-space:nowrap;
-}
-
-.header-live {
-    background:rgba(255,255,255,.14);
+    min-width: 155px;
+    padding: 11px 15px;
+    border-radius: 12px;
+    text-align: center;
+    font-size: 11px;
+    font-weight: 700;
 }
 
 .live-block {
-    background:#16a34a;
+    background: rgba(22,163,74,0.16);
+    border: 1px solid rgba(74,222,128,0.45);
+    color: #dcfce7;
 }
 
 .closed-block {
-    background:#dc2626;
+    background: rgba(220,38,38,0.16);
+    border: 1px solid rgba(252,165,165,0.45);
+    color: #fee2e2;
 }
 
-.card {
-    background:white;
-    border:1px solid #e7ebf0;
-    border-radius:14px;
-    padding:18px;
-    margin-bottom:16px;
-    box-shadow:0 2px 8px rgba(16,42,67,.04);
+.live-block strong,
+.closed-block strong {
+    font-size: 12px;
 }
 
-.section-heading {
-    font-size:19px;
-    font-weight:850;
-    color:#182230;
-    margin:20px 0 10px;
+.hero-card {
+    background: white;
+    border: 1px solid #e5eaf0;
+    border-radius: 16px;
+    padding: 18px 20px;
+    margin-bottom: 14px;
+    box-shadow: 0 5px 18px rgba(15,23,42,0.04);
+}
+
+.hero-title {
+    font-size: 11px;
+    color: #667085;
+    font-weight: 800;
+    letter-spacing: .6px;
 }
 
 .hero-price {
-    font-size:29px;
-    font-weight:850;
-    line-height:1.05;
-    color:#182230;
+    font-size: 32px;
+    font-weight: 900;
+    color: #182230;
+    margin-top: 4px;
 }
 
-.metric-card,
-.entry-card {
-    background:#fff;
-    border:1px solid #e7ebf0;
-    border-radius:13px;
-    padding:15px 14px;
-    min-height:105px;
-    box-shadow:0 2px 8px rgba(16,42,67,.035);
+.hero-meta {
+    font-size: 11px;
+    color: #667085;
+    margin-top: 4px;
 }
 
-.metric-card span,
-.entry-card span,
-.decision-stats span,
-.status-grid span,
-.option-grid span,
-.exit-rule span {
-    display:block;
-    font-size:10px;
-    font-weight:800;
-    color:#667085;
-    letter-spacing:.55px;
+.metric-card {
+    background: white;
+    border: 1px solid #e5eaf0;
+    border-radius: 14px;
+    padding: 15px;
+    min-height: 92px;
+    box-shadow: 0 4px 15px rgba(15,23,42,0.035);
 }
 
-.metric-card b,
-.entry-card b {
-    display:block;
-    font-size:20px;
-    color:#182230;
-    margin-top:8px;
-    line-height:1.15;
+.metric-label {
+    font-size: 10px;
+    font-weight: 800;
+    color: #667085;
+    letter-spacing: .5px;
 }
 
-.metric-card small,
-.entry-card small {
-    display:block;
-    color:#98a2b3;
-    font-size:10px;
-    margin-top:7px;
+.metric-value {
+    font-size: 21px;
+    font-weight: 900;
+    color: #182230;
+    margin-top: 6px;
 }
 
-.metric-positive b,
-.metric-support b {
-    color:#147a3d;
+.metric-note {
+    font-size: 10px;
+    color: #98a2b3;
+    margin-top: 3px;
 }
 
-.metric-negative b,
-.metric-resistance b {
-    color:#b4232f;
-}
-
-.metric-neutral b {
-    color:#475467;
+.section-title {
+    font-size: 18px;
+    font-weight: 900;
+    color: #182230;
+    margin: 22px 0 10px;
 }
 
 .decision-card {
-    border-radius:16px;
-    padding:23px 25px;
-    border:1px solid #dfe5eb;
-    background:#fff;
-    box-shadow:0 3px 12px rgba(16,42,67,.055);
+    border-radius: 18px;
+    padding: 20px;
+    margin: 12px 0;
+    background: white;
+    border: 1px solid #e5eaf0;
+    box-shadow: 0 6px 20px rgba(15,23,42,0.05);
 }
 
 .decision-call {
-    border-color:#bde5c9;
-    background:linear-gradient(180deg,#f5fcf7,#fff);
+    border-left: 6px solid #16a34a;
 }
 
 .decision-put {
-    border-color:#f2c5c8;
-    background:linear-gradient(180deg,#fff7f7,#fff);
+    border-left: 6px solid #dc2626;
 }
 
 .decision-neutral {
-    border-color:#dfe3e8;
-    background:#fbfcfd;
+    border-left: 6px solid #64748b;
 }
 
-.decision-main {
-    font-size:32px;
-    font-weight:900;
-    text-align:center;
-    line-height:1.1;
-}
-
-.decision-call .decision-main {
-    color:#147a3d;
-}
-
-.decision-put .decision-main {
-    color:#b4232f;
-}
-
-.decision-neutral .decision-main {
-    color:#475467;
+.decision-title {
+    font-size: 24px;
+    font-weight: 950;
+    color: #182230;
 }
 
 .decision-sub {
-    text-align:center;
-    color:#667085;
-    margin:9px 0 20px;
-    font-size:13px;
+    color: #667085;
+    font-size: 12px;
+    margin-top: 4px;
 }
 
 .decision-stats {
-    display:grid;
-    grid-template-columns:repeat(4,1fr);
-    gap:10px;
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: 9px;
+    margin-top: 15px;
 }
 
 .decision-stats > div {
-    background:rgba(255,255,255,.78);
-    border:1px solid #edf0f3;
-    border-radius:10px;
-    padding:11px;
-    text-align:center;
+    background: #f8fafc;
+    border-radius: 10px;
+    padding: 10px;
+}
+
+.decision-stats span {
+    display: block;
+    font-size: 9px;
+    color: #667085;
+    font-weight: 800;
 }
 
 .decision-stats b {
-    display:block;
-    font-size:19px;
-    margin-top:5px;
-    color:#182230;
-}
-
-.status-panel {
-    border-radius:14px;
-    padding:18px 20px;
-    border:1px solid #e4e7ec;
-    background:#fff;
-    box-shadow:0 2px 8px rgba(16,42,67,.035);
-}
-
-.status-green {
-    border-color:#bde5c9;
-    background:#f4fbf6;
-}
-
-.status-yellow {
-    border-color:#f1d79b;
-    background:#fffbf1;
-}
-
-.status-red {
-    border-color:#f2c5c8;
-    background:#fff6f6;
-}
-
-.status-grey {
-    border-color:#dfe3e8;
-    background:#f8fafc;
-}
-
-.status-title {
-    font-size:22px;
-    font-weight:900;
-    text-align:center;
-    margin-bottom:15px;
-}
-
-.status-green .status-title {
-    color:#147a3d;
-}
-
-.status-yellow .status-title {
-    color:#9a6700;
-}
-
-.status-red .status-title {
-    color:#b4232f;
-}
-
-.status-grey .status-title {
-    color:#475467;
-}
-
-.status-grid {
-    display:grid;
-    grid-template-columns:repeat(3,1fr);
-    gap:12px;
-}
-
-.status-grid > div {
-    background:#fff;
-    border:1px solid #e8ebef;
-    border-radius:10px;
-    padding:11px;
-    text-align:center;
-}
-
-.status-grid b {
-    display:block;
-    font-size:18px;
-    color:#182230;
-    margin-top:5px;
-}
-
-.status-note {
-    margin-top:12px;
-    text-align:center;
-    color:#667085;
-    font-size:12px;
-    line-height:1.5;
-}
-
-.check-card {
-    background:#fff;
-    border:1px solid #e7ebf0;
-    border-radius:14px;
-    padding:8px 18px;
-    box-shadow:0 2px 8px rgba(16,42,67,.035);
-}
-
-.check-row {
-    display:grid;
-    grid-template-columns:1.35fr .8fr 2fr;
-    align-items:center;
-    gap:10px;
-    padding:12px 3px;
-    border-bottom:1px solid #eef0f2;
-}
-
-.check-row > span {
-    font-weight:750;
-    color:#344054;
-    font-size:13px;
-}
-
-.check-row small {
-    color:#98a2b3;
-    font-size:11px;
-}
-
-.check-pass {
-    color:#147a3d;
-}
-
-.check-wait {
-    color:#9a6700;
-}
-
-.check-fail {
-    color:#b4232f;
-}
-
-.check-total {
-    display:flex;
-    justify-content:space-between;
-    align-items:center;
-    padding:13px 3px 7px;
-    font-size:12px;
-    font-weight:850;
-    color:#667085;
-}
-
-.check-total b {
-    font-size:18px;
-    color:#182230;
+    display: block;
+    font-size: 15px;
+    color: #182230;
+    margin-top: 3px;
 }
 
 .option-card {
-    border:1px solid #e5e7eb;
-    border-radius:15px;
-    background:#fff;
-    padding:17px;
-    box-shadow:0 2px 9px rgba(16,42,67,.035);
+    background: white;
+    border: 1px solid #e5eaf0;
+    border-radius: 16px;
+    padding: 17px;
+    margin-bottom: 12px;
+    box-shadow: 0 5px 18px rgba(15,23,42,0.04);
 }
 
-.option-call {
-    border-top:4px solid #16a34a;
+.option-card.call {
+    border-top: 4px solid #16a34a;
 }
 
-.option-put {
-    border-top:4px solid #dc2626;
+.option-card.put {
+    border-top: 4px solid #dc2626;
 }
 
-.option-selected {
-    box-shadow:0 4px 16px rgba(16,42,67,.09);
+.option-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 10px;
 }
 
-.option-head {
-    display:flex;
-    justify-content:space-between;
-    align-items:center;
-    font-size:16px;
-    font-weight:900;
-    color:#182230;
-}
-
-.option-call .option-head > span:first-child {
-    color:#147a3d;
-}
-
-.option-put .option-head > span:first-child {
-    color:#b4232f;
-}
-
-.selected-tag {
-    font-size:9px;
-    background:#eef7f0;
-    color:#147a3d;
-    padding:5px 8px;
-    border-radius:12px;
-    letter-spacing:.4px;
+.option-title {
+    font-size: 14px;
+    color: #667085;
+    font-weight: 800;
 }
 
 .option-strike {
-    font-size:24px;
-    font-weight:900;
-    color:#182230;
-    margin:8px 0 14px;
-}
-
-.option-grid {
-    display:grid;
-    grid-template-columns:repeat(4,1fr);
-    gap:10px;
-}
-
-.option-grid > div {
-    background:#f8fafc;
-    border-radius:9px;
-    padding:9px;
-}
-
-.option-grid b {
-    display:block;
-    font-size:14px;
-    margin-top:5px;
-    color:#182230;
+    font-size: 24px;
+    color: #182230;
+    font-weight: 950;
+    margin-top: 2px;
 }
 
 .option-readiness {
-    margin-top:13px;
-    border-radius:8px;
-    text-align:center;
-    padding:8px;
-    font-size:11px;
-    font-weight:900;
-    letter-spacing:.4px;
+    border-radius: 8px;
+    padding: 7px 10px;
+    font-size: 10px;
+    font-weight: 900;
+    white-space: nowrap;
 }
 
-.option-empty {
-    padding:28px 5px;
-    color:#98a2b3;
-    text-align:center;
-    font-size:13px;
+.status-green {
+    background: #dcfce7;
+    color: #166534;
+}
+
+.status-red {
+    background: #fee2e2;
+    color: #991b1b;
+}
+
+.status-yellow {
+    background: #fef3c7;
+    color: #92400e;
+}
+
+.option-grid {
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: 8px;
+    margin-top: 14px;
+}
+
+.option-grid > div {
+    background: #f8fafc;
+    border-radius: 9px;
+    padding: 9px;
+}
+
+.option-grid span {
+    display: block;
+    font-size: 9px;
+    color: #667085;
+    font-weight: 800;
+}
+
+.option-grid b {
+    display: block;
+    color: #182230;
+    font-size: 13px;
+    margin-top: 3px;
 }
 
 .exit-rule {
-    background:#f8fafc;
-    border:1px solid #e7ebf0;
-    border-radius:11px;
-    padding:13px 15px;
-    margin-top:12px;
+    background: #f8fafc;
+    border-radius: 9px;
+    padding: 10px 12px;
+    margin-top: 9px;
+}
+
+.exit-rule span {
+    display: block;
+    color: #667085;
+    font-size: 9px;
+    font-weight: 900;
+    margin-bottom: 4px;
 }
 
 .exit-rule b {
-    display:block;
-    color:#344054;
-    font-size:12px;
-    margin-top:5px;
-    line-height:1.5;
+    font-size: 11px;
+    color: #344054;
+    line-height: 1.45;
 }
 
-.why-card {
-    background:#fff;
-    border:1px solid #e7ebf0;
-    border-radius:14px;
-    padding:7px 18px;
-    box-shadow:0 2px 8px rgba(16,42,67,.035);
+.validation-card,
+.why-card,
+.status-card,
+.sr-card {
+    background: white;
+    border: 1px solid #e5eaf0;
+    border-radius: 16px;
+    padding: 17px;
+    margin-bottom: 15px;
+    box-shadow: 0 5px 18px rgba(15,23,42,0.035);
+}
+
+.check-row {
+    display: grid;
+    grid-template-columns: 1.4fr auto 1fr;
+    align-items: center;
+    gap: 10px;
+    padding: 10px 0;
+    border-bottom: 1px solid #eef2f6;
+}
+
+.check-row span {
+    font-size: 11px;
+    font-weight: 700;
+    color: #344054;
+}
+
+.check-row strong {
+    font-size: 10px;
+    padding: 5px 8px;
+    border-radius: 6px;
+}
+
+.check-row small {
+    color: #98a2b3;
+    font-size: 10px;
+    text-align: right;
+}
+
+.check-pass {
+    background: #dcfce7;
+    color: #166534;
+}
+
+.check-wait {
+    background: #fef3c7;
+    color: #92400e;
+}
+
+.check-fail {
+    background: #fee2e2;
+    color: #991b1b;
+}
+
+.check-total {
+    display: flex;
+    justify-content: space-between;
+    margin-top: 13px;
+    padding-top: 12px;
+    border-top: 2px solid #eef2f6;
+    font-size: 12px;
+    font-weight: 800;
 }
 
 .why-item {
-    padding:10px 3px;
-    border-bottom:1px solid #eef0f2;
-    color:#344054;
-    font-size:12px;
+    padding: 9px 11px;
+    border-radius: 8px;
+    margin-bottom: 7px;
+    font-size: 11px;
 }
 
-.why-item:last-child {
-    border-bottom:0;
+.why-pass {
+    background: #ecfdf3;
+    color: #166534;
 }
 
 .why-warning {
-    color:#9a6700;
-    background:#fffbf1;
-    border-radius:7px;
-    padding:8px 9px;
-    margin:5px 0;
+    background: #fff7ed;
+    color: #9a3412;
+}
+
+.why-fail {
+    background: #fef2f2;
+    color: #991b1b;
 }
 
 .sr-map {
-    display:grid;
-    grid-template-columns:1fr 1.15fr 1fr;
-    align-items:stretch;
-    gap:0;
-    background:#fff;
-    border:1px solid #e7ebf0;
-    border-radius:15px;
-    overflow:hidden;
-    box-shadow:0 2px 8px rgba(16,42,67,.035);
-    min-height:150px;
+    background: white;
+    border: 1px solid #e5eaf0;
+    border-radius: 16px;
+    padding: 18px;
+    display: grid;
+    grid-template-columns: 1fr 1.4fr 1fr;
+    align-items: center;
+    gap: 15px;
 }
 
 .sr-side {
-    display:flex;
-    flex-direction:column;
-    justify-content:center;
-    align-items:center;
-    padding:18px;
-    text-align:center;
-}
-
-.sr-side span {
-    font-size:10px;
-    font-weight:900;
-    letter-spacing:.4px;
-}
-
-.sr-side b {
-    font-size:25px;
-    margin:7px 0;
-    color:#182230;
-}
-
-.sr-side small {
-    color:#667085;
-    font-size:11px;
-}
-
-.sr-resistance {
-    background:#fff7f7;
-}
-
-.sr-resistance span {
-    color:#b4232f;
+    padding: 14px;
+    border-radius: 12px;
+    text-align: center;
 }
 
 .sr-support {
-    background:#f4fbf6;
+    background: #ecfdf3;
 }
 
-.sr-support span {
-    color:#147a3d;
+.sr-resistance {
+    background: #fef2f2;
+}
+
+.sr-side span {
+    display: block;
+    font-size: 9px;
+    font-weight: 900;
+    color: #667085;
+}
+
+.sr-side b {
+    display: block;
+    font-size: 20px;
+    font-weight: 950;
+    color: #182230;
+    margin-top: 4px;
+}
+
+.sr-side small {
+    display: block;
+    color: #667085;
+    font-size: 10px;
+    margin-top: 3px;
 }
 
 .sr-line {
-    display:flex;
-    flex-direction:column;
-    justify-content:center;
-    align-items:center;
-    gap:8px;
-    background:#fff;
-    border-left:1px dashed #dfe3e8;
-    border-right:1px dashed #dfe3e8;
-}
-
-.room-label {
-    font-size:11px;
-    color:#98a2b3;
-    font-weight:700;
+    text-align: center;
 }
 
 .current-marker {
-    font-size:17px;
-    font-weight:900;
-    color:#182230;
-    background:#f2f4f7;
-    border:1px solid #e1e5ea;
-    border-radius:20px;
-    padding:8px 14px;
+    background: #182230;
+    color: white;
+    display: inline-block;
+    padding: 9px 15px;
+    border-radius: 10px;
+    font-size: 16px;
+    font-weight: 900;
 }
 
 .current-marker span {
-    font-size:9px;
-    color:#667085;
-    margin-left:5px;
-    letter-spacing:.4px;
+    display: block;
+    font-size: 8px;
+    opacity: .7;
 }
 
-.tab-alert {
-    border-radius:12px;
-    padding:14px 16px;
-    margin-bottom:16px;
-    line-height:1.55;
-    font-size:12px;
-}
-
-.tab-positive {
-    background:#f4fbf6;
-    border:1px solid #bde5c9;
-    color:#147a3d;
-}
-
-.tab-danger {
-    background:#fff6f6;
-    border:1px solid #f2c5c8;
-    color:#b4232f;
+.room-label {
+    font-size: 10px;
+    color: #667085;
+    font-weight: 700;
+    margin: 7px;
 }
 
 .scanner-card {
-    background:#fff;
-    border:1px solid #e7ebf0;
-    border-radius:13px;
-    padding:14px;
-    margin-bottom:10px;
+    background: white;
+    border: 1px solid #e5eaf0;
+    border-radius: 14px;
+    padding: 14px;
+    margin-bottom: 9px;
+    box-shadow: 0 4px 14px rgba(15,23,42,0.03);
+}
+
+.scanner-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 10px;
 }
 
 .scanner-title {
-    font-weight:900;
-    font-size:14px;
-    color:#182230;
+    font-size: 13px;
+    font-weight: 900;
+    color: #182230;
 }
 
 .scanner-meta {
-    color:#667085;
-    font-size:11px;
-    margin-top:5px;
+    font-size: 9px;
+    color: #667085;
+    font-weight: 800;
+    margin-top: 3px;
 }
 
-@media (max-width:900px) {
-    .decision-stats,
-    .status-grid {
-        grid-template-columns:repeat(2,1fr);
+.scanner-stats {
+    display: grid;
+    grid-template-columns: repeat(6, 1fr);
+    gap: 7px;
+    margin-top: 11px;
+}
+
+.scanner-stats > div {
+    background: #f8fafc;
+    padding: 8px;
+    border-radius: 8px;
+}
+
+.scanner-stats span {
+    display: block;
+    font-size: 8px;
+    color: #667085;
+    font-weight: 800;
+}
+
+.scanner-stats b {
+    display: block;
+    font-size: 12px;
+    color: #182230;
+    margin-top: 2px;
+}
+
+.info-box {
+    background: #eff6ff;
+    border: 1px solid #bfdbfe;
+    color: #1e40af;
+    padding: 12px 14px;
+    border-radius: 10px;
+    font-size: 11px;
+    line-height: 1.5;
+}
+
+.warning-box {
+    background: #fff7ed;
+    border: 1px solid #fed7aa;
+    color: #9a3412;
+    padding: 12px 14px;
+    border-radius: 10px;
+    font-size: 11px;
+    line-height: 1.5;
+}
+
+.error-box {
+    background: #fef2f2;
+    border: 1px solid #fecaca;
+    color: #991b1b;
+    padding: 12px 14px;
+    border-radius: 10px;
+    font-size: 11px;
+    line-height: 1.5;
+}
+
+.status-grid {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 10px;
+}
+
+.status-grid > div {
+    background: #f8fafc;
+    border-radius: 9px;
+    padding: 10px;
+}
+
+.status-grid span {
+    display: block;
+    font-size: 9px;
+    color: #667085;
+    font-weight: 800;
+}
+
+.status-grid b {
+    display: block;
+    font-size: 13px;
+    color: #182230;
+    margin-top: 3px;
+}
+
+.status-note {
+    color: #667085;
+    font-size: 10px;
+    margin-top: 12px;
+    line-height: 1.5;
+}
+
+.wall-card {
+    background: white;
+    border: 1px solid #e5eaf0;
+    border-radius: 13px;
+    padding: 13px;
+    margin-bottom: 8px;
+}
+
+.wall-title {
+    font-size: 12px;
+    font-weight: 900;
+    color: #182230;
+}
+
+.wall-meta {
+    font-size: 10px;
+    color: #667085;
+    margin-top: 4px;
+}
+
+.small-muted {
+    font-size: 10px;
+    color: #98a2b3;
+}
+
+.footer {
+    text-align: center;
+    color: #98a2b3;
+    font-size: 10px;
+    padding: 22px 0 5px;
+}
+
+@media (max-width: 900px) {
+
+    .topbar-row {
+        flex-direction: column;
+        align-items: stretch;
+    }
+
+    .live-block,
+    .closed-block {
+        width: 100%;
+    }
+
+    .decision-stats {
+        grid-template-columns: repeat(2, 1fr);
     }
 
     .option-grid {
-        grid-template-columns:repeat(2,1fr);
+        grid-template-columns: repeat(2, 1fr);
+    }
+
+    .scanner-stats {
+        grid-template-columns: repeat(3, 1fr);
     }
 
     .sr-map {
-        grid-template-columns:1fr;
+        grid-template-columns: 1fr;
     }
 
-    .sr-line {
-        padding:15px;
-        border-top:1px dashed #dfe3e8;
-        border-bottom:1px dashed #dfe3e8;
+    .status-grid {
+        grid-template-columns: 1fr;
     }
 
-    .topbar-dashboard {
-        align-items:flex-start;
-    }
-
-    .header-live {
-        display:none;
-    }
 }
 
-@media (max-width:600px) {
+@media (max-width: 600px) {
+
     .block-container {
-        padding-left:.7rem;
-        padding-right:.7rem;
-    }
-
-    .decision-main {
-        font-size:25px;
-    }
-
-    .check-row {
-        grid-template-columns:1fr .9fr;
-    }
-
-    .check-row small {
-        grid-column:1 / -1;
-    }
-
-    .metric-card,
-    .entry-card {
-        min-height:95px;
-    }
-
-    .option-grid {
-        grid-template-columns:repeat(2,1fr);
+        padding-left: .7rem;
+        padding-right: .7rem;
     }
 
     .topbar-title {
-        font-size:21px;
+        font-size: 21px;
     }
+
+    .hero-price {
+        font-size: 27px;
+    }
+
+    .decision-title {
+        font-size: 21px;
+    }
+
+    .scanner-stats {
+        grid-template-columns: repeat(2, 1fr);
+    }
+
+    .check-row {
+        grid-template-columns: 1fr auto;
+    }
+
+    .check-row small {
+        grid-column: 1 / -1;
+        text-align: left;
+    }
+
 }
+
 </style>
 """,
     unsafe_allow_html=True,
@@ -708,7 +729,7 @@ st.markdown(
 
 
 # ============================================================
-# ERRORS
+# EXCEPTIONS
 # ============================================================
 
 class UpstoxError(RuntimeError):
@@ -718,202 +739,31 @@ class UpstoxError(RuntimeError):
 class UpstoxRateLimitError(UpstoxError):
     def __init__(self, message, retry_after=30):
         super().__init__(message)
-        self.retry_after = int(max(1, retry_after or 30))
+        self.retry_after = int(max(1, retry_after))
 
 
 # ============================================================
-# API STATE / RATE LIMIT PROTECTION
+# TIME / MARKET STATUS
 # ============================================================
-
-_API_REQUEST_LOCK = threading.Lock()
-_LAST_API_REQUEST = 0.0
-_RATE_LIMIT_UNTIL = 0.0
-
-# Deliberately conservative.
-_MIN_API_GAP = 0.75
-
 
 def now_ist():
     return datetime.now(IST)
 
 
-def market_is_open():
-    """
-    NSE-style regular session:
-    Monday-Friday, 09:15-15:30 IST.
+def is_market_open(dt=None):
+    if dt is None:
+        dt = now_ist()
 
-    This is deliberately a clock-based status. It does not pretend that a
-    weekday holiday is an active exchange session.
-    """
-    current = now_ist()
-
-    if current.weekday() >= 5:
+    if dt.weekday() >= 5:
         return False
 
-    t = current.time()
-    return (
-        t >= datetime.strptime("09:15", "%H:%M").time()
-        and t <= datetime.strptime("15:30", "%H:%M").time()
-    )
+    current = dt.hour * 60 + dt.minute
+
+    return 9 * 60 + 15 <= current <= 15 * 60 + 30
 
 
-def cooldown_remaining():
-    global _RATE_LIMIT_UNTIL
-    return max(0, int(round(_RATE_LIMIT_UNTIL - time.monotonic())))
-
-
-def _extract_retry_after(response):
-    header = response.headers.get("Retry-After")
-
-    if header:
-        try:
-            value = float(header)
-            if value >= 0:
-                return int(max(1, round(value)))
-        except Exception:
-            pass
-
-    try:
-        body = response.json()
-
-        if isinstance(body, dict):
-            for key in (
-                "retry_after",
-                "retryAfter",
-                "retry_after_seconds",
-            ):
-                value = body.get(key)
-                if value is not None:
-                    return int(max(1, float(value)))
-
-            errors = body.get("errors")
-            if isinstance(errors, list) and errors:
-                first = errors[0]
-                if isinstance(first, dict):
-                    for key in (
-                        "retry_after",
-                        "retryAfter",
-                        "retry_after_seconds",
-                    ):
-                        value = first.get(key)
-                        if value is not None:
-                            return int(max(1, float(value)))
-    except Exception:
-        pass
-
-    return 30
-
-
-def api_get(path, params=None, timeout=20):
-    """
-    Central Upstox GET wrapper.
-
-    Important protections:
-    - global minimum request spacing
-    - global 429 cooldown
-    - Retry-After support
-    - no immediate retry after 429
-    - useful errors for 401/403/404/5xx
-    """
-    global _LAST_API_REQUEST
-    global _RATE_LIMIT_UNTIL
-
-    remaining = cooldown_remaining()
-
-    if remaining > 0:
-        raise UpstoxRateLimitError(
-            f"Upstox rate limit cooldown is active. "
-            f"Please wait about {remaining} seconds.",
-            retry_after=remaining,
-        )
-
-    with _API_REQUEST_LOCK:
-        remaining = cooldown_remaining()
-
-        if remaining > 0:
-            raise UpstoxRateLimitError(
-                f"Upstox rate limit cooldown is active. "
-                f"Please wait about {remaining} seconds.",
-                retry_after=remaining,
-            )
-
-        now = time.monotonic()
-        wait_for = _MIN_API_GAP - (now - _LAST_API_REQUEST)
-
-        if wait_for > 0:
-            time.sleep(wait_for)
-
-        _LAST_API_REQUEST = time.monotonic()
-
-    try:
-        response = requests.get(
-            f"{API_BASE}{path}",
-            headers=HEADERS,
-            params=params,
-            timeout=timeout,
-        )
-    except requests.RequestException as exc:
-        raise UpstoxError(
-            f"Network error while contacting Upstox: {exc}"
-        ) from exc
-
-    if response.status_code == 429:
-        retry_after = _extract_retry_after(response)
-
-        # Add a small safety margin so the next request is not made
-        # immediately when the upstream limit expires.
-        _RATE_LIMIT_UNTIL = time.monotonic() + retry_after + 2
-
-        raise UpstoxRateLimitError(
-            f"Upstox rate limit reached. Please wait about "
-            f"{retry_after} seconds before refreshing.",
-            retry_after=retry_after,
-        )
-
-    if response.status_code in (401, 403):
-        raise UpstoxError(
-            "Upstox rejected the access token. "
-            "Please generate a fresh Upstox access token and update "
-            "UPSTOX_ACCESS_TOKEN in Streamlit Secrets."
-        )
-
-    if response.status_code == 404:
-        raise UpstoxError(
-            f"Upstox endpoint/resource was not found: {path}"
-        )
-
-    if response.status_code >= 500:
-        raise UpstoxError(
-            f"Upstox server error HTTP {response.status_code}. "
-            "Please try again after a short interval."
-        )
-
-    if response.status_code != 200:
-        try:
-            body = response.json()
-
-            if isinstance(body, dict):
-                message = (
-                    body.get("message")
-                    or body.get("errors")
-                    or body
-                )
-            else:
-                message = body
-
-        except Exception:
-            message = response.text[:500]
-
-        raise UpstoxError(
-            f"Upstox API {response.status_code}: {message}"
-        )
-
-    try:
-        return response.json()
-    except Exception as exc:
-        raise UpstoxError(
-            "Upstox returned invalid JSON."
-        ) from exc
+def rate_limit_remaining():
+    return max(0, int(_RATE_LIMIT_UNTIL - time.time()))
 
 
 # ============================================================
@@ -922,9 +772,7 @@ def api_get(path, params=None, timeout=20):
 
 def get_token():
     try:
-        return str(
-            st.secrets.get("UPSTOX_ACCESS_TOKEN", "")
-        ).strip()
+        return str(st.secrets.get("UPSTOX_ACCESS_TOKEN", "")).strip()
     except Exception:
         return ""
 
@@ -934,8 +782,7 @@ TOKEN = get_token()
 if not TOKEN:
     st.error(
         "Upstox access token is not configured. "
-        "Add UPSTOX_ACCESS_TOKEN under Streamlit → App settings → Secrets, "
-        "then reload the app."
+        "Add UPSTOX_ACCESS_TOKEN under Streamlit → App settings → Secrets."
     )
     st.stop()
 
@@ -948,24 +795,144 @@ HEADERS = {
 
 
 # ============================================================
-# FORMATTING
+# API
 # ============================================================
 
-def finite(value):
-    try:
-        return bool(np.isfinite(float(value)))
-    except Exception:
-        return False
+def _extract_retry_after(response):
+    value = response.headers.get("Retry-After")
 
+    if value:
+        try:
+            return max(1, int(float(value)))
+        except Exception:
+            pass
+
+    try:
+        body = response.json()
+    except Exception:
+        body = {}
+
+    if isinstance(body, dict):
+        candidates = [
+            body.get("retry_after"),
+            body.get("retryAfter"),
+        ]
+
+        errors = body.get("errors")
+
+        if isinstance(errors, list) and errors:
+            first = errors[0]
+            if isinstance(first, dict):
+                candidates.extend(
+                    [
+                        first.get("retry_after"),
+                        first.get("retryAfter"),
+                    ]
+                )
+
+        for candidate in candidates:
+            try:
+                return max(1, int(float(candidate)))
+            except Exception:
+                continue
+
+    return 30
+
+
+def api_get(path, params=None, timeout=15):
+    global _LAST_API_REQUEST
+    global _RATE_LIMIT_UNTIL
+
+    remaining = rate_limit_remaining()
+
+    if remaining > 0:
+        raise UpstoxRateLimitError(
+            f"Upstox rate limit cooldown active. Please wait {remaining} seconds.",
+            remaining,
+        )
+
+    with _API_LOCK:
+
+        remaining = rate_limit_remaining()
+
+        if remaining > 0:
+            raise UpstoxRateLimitError(
+                f"Upstox rate limit cooldown active. Please wait {remaining} seconds.",
+                remaining,
+            )
+
+        elapsed = time.time() - _LAST_API_REQUEST
+
+        if elapsed < MIN_API_GAP:
+            time.sleep(MIN_API_GAP - elapsed)
+
+        try:
+            response = requests.get(
+                f"{API_BASE}{path}",
+                headers=HEADERS,
+                params=params or {},
+                timeout=timeout,
+            )
+        except requests.RequestException as exc:
+            raise UpstoxError(f"Unable to connect to Upstox: {exc}") from exc
+
+        _LAST_API_REQUEST = time.time()
+
+    if response.status_code == 429:
+        retry_after = _extract_retry_after(response)
+        _RATE_LIMIT_UNTIL = time.time() + retry_after
+
+        raise UpstoxRateLimitError(
+            f"Upstox API rate limit reached. "
+            f"Please wait approximately {retry_after} seconds.",
+            retry_after,
+        )
+
+    if response.status_code in (401, 403):
+        raise UpstoxError(
+            "Upstox authentication failed. "
+            "Your access token may have expired or may be invalid."
+        )
+
+    if response.status_code >= 500:
+        raise UpstoxError(
+            f"Upstox server temporarily returned HTTP {response.status_code}."
+        )
+
+    if response.status_code >= 400:
+        try:
+            detail = response.json()
+        except Exception:
+            detail = response.text[:300]
+
+        raise UpstoxError(
+            f"Upstox API error {response.status_code}: {detail}"
+        )
+
+    try:
+        return response.json()
+    except Exception as exc:
+        raise UpstoxError("Upstox returned an invalid JSON response.") from exc
+
+
+# ============================================================
+# SAFE HELPERS
+# ============================================================
 
 def safe_float(value, default=np.nan):
     try:
-        result = float(value)
-
-        if not np.isfinite(result):
+        if value is None:
             return default
 
-        return result
+        if isinstance(value, str):
+            value = value.replace(",", "").strip()
+
+        x = float(value)
+
+        if not np.isfinite(x):
+            return default
+
+        return x
 
     except Exception:
         return default
@@ -992,13 +959,13 @@ def fmt_num(value):
     return f"{x:,.0f}"
 
 
-def fmt_pct(value, decimals=1):
+def fmt_pct(value):
     x = safe_float(value)
 
     if not np.isfinite(x):
         return "—"
 
-    return f"{x:.{decimals}f}%"
+    return f"{x:.1f}%"
 
 
 def fmt_delta(value):
@@ -1010,29 +977,21 @@ def fmt_delta(value):
     return f"{x:.2f}"
 
 
-def normalize_probability(value):
-    """
-    Upstox/other APIs can represent probabilities either as:
-        0.65
-    or:
-        65
-
-    Normalize both to 0-100.
-    """
+def normalize_pop(value):
     x = safe_float(value)
 
     if not np.isfinite(x):
         return np.nan
 
     if 0 <= x <= 1:
-        return x * 100
+        x *= 100
 
     return x
 
 
-# ============================================================
-# SYMBOL / INSTRUMENT
-# ============================================================
+def esc(value):
+    return html.escape(str(value))
+
 
 def alias_symbol(symbol):
     s = str(symbol).strip().upper().replace(" ", "")
@@ -1042,31 +1001,50 @@ def alias_symbol(symbol):
         "NIFTYBANK": "BANKNIFTY",
         "NIFTYFIN": "FINNIFTY",
         "MIDCAPNIFTY": "MIDCPNIFTY",
+        "MIDNIFTY": "MIDCPNIFTY",
     }
 
     return aliases.get(s, s)
 
 
-INDEX_SYMBOLS = {
-    "NIFTY",
-    "BANKNIFTY",
-    "FINNIFTY",
-    "MIDCPNIFTY",
-}
+def extract_ltp(data):
+    if not isinstance(data, dict):
+        return np.nan
+
+    for key in (
+        "last_price",
+        "ltp",
+        "last_traded_price",
+        "lastTradedPrice",
+        "close",
+    ):
+        value = safe_float(data.get(key))
+
+        if np.isfinite(value):
+            return value
+
+    return np.nan
 
 
-@st.cache_data(ttl=120, show_spinner=False)
+# ============================================================
+# INSTRUMENT SEARCH
+# ============================================================
+
+@st.cache_data(ttl=300, show_spinner=False)
 def search_underlying(symbol):
     symbol = alias_symbol(symbol)
 
-    if symbol in INDEX_SYMBOLS:
-        segments = ["INDEX"]
-    else:
-        segments = ["EQ"]
+    index_symbols = {
+        "NIFTY",
+        "BANKNIFTY",
+        "FINNIFTY",
+        "MIDCPNIFTY",
+    }
 
-    results = []
+    segments = ["INDEX"] if symbol in index_symbols else ["EQ", "INDEX"]
 
     for segment in segments:
+
         payload = api_get(
             "/v2/instruments/search",
             params={
@@ -1078,105 +1056,113 @@ def search_underlying(symbol):
             },
         )
 
-        results.extend(payload.get("data", []))
+        rows = payload.get("data", [])
 
-    if not results:
-        raise UpstoxError(
-            f"No NSE instrument found for '{symbol}'. "
-            "Use an NSE F&O stock symbol such as HDFCBANK "
-            "or an index such as NIFTY."
-        )
+        if not isinstance(rows, list):
+            rows = []
 
-    exact = [
-        item
-        for item in results
-        if str(item.get("trading_symbol", "")).upper() == symbol
-    ]
+        exact = []
 
-    if exact:
-        return exact[0]
+        for row in rows:
+            if str(row.get("trading_symbol", "")).upper() == symbol:
+                exact.append(row)
 
-    if symbol in INDEX_SYMBOLS:
-        indexes = [
-            item
-            for item in results
-            if str(item.get("segment", "")).upper() == "NSE_INDEX"
-        ]
+        if exact:
+            if segment == "INDEX":
+                exact.sort(
+                    key=lambda x: (
+                        0
+                        if str(x.get("segment", "")).upper()
+                        == "NSE_INDEX"
+                        else 1
+                    )
+                )
 
-        if indexes:
-            return indexes[0]
+            return exact[0]
 
-    equities = [
-        item
-        for item in results
-        if str(item.get("segment", "")).upper() == "NSE_EQ"
-    ]
+        if rows:
+            rows.sort(
+                key=lambda x: len(
+                    str(x.get("trading_symbol", ""))
+                )
+            )
 
-    if equities:
-        return equities[0]
+            return rows[0]
 
-    return results[0]
+    raise UpstoxError(
+        f"Could not find NSE instrument for '{symbol}'."
+    )
 
 
 # ============================================================
-# OPTIONS
+# OPTION CONTRACTS
 # ============================================================
 
-@st.cache_data(ttl=600, show_spinner=False)
+@st.cache_data(ttl=900, show_spinner=False)
 def get_contracts(underlying_key):
     payload = api_get(
         "/v2/option/contract",
-        params={"instrument_key": underlying_key},
-        timeout=30,
+        params={
+            "instrument_key": underlying_key,
+        },
     )
 
-    contracts = payload.get("data", [])
+    rows = payload.get("data", [])
 
-    if not contracts:
+    if not isinstance(rows, list) or not rows:
         raise UpstoxError(
             "Upstox returned no option contracts for this instrument."
         )
 
-    return contracts
+    return rows
 
 
 def available_expiries(contracts):
     today = now_ist().date()
+    expiries = set()
 
-    expiries = []
-
-    for item in contracts:
-        raw = item.get("expiry")
+    for row in contracts:
+        raw = row.get("expiry")
 
         if not raw:
             continue
 
         try:
-            parsed = date.fromisoformat(str(raw)[:10])
-
-            if parsed >= today:
-                expiries.append(parsed.isoformat())
-
+            expiry = datetime.fromisoformat(
+                str(raw).replace("Z", "+00:00")
+            ).date()
         except Exception:
-            continue
+            try:
+                expiry = datetime.strptime(
+                    str(raw)[:10],
+                    "%Y-%m-%d",
+                ).date()
+            except Exception:
+                continue
 
-    return sorted(set(expiries))
+        if expiry >= today:
+            expiries.add(expiry)
+
+    return sorted(expiries)
 
 
-@st.cache_data(ttl=60, show_spinner=False)
+# ============================================================
+# OPTION CHAIN
+# ============================================================
+
+@st.cache_data(ttl=45, show_spinner=False)
 def get_option_chain(underlying_key, expiry):
     payload = api_get(
         "/v2/option/chain",
         params={
             "instrument_key": underlying_key,
-            "expiry_date": expiry,
+            "expiry_date": str(expiry),
         },
-        timeout=30,
     )
 
     rows = payload.get("data", [])
 
-    if not rows:
+    if not isinstance(rows, list) or not rows:
         raise UpstoxError(
             f"No option-chain data returned for expiry {expiry}."
         )
@@ -1184,7 +1170,346 @@ def get_option_chain(underlying_key, expiry):
     return rows
 
 
-@st.cache_data(ttl=15, show_spinner=False)
+def _nested(data, *keys):
+    if not isinstance(data, dict):
+        return None
+
+    for key in keys:
+        if key in data:
+            return data[key]
+
+    return None
+
+
+def _change_oi(option_data):
+    if not isinstance(option_data, dict):
+        return np.nan
+
+    direct = _nested(
+        option_data,
+        "change_in_oi",
+        "changeInOi",
+        "oi_change",
+        "chg_oi",
+        "change_oi",
+    )
+
+    value = safe_float(direct)
+
+    if np.isfinite(value):
+        return value
+
+    oi = safe_float(
+        _nested(option_data, "oi", "open_interest")
+    )
+
+    prev = safe_float(
+        _nested(
+            option_data,
+            "prev_oi",
+            "previous_oi",
+            "prev_open_interest",
+        )
+    )
+
+    if np.isfinite(oi) and np.isfinite(prev):
+        return oi - prev
+
+    return np.nan
+
+
+def normalize_chain(rows):
+    records = []
+
+    for item in rows:
+
+        strike = safe_float(
+            _nested(
+                item,
+                "strike_price",
+                "strike",
+                "strikePrice",
+            )
+        )
+
+        if not np.isfinite(strike):
+            continue
+
+        ce = _nested(
+            item,
+            "call_options",
+            "ce",
+            "CE",
+            "call",
+        )
+
+        pe = _nested(
+            item,
+            "put_options",
+            "pe",
+            "PE",
+            "put",
+        )
+
+        if not isinstance(ce, dict):
+            ce = {}
+
+        if not isinstance(pe, dict):
+            pe = {}
+
+        ce_md = _nested(
+            ce,
+            "market_data",
+            "marketData",
+        )
+
+        pe_md = _nested(
+            pe,
+            "market_data",
+            "marketData",
+        )
+
+        ce_g = _nested(
+            ce,
+            "option_greeks",
+            "optionGreeks",
+            "greeks",
+        )
+
+        pe_g = _nested(
+            pe,
+            "option_greeks",
+            "optionGreeks",
+            "greeks",
+        )
+
+        if not isinstance(ce_md, dict):
+            ce_md = ce
+
+        if not isinstance(pe_md, dict):
+            pe_md = pe
+
+        if not isinstance(ce_g, dict):
+            ce_g = ce
+
+        if not isinstance(pe_g, dict):
+            pe_g = pe
+
+        ce_oi = safe_float(
+            _nested(
+                ce_md,
+                "oi",
+                "open_interest",
+            )
+        )
+
+        pe_oi = safe_float(
+            _nested(
+                pe_md,
+                "oi",
+                "open_interest",
+            )
+        )
+
+        ce_ltp = safe_float(
+            _nested(
+                ce_md,
+                "ltp",
+                "last_price",
+                "last_traded_price",
+            )
+        )
+
+        pe_ltp = safe_float(
+            _nested(
+                pe_md,
+                "ltp",
+                "last_price",
+                "last_traded_price",
+            )
+        )
+
+        ce_bid = safe_float(
+            _nested(
+                ce_md,
+                "bid_price",
+                "best_bid_price",
+                "bid",
+            )
+        )
+
+        ce_ask = safe_float(
+            _nested(
+                ce_md,
+                "ask_price",
+                "best_ask_price",
+                "ask",
+            )
+        )
+
+        pe_bid = safe_float(
+            _nested(
+                pe_md,
+                "bid_price",
+                "best_bid_price",
+                "bid",
+            )
+        )
+
+        pe_ask = safe_float(
+            _nested(
+                pe_md,
+                "ask_price",
+                "best_ask_price",
+                "ask",
+            )
+        )
+
+        ce_volume = safe_float(
+            _nested(
+                ce_md,
+                "volume",
+                "traded_volume",
+            )
+        )
+
+        pe_volume = safe_float(
+            _nested(
+                pe_md,
+                "volume",
+                "traded_volume",
+            )
+        )
+
+        ce_iv = safe_float(
+            _nested(
+                ce_g,
+                "iv",
+                "implied_volatility",
+            )
+        )
+
+        pe_iv = safe_float(
+            _nested(
+                pe_g,
+                "iv",
+                "implied_volatility",
+            )
+        )
+
+        ce_delta = safe_float(
+            _nested(
+                ce_g,
+                "delta",
+            )
+        )
+
+        pe_delta = safe_float(
+            _nested(
+                pe_g,
+                "delta",
+            )
+        )
+
+        ce_pop = normalize_pop(
+            _nested(
+                ce_g,
+                "pop",
+                "probability_of_profit",
+                "probabilityOfProfit",
+            )
+        )
+
+        pe_pop = normalize_pop(
+            _nested(
+                pe_g,
+                "pop",
+                "probability_of_profit",
+                "probabilityOfProfit",
+            )
+        )
+
+        ce_key = _nested(
+            ce,
+            "instrument_key",
+            "instrumentKey",
+        )
+
+        pe_key = _nested(
+            pe,
+            "instrument_key",
+            "instrumentKey",
+        )
+
+        records.append(
+            {
+                "Strike": strike,
+
+                "CE Key": ce_key,
+                "CE LTP": ce_ltp,
+                "CE Bid": ce_bid,
+                "CE Ask": ce_ask,
+                "CE OI": ce_oi,
+                "CE Chg OI": _change_oi(ce_md),
+                "CE Volume": ce_volume,
+                "CE IV": ce_iv,
+                "CE Delta": ce_delta,
+                "CE PoP": ce_pop,
+
+                "PE Key": pe_key,
+                "PE LTP": pe_ltp,
+                "PE Bid": pe_bid,
+                "PE Ask": pe_ask,
+                "PE OI": pe_oi,
+                "PE Chg OI": _change_oi(pe_md),
+                "PE Volume": pe_volume,
+                "PE IV": pe_iv,
+                "PE Delta": pe_delta,
+                "PE PoP": pe_pop,
+            }
+        )
+
+    columns = [
+        "Strike",
+        "CE Key",
+        "CE LTP",
+        "CE Bid",
+        "CE Ask",
+        "CE OI",
+        "CE Chg OI",
+        "CE Volume",
+        "CE IV",
+        "CE Delta",
+        "CE PoP",
+        "PE Key",
+        "PE LTP",
+        "PE Bid",
+        "PE Ask",
+        "PE OI",
+        "PE Chg OI",
+        "PE Volume",
+        "PE IV",
+        "PE Delta",
+        "PE PoP",
+    ]
+
+    if not records:
+        return pd.DataFrame(columns=columns)
+
+    df = pd.DataFrame(records)
+
+    return (
+        df.sort_values("Strike")
+        .drop_duplicates("Strike")
+        .reset_index(drop=True)
+    )
+
+
+# ============================================================
+# QUOTE
+# ============================================================
+
+@st.cache_data(ttl=30, show_spinner=False)
 def get_quote(instrument_key):
     payload = api_get(
         "/v3/market-quote/quotes",
@@ -1195,154 +1520,134 @@ def get_quote(instrument_key):
 
     data = payload.get("data", {})
 
-    if not data:
-        raise UpstoxError(
-            "No quote returned by Upstox."
-        )
+    if not isinstance(data, dict):
+        return {}
 
     if instrument_key in data:
         return data[instrument_key]
 
-    return next(iter(data.values()))
+    if data:
+        return next(iter(data.values()))
 
-
-def extract_last_price(quote_data):
-    for key in (
-        "last_price",
-        "ltp",
-        "last_traded_price",
-        "close_price",
-        "close",
-    ):
-        value = safe_float(quote_data.get(key))
-
-        if np.isfinite(value):
-            return value
-
-    return np.nan
+    return {}
 
 
 # ============================================================
-# CANDLES
+# HISTORICAL DATA
 # ============================================================
 
-def _candles_to_df(candles):
-    if not candles:
-        return pd.DataFrame()
+def _parse_candles(payload):
+    rows = payload.get("data", {}).get("candles", [])
 
-    columns = [
-        "timestamp",
-        "open",
-        "high",
-        "low",
-        "close",
-        "volume",
-        "oi",
-    ]
-
-    df = pd.DataFrame(candles)
-
-    if df.shape[1] >= len(columns):
-        df = df.iloc[:, :len(columns)]
-        df.columns = columns
-    else:
-        return pd.DataFrame()
-
-    for column in columns[1:]:
-        df[column] = pd.to_numeric(
-            df[column],
-            errors="coerce",
+    if not isinstance(rows, list) or not rows:
+        return pd.DataFrame(
+            columns=[
+                "timestamp",
+                "open",
+                "high",
+                "low",
+                "close",
+                "volume",
+                "oi",
+            ]
         )
+
+    records = []
+
+    for row in rows:
+
+        if len(row) < 6:
+            continue
+
+        records.append(
+            {
+                "timestamp": row[0],
+                "open": safe_float(row[1]),
+                "high": safe_float(row[2]),
+                "low": safe_float(row[3]),
+                "close": safe_float(row[4]),
+                "volume": safe_float(row[5], 0),
+                "oi": safe_float(row[6], 0)
+                if len(row) > 6
+                else 0,
+            }
+        )
+
+    df = pd.DataFrame(records)
+
+    if df.empty:
+        return df
 
     df["timestamp"] = pd.to_datetime(
         df["timestamp"],
         errors="coerce",
     )
 
+    for col in [
+        "open",
+        "high",
+        "low",
+        "close",
+        "volume",
+        "oi",
+    ]:
+        df[col] = pd.to_numeric(
+            df[col],
+            errors="coerce",
+        )
+
     df = df.dropna(
         subset=["timestamp", "close"]
-    )
+    ).sort_values("timestamp")
 
-    return (
-        df.sort_values("timestamp")
-        .reset_index(drop=True)
-    )
+    return df.reset_index(drop=True)
 
 
-@st.cache_data(ttl=90, show_spinner=False)
+@st.cache_data(ttl=60, show_spinner=False)
 def get_intraday_candles(instrument_key, interval=5):
-    path = (
-        f"/v3/historical-candle/intraday/"
-        f"{quote(instrument_key, safe='')}"
-        f"/minutes/{interval}"
-    )
+    encoded = quote(instrument_key, safe="")
 
     payload = api_get(
-        path,
-        timeout=30,
+        f"/v3/historical-candle/intraday/"
+        f"{encoded}/minutes/{interval}",
+        timeout=15,
     )
 
-    candles = (
-        payload
-        .get("data", {})
-        .get("candles", [])
-    )
-
-    return _candles_to_df(candles)
+    return _parse_candles(payload)
 
 
 @st.cache_data(ttl=900, show_spinner=False)
 def get_30m_candles(instrument_key):
-    end_date = now_ist().date()
-    start_date = end_date - timedelta(days=90)
+    end = now_ist().date()
+    start = end - timedelta(days=45)
 
-    path = (
-        f"/v3/historical-candle/"
-        f"{quote(instrument_key, safe='')}"
-        f"/minutes/30/"
-        f"{end_date.isoformat()}/"
-        f"{start_date.isoformat()}"
-    )
+    encoded = quote(instrument_key, safe="")
 
     payload = api_get(
-        path,
-        timeout=30,
+        f"/v3/historical-candle/"
+        f"{encoded}/minutes/30/"
+        f"{end}/{start}",
+        timeout=15,
     )
 
-    candles = (
-        payload
-        .get("data", {})
-        .get("candles", [])
-    )
-
-    return _candles_to_df(candles)
+    return _parse_candles(payload)
 
 
-@st.cache_data(ttl=3600, show_spinner=False)
+@st.cache_data(ttl=1800, show_spinner=False)
 def get_daily_candles(instrument_key):
-    end_date = now_ist().date()
-    start_date = end_date - timedelta(days=220)
+    end = now_ist().date()
+    start = end - timedelta(days=180)
 
-    path = (
-        f"/v3/historical-candle/"
-        f"{quote(instrument_key, safe='')}"
-        f"/days/1/"
-        f"{end_date.isoformat()}/"
-        f"{start_date.isoformat()}"
-    )
+    encoded = quote(instrument_key, safe="")
 
     payload = api_get(
-        path,
-        timeout=30,
+        f"/v3/historical-candle/"
+        f"{encoded}/days/1/"
+        f"{end}/{start}",
+        timeout=15,
     )
 
-    candles = (
-        payload
-        .get("data", {})
-        .get("candles", [])
-    )
-
-    return _candles_to_df(candles)
+    return _parse_candles(payload)
 
 
 # ============================================================
@@ -1358,117 +1663,72 @@ def _rsi(close, period=14):
     avg_gain = gain.ewm(
         alpha=1 / period,
         adjust=False,
-        min_periods=period,
     ).mean()
 
     avg_loss = loss.ewm(
         alpha=1 / period,
         adjust=False,
-        min_periods=period,
     ).mean()
 
-    result = pd.Series(
-        50.0,
-        index=close.index,
-        dtype=float,
+    rs = avg_gain / avg_loss.replace(0, np.nan)
+
+    rsi = 100 - (
+        100 / (1 + rs)
     )
 
-    zero_loss = avg_loss == 0
-    normal = avg_loss > 0
-
-    result.loc[normal] = (
-        100
-        - (
-            100
-            / (
-                1
-                + avg_gain.loc[normal]
-                / avg_loss.loc[normal]
-            )
-        )
+    rsi = rsi.where(
+        avg_loss != 0,
+        100,
     )
 
-    result.loc[
-        zero_loss & (avg_gain > 0)
-    ] = 100.0
-
-    return result
+    return rsi
 
 
-def technicals(df, spot):
-    if (
-        df is None
-        or df.empty
-        or len(df) < 20
-        or not np.isfinite(spot)
-        or spot <= 0
-    ):
-        return {
-            "rsi": 50.0,
-            "ema20": spot,
-            "ema50": spot,
-            "atr": max(spot * 0.01, 0.01),
-            "trend": "Unavailable",
-            "adx": 0.0,
-            "momentum": 0.0,
-            "volume_ratio": 1.0,
-            "vwap": spot,
-        }
+def _atr(df, period=14):
+    previous_close = df["close"].shift(1)
 
-    close = pd.to_numeric(
-        df["close"],
-        errors="coerce",
-    )
-
-    high = pd.to_numeric(
-        df["high"],
-        errors="coerce",
-    )
-
-    low = pd.to_numeric(
-        df["low"],
-        errors="coerce",
-    )
-
-    volume = pd.to_numeric(
-        df["volume"],
-        errors="coerce",
-    ).fillna(0)
-
-    valid = pd.concat(
-        [close, high, low],
+    tr = pd.concat(
+        [
+            df["high"] - df["low"],
+            (df["high"] - previous_close).abs(),
+            (df["low"] - previous_close).abs(),
+        ],
         axis=1,
-    ).dropna()
+    ).max(axis=1)
 
-    if len(valid) < 20:
-        return {
-            "rsi": 50.0,
-            "ema20": spot,
-            "ema50": spot,
-            "atr": max(spot * 0.01, 0.01),
-            "trend": "Unavailable",
-            "adx": 0.0,
-            "momentum": 0.0,
-            "volume_ratio": 1.0,
-            "vwap": spot,
-        }
-
-    close = close.loc[valid.index]
-    high = high.loc[valid.index]
-    low = low.loc[valid.index]
-    volume = volume.loc[valid.index]
-
-    rsi = _rsi(close)
-
-    ema20 = close.ewm(
-        span=20,
+    return tr.ewm(
+        alpha=1 / period,
         adjust=False,
     ).mean()
 
-    ema50 = close.ewm(
-        span=50,
-        adjust=False,
-    ).mean()
+
+def _adx(df, period=14):
+    high = df["high"]
+    low = df["low"]
+    close = df["close"]
+
+    up_move = high.diff()
+    down_move = -low.diff()
+
+    plus_dm = pd.Series(
+        np.where(
+            (up_move > down_move)
+            & (up_move > 0),
+            up_move,
+            0,
+        ),
+        index=df.index,
+    )
+
+    minus_dm = pd.Series(
+        np.where(
+            (down_move > up_move)
+            & (down_move > 0),
+            down_move,
+            0,
+        ),
+        index=df.index,
+    )
 
     previous_close = close.shift(1)
 
@@ -1482,114 +1742,221 @@ def technicals(df, spot):
     ).max(axis=1)
 
     atr = tr.ewm(
-        alpha=1 / 14,
+        alpha=1 / period,
         adjust=False,
     ).mean()
-
-    up_move = high.diff()
-    down_move = -low.diff()
-
-    plus_dm = pd.Series(
-        np.where(
-            (up_move > down_move) & (up_move > 0),
-            up_move,
-            0.0,
-        ),
-        index=close.index,
-    )
-
-    minus_dm = pd.Series(
-        np.where(
-            (down_move > up_move) & (down_move > 0),
-            down_move,
-            0.0,
-        ),
-        index=close.index,
-    )
-
-    atr_safe = atr.replace(0, np.nan)
 
     plus_di = (
         100
         * plus_dm.ewm(
-            alpha=1 / 14,
+            alpha=1 / period,
             adjust=False,
         ).mean()
-        / atr_safe
+        / atr.replace(0, np.nan)
     )
 
     minus_di = (
         100
         * minus_dm.ewm(
-            alpha=1 / 14,
+            alpha=1 / period,
             adjust=False,
         ).mean()
-        / atr_safe
+        / atr.replace(0, np.nan)
     )
-
-    denominator = (
-        plus_di + minus_di
-    ).replace(0, np.nan)
 
     dx = (
         100
         * (plus_di - minus_di).abs()
-        / denominator
+        / (plus_di + minus_di).replace(
+            0,
+            np.nan,
+        )
     )
 
-    adx = dx.ewm(
-        alpha=1 / 14,
+    return dx.ewm(
+        alpha=1 / period,
         adjust=False,
     ).mean()
 
+
+def technicals(df, spot):
+    defaults = {
+        "rsi": 50.0,
+        "ema20": spot,
+        "ema50": spot,
+        "atr": max(spot * 0.01, 0.01),
+        "trend": "Sideways",
+        "adx": 0.0,
+        "momentum": 0.0,
+        "volume_ratio": 1.0,
+        "vwap": spot,
+    }
+
+    if df is None or df.empty:
+        return defaults
+
+    if len(df) < 20:
+        return defaults
+
+    work = df.copy()
+
+    work["ema20"] = work["close"].ewm(
+        span=20,
+        adjust=False,
+    ).mean()
+
+    work["ema50"] = work["close"].ewm(
+        span=50,
+        adjust=False,
+    ).mean()
+
+    work["rsi"] = _rsi(
+        work["close"],
+        14,
+    )
+
+    work["atr"] = _atr(
+        work,
+        14,
+    )
+
+    work["adx"] = _adx(
+        work,
+        14,
+    )
+
     typical = (
-        high + low + close
+        work["high"]
+        + work["low"]
+        + work["close"]
     ) / 3
 
-    # Session-style VWAP for intraday data.
+    volume = work["volume"].fillna(0)
+
     cumulative_volume = volume.cumsum()
 
-    if cumulative_volume.iloc[-1] > 0:
-        vwap_series = (
-            typical * volume
-        ).cumsum() / cumulative_volume
+    cumulative_pv = (
+        typical * volume
+    ).cumsum()
 
-        latest_vwap = safe_float(
-            vwap_series.iloc[-1],
-            spot,
+    work["vwap"] = (
+        cumulative_pv
+        / cumulative_volume.replace(
+            0,
+            np.nan,
         )
-    else:
-        latest_vwap = spot
+    )
 
-    lookback = min(10, len(close) - 1)
+    if "timestamp" in work.columns:
 
-    if lookback > 0:
-        old_close = safe_float(
-            close.iloc[-1 - lookback]
-        )
+        try:
+            timestamps = pd.to_datetime(
+                work["timestamp"],
+                errors="coerce",
+            )
 
-        current_close = safe_float(
-            close.iloc[-1]
-        )
+            if timestamps.dt.tz is not None:
+                local_dates = timestamps.dt.tz_convert(
+                    IST
+                ).dt.date
+            else:
+                local_dates = timestamps.dt.date
 
-        if (
-            np.isfinite(old_close)
-            and old_close > 0
-            and np.isfinite(current_close)
-        ):
-            momentum = (
-                current_close / old_close - 1
-            ) * 100
-        else:
-            momentum = 0.0
-    else:
-        momentum = 0.0
+            latest_date = local_dates.iloc[-1]
+
+            session = work[
+                local_dates == latest_date
+            ]
+
+            if len(session) >= 2:
+                sv = session["volume"].fillna(0)
+                stp = (
+                    (
+                        session["high"]
+                        + session["low"]
+                        + session["close"]
+                    )
+                    / 3
+                )
+
+                total_v = sv.sum()
+
+                if total_v > 0:
+                    session_vwap = (
+                        stp * sv
+                    ).sum() / total_v
+
+                    work.loc[
+                        work.index[-1],
+                        "vwap",
+                    ] = session_vwap
+
+        except Exception:
+            pass
+
+    latest = work.iloc[-1]
+
+    close = safe_float(
+        latest["close"],
+        spot,
+    )
+
+    ema20 = safe_float(
+        latest["ema20"],
+        spot,
+    )
+
+    ema50 = safe_float(
+        latest["ema50"],
+        spot,
+    )
+
+    rsi = safe_float(
+        latest["rsi"],
+        50,
+    )
+
+    atr = safe_float(
+        latest["atr"],
+        max(spot * 0.01, 0.01),
+    )
+
+    adx = safe_float(
+        latest["adx"],
+        0,
+    )
+
+    vwap = safe_float(
+        latest["vwap"],
+        spot,
+    )
+
+    lookback = min(5, len(work) - 1)
+
+    previous_close = safe_float(
+        work["close"].iloc[-1 - lookback],
+        close,
+    )
+
+    momentum = (
+        (close - previous_close)
+        / max(abs(previous_close), 0.01)
+    ) * 100
 
     previous_volume = (
-        volume.shift(1)
-        .rolling(20)
+        work["volume"]
+        .shift(1)
+        .rolling(
+            20,
+            min_periods=5,
+        )
         .median()
         .iloc[-1]
+    )
+
+    current_volume = safe_float(
+        latest["volume"],
+        0,
     )
 
     if (
@@ -1597,64 +1964,29 @@ def technicals(df, spot):
         and previous_volume > 0
     ):
         volume_ratio = (
-            volume.iloc[-1]
+            current_volume
             / previous_volume
         )
     else:
         volume_ratio = 1.0
 
-    e20 = safe_float(
-        ema20.iloc[-1],
-        spot,
-    )
-
-    e50 = safe_float(
-        ema50.iloc[-1],
-        spot,
-    )
-
-    r = safe_float(
-        rsi.iloc[-1],
-        50,
-    )
-
-    a = safe_float(
-        atr.iloc[-1],
-        spot * 0.01,
-    )
-
-    adx_value = safe_float(
-        adx.iloc[-1],
-        0,
-    )
-
-    bullish = (
-        spot > e20
-        and e20 > e50
-    )
-
-    bearish = (
-        spot < e20
-        and e20 < e50
-    )
-
-    if bullish:
+    if close > ema20 > ema50:
         trend = "Bullish"
-    elif bearish:
+    elif close < ema20 < ema50:
         trend = "Bearish"
     else:
         trend = "Sideways"
 
     return {
-        "rsi": r,
-        "ema20": e20,
-        "ema50": e50,
-        "atr": max(a, spot * 0.001),
+        "rsi": rsi,
+        "ema20": ema20,
+        "ema50": ema50,
+        "atr": max(atr, 0.01),
         "trend": trend,
-        "adx": adx_value,
+        "adx": max(adx, 0),
         "momentum": momentum,
-        "volume_ratio": volume_ratio,
-        "vwap": latest_vwap,
+        "volume_ratio": max(volume_ratio, 0),
+        "vwap": vwap,
     }
 
 
@@ -1674,8 +2006,172 @@ def overall_trend(tf5, tf30, daily):
     if bearish >= 2 and bullish == 0:
         return "Bearish", bearish
 
-    return "Mixed", max(bullish, bearish)
+    return "Mixed", max(
+        bullish,
+        bearish,
+    )
 
+
+# ============================================================
+# OI ANALYSIS
+# ============================================================
+
+def oi_levels(chain, spot):
+    if chain is None or chain.empty:
+        return {
+            "pcr": np.nan,
+            "support": spot,
+            "resistance": spot,
+            "major_support": spot,
+            "major_resistance": spot,
+            "put_walls": [],
+            "call_walls": [],
+        }
+
+    work = chain.copy()
+
+    work = work[
+        np.isfinite(work["Strike"])
+    ]
+
+    if work.empty:
+        return {
+            "pcr": np.nan,
+            "support": spot,
+            "resistance": spot,
+            "major_support": spot,
+            "major_resistance": spot,
+            "put_walls": [],
+            "call_walls": [],
+        }
+
+    distance = (
+        work["Strike"] - spot
+    ).abs() / max(abs(spot), 1)
+
+    band = work[
+        distance <= 0.10
+    ].copy()
+
+    if band.empty:
+        band = work.copy()
+
+    ce_oi = pd.to_numeric(
+        band["CE OI"],
+        errors="coerce",
+    ).fillna(0)
+
+    pe_oi = pd.to_numeric(
+        band["PE OI"],
+        errors="coerce",
+    ).fillna(0)
+
+    total_ce = ce_oi.sum()
+    total_pe = pe_oi.sum()
+
+    if total_ce > 0:
+        pcr = total_pe / total_ce
+    else:
+        pcr = np.nan
+
+    below = band[
+        band["Strike"] < spot
+    ]
+
+    above = band[
+        band["Strike"] > spot
+    ]
+
+    if below.empty:
+        below = band[
+            band["Strike"] <= spot
+        ]
+
+    if above.empty:
+        above = band[
+            band["Strike"] >= spot
+        ]
+
+    if not below.empty:
+        support = float(
+            below["Strike"].max()
+        )
+    else:
+        support = spot
+
+    if not above.empty:
+        resistance = float(
+            above["Strike"].min()
+        )
+    else:
+        resistance = spot
+
+    put_wall_df = (
+        below.sort_values(
+            "PE OI",
+            ascending=False,
+        )
+        .head(3)
+    )
+
+    call_wall_df = (
+        above.sort_values(
+            "CE OI",
+            ascending=False,
+        )
+        .head(3)
+    )
+
+    put_walls = [
+        {
+            "strike": safe_float(row["Strike"]),
+            "oi": safe_float(row["PE OI"], 0),
+            "chg": safe_float(
+                row["PE Chg OI"]
+            ),
+        }
+        for _, row in put_wall_df.iterrows()
+        if safe_float(row["PE OI"], 0) > 0
+    ]
+
+    call_walls = [
+        {
+            "strike": safe_float(row["Strike"]),
+            "oi": safe_float(row["CE OI"], 0),
+            "chg": safe_float(
+                row["CE Chg OI"]
+            ),
+        }
+        for _, row in call_wall_df.iterrows()
+        if safe_float(row["CE OI"], 0) > 0
+    ]
+
+    major_support = (
+        put_walls[0]["strike"]
+        if put_walls
+        else support
+    )
+
+    major_resistance = (
+        call_walls[0]["strike"]
+        if call_walls
+        else resistance
+    )
+
+    return {
+        "pcr": pcr,
+        "support": support,
+        "resistance": resistance,
+        "major_support": major_support,
+        "major_resistance": major_resistance,
+        "put_walls": put_walls,
+        "call_walls": call_walls,
+    }
+
+
+# ============================================================
+# OPTION SCORING
+# ============================================================
 
 def timeframe_score(side, tf5, tf30, daily):
     desired = (
@@ -1690,17 +2186,15 @@ def timeframe_score(side, tf5, tf30, daily):
         else "Bullish"
     )
 
-    values = [
-        tf5,
-        tf30,
-        daily,
-    ]
-
     score = 0
     alignment = 0
 
-    for tf in values:
-        trend = tf.get("trend")
+    for tf in [tf5, tf30, daily]:
+
+        trend = tf.get(
+            "trend",
+            "Sideways",
+        )
 
         if trend == desired:
             score += 10
@@ -1712,409 +2206,8 @@ def timeframe_score(side, tf5, tf30, daily):
         elif trend == opposite:
             score -= 8
 
-    return float(
-        np.clip(score, 0, 30)
-    ), alignment
+    return max(0, min(30, score)), alignment
 
-
-# ============================================================
-# OI ANALYSIS
-# ============================================================
-
-def oi_levels(chain, spot):
-    valid = chain.copy()
-
-    if "Strike" not in valid.columns:
-        return (
-            spot,
-            spot,
-            np.nan,
-            {
-                "put_walls": [],
-                "call_walls": [],
-                "major_support": spot,
-                "major_resistance": spot,
-                "nearest_support": spot,
-                "nearest_resistance": spot,
-            },
-        )
-
-    valid["Strike"] = pd.to_numeric(
-        valid["Strike"],
-        errors="coerce",
-    )
-
-    valid = valid.dropna(
-        subset=["Strike"]
-    )
-
-    if (
-        valid.empty
-        or not np.isfinite(spot)
-        or spot <= 0
-    ):
-        return (
-            spot,
-            spot,
-            np.nan,
-            {
-                "put_walls": [],
-                "call_walls": [],
-                "major_support": spot,
-                "major_resistance": spot,
-                "nearest_support": spot,
-                "nearest_resistance": spot,
-            },
-        )
-
-    # Prefer a reasonable local band.
-    band = valid[
-        (valid["Strike"] >= spot * 0.90)
-        & (valid["Strike"] <= spot * 1.10)
-    ].copy()
-
-    if len(band) < 5:
-        band = valid.copy()
-
-    for col in (
-        "PE OI",
-        "CE OI",
-        "PE Chg OI",
-        "CE Chg OI",
-    ):
-        if col not in band.columns:
-            band[col] = 0
-
-        band[col] = pd.to_numeric(
-            band[col],
-            errors="coerce",
-        ).fillna(0)
-
-    below = band[
-        band["Strike"] < spot
-    ].copy()
-
-    above = band[
-        band["Strike"] > spot
-    ].copy()
-
-    if below.empty:
-        nearest_support = float(
-            band["Strike"].min()
-        )
-    else:
-        nearest_support = float(
-            below["Strike"].max()
-        )
-
-    if above.empty:
-        nearest_resistance = float(
-            band["Strike"].max()
-        )
-    else:
-        nearest_resistance = float(
-            above["Strike"].min()
-        )
-
-    # Major support must be BELOW spot.
-    if not below.empty:
-        support_row = below.loc[
-            below["PE OI"].idxmax()
-        ]
-    else:
-        support_row = band.loc[
-            band["PE OI"].idxmax()
-        ]
-
-    # Major resistance must be ABOVE spot.
-    if not above.empty:
-        resistance_row = above.loc[
-            above["CE OI"].idxmax()
-        ]
-    else:
-        resistance_row = band.loc[
-            band["CE OI"].idxmax()
-        ]
-
-    major_support = safe_float(
-        support_row["Strike"],
-        nearest_support,
-    )
-
-    major_resistance = safe_float(
-        resistance_row["Strike"],
-        nearest_resistance,
-    )
-
-    if major_support >= spot:
-        major_support = nearest_support
-
-    if major_resistance <= spot:
-        major_resistance = nearest_resistance
-
-    total_call_oi = float(
-        band["CE OI"].sum()
-    )
-
-    total_put_oi = float(
-        band["PE OI"].sum()
-    )
-
-    pcr = (
-        total_put_oi / total_call_oi
-        if total_call_oi > 0
-        else np.nan
-    )
-
-    put_walls = (
-        band.nlargest(3, "PE OI")
-        [
-            ["Strike", "PE OI", "PE Chg OI"]
-        ]
-        .to_dict("records")
-    )
-
-    call_walls = (
-        band.nlargest(3, "CE OI")
-        [
-            ["Strike", "CE OI", "CE Chg OI"]
-        ]
-        .to_dict("records")
-    )
-
-    support_room = max(
-        (
-            spot - major_support
-        )
-        / max(spot, 1)
-        * 100,
-        0,
-    )
-
-    resistance_room = max(
-        (
-            major_resistance - spot
-        )
-        / max(spot, 1)
-        * 100,
-        0,
-    )
-
-    return (
-        major_support,
-        major_resistance,
-        pcr,
-        {
-            "put_walls": put_walls,
-            "call_walls": call_walls,
-            "major_support": major_support,
-            "major_resistance": major_resistance,
-            "nearest_support": nearest_support,
-            "nearest_resistance": nearest_resistance,
-            "support_room_pct": support_room,
-            "resistance_room_pct": resistance_room,
-        },
-    )
-
-
-def nearest_row(chain, strike):
-    if (
-        chain is None
-        or chain.empty
-        or not np.isfinite(strike)
-    ):
-        return None
-
-    distance = (
-        chain["Strike"] - strike
-    ).abs()
-
-    if distance.empty:
-        return None
-
-    index = distance.idxmin()
-
-    return chain.loc[index]
-
-
-# ============================================================
-# OPTION CHAIN NORMALIZATION
-# ============================================================
-
-def normalize_chain(rows):
-    records = []
-
-    for item in rows:
-        strike = safe_float(
-            item.get("strike_price")
-        )
-
-        if not np.isfinite(strike):
-            continue
-
-        call = (
-            item.get("call_options")
-            or {}
-        )
-
-        put = (
-            item.get("put_options")
-            or {}
-        )
-
-        call_market = (
-            call.get("market_data")
-            or {}
-        )
-
-        call_greeks = (
-            call.get("option_greeks")
-            or {}
-        )
-
-        put_market = (
-            put.get("market_data")
-            or {}
-        )
-
-        put_greeks = (
-            put.get("option_greeks")
-            or {}
-        )
-
-        call_oi = safe_float(
-            call_market.get("oi"),
-            0,
-        )
-
-        put_oi = safe_float(
-            put_market.get("oi"),
-            0,
-        )
-
-        call_change = call_market.get(
-            "change_in_oi"
-        )
-
-        if call_change is None:
-            call_change = call_market.get(
-                "oi_change"
-            )
-
-        if call_change is None:
-            prev = safe_float(
-                call_market.get("prev_oi"),
-                np.nan,
-            )
-
-            call_change = (
-                call_oi - prev
-                if np.isfinite(prev)
-                else 0
-            )
-
-        put_change = put_market.get(
-            "change_in_oi"
-        )
-
-        if put_change is None:
-            put_change = put_market.get(
-                "oi_change"
-            )
-
-        if put_change is None:
-            prev = safe_float(
-                put_market.get("prev_oi"),
-                np.nan,
-            )
-
-            put_change = (
-                put_oi - prev
-                if np.isfinite(prev)
-                else 0
-            )
-
-        records.append(
-            {
-                "Strike": strike,
-
-                "CE Key": call.get(
-                    "instrument_key"
-                ),
-                "CE LTP": safe_float(
-                    call_market.get("ltp")
-                ),
-                "CE Bid": safe_float(
-                    call_market.get("bid_price")
-                ),
-                "CE Ask": safe_float(
-                    call_market.get("ask_price")
-                ),
-                "CE OI": call_oi,
-                "CE Chg OI": safe_float(
-                    call_change,
-                    0,
-                ),
-                "CE Volume": safe_float(
-                    call_market.get("volume"),
-                    0,
-                ),
-                "CE IV": safe_float(
-                    call_greeks.get("iv")
-                ),
-                "CE Delta": safe_float(
-                    call_greeks.get("delta")
-                ),
-                "CE PoP": normalize_probability(
-                    call_greeks.get("pop")
-                ),
-
-                "PE Key": put.get(
-                    "instrument_key"
-                ),
-                "PE LTP": safe_float(
-                    put_market.get("ltp")
-                ),
-                "PE Bid": safe_float(
-                    put_market.get("bid_price")
-                ),
-                "PE Ask": safe_float(
-                    put_market.get("ask_price")
-                ),
-                "PE OI": put_oi,
-                "PE Chg OI": safe_float(
-                    put_change,
-                    0,
-                ),
-                "PE Volume": safe_float(
-                    put_market.get("volume"),
-                    0,
-                ),
-                "PE IV": safe_float(
-                    put_greeks.get("iv")
-                ),
-                "PE Delta": safe_float(
-                    put_greeks.get("delta")
-                ),
-                "PE PoP": normalize_probability(
-                    put_greeks.get("pop")
-                ),
-            }
-        )
-
-    if not records:
-        return pd.DataFrame()
-
-    return (
-        pd.DataFrame(records)
-        .sort_values("Strike")
-        .reset_index(drop=True)
-    )
-
-
-# ============================================================
-# SCORING ENGINE
-# ============================================================
 
 def score_option(
     row,
@@ -2124,45 +2217,29 @@ def score_option(
     tf5,
     tf30,
     daily,
-    chain,
     support=None,
     resistance=None,
-    oi_wall_info=None,
 ):
-    if side == "CE":
-        prefix = "CE"
-    else:
-        prefix = "PE"
+    if row is None:
+        return {
+            "score": 0,
+            "alignment": 0,
+            "pop": np.nan,
+            "delta": np.nan,
+            "iv": np.nan,
+            "ltp": np.nan,
+            "bid": np.nan,
+            "ask": np.nan,
+            "oi": 0,
+            "volume": 0,
+            "spread_pct": np.inf,
+            "chg_oi": np.nan,
+        }
 
-    premium = safe_float(
+    prefix = "CE" if side == "CE" else "PE"
+
+    ltp = safe_float(
         row.get(f"{prefix} LTP")
-    )
-
-    delta = safe_float(
-        row.get(f"{prefix} Delta")
-    )
-
-    iv = safe_float(
-        row.get(f"{prefix} IV")
-    )
-
-    pop = safe_float(
-        row.get(f"{prefix} PoP")
-    )
-
-    chg_oi = safe_float(
-        row.get(f"{prefix} Chg OI"),
-        0,
-    )
-
-    volume = safe_float(
-        row.get(f"{prefix} Volume"),
-        0,
-    )
-
-    oi = safe_float(
-        row.get(f"{prefix} OI"),
-        0,
     )
 
     bid = safe_float(
@@ -2173,11 +2250,44 @@ def score_option(
         row.get(f"{prefix} Ask")
     )
 
-    desired = (
-        "Bullish"
-        if side == "CE"
-        else "Bearish"
+    oi = safe_float(
+        row.get(f"{prefix} OI"),
+        0,
     )
+
+    chg_oi = safe_float(
+        row.get(f"{prefix} Chg OI")
+    )
+
+    volume = safe_float(
+        row.get(f"{prefix} Volume"),
+        0,
+    )
+
+    iv = safe_float(
+        row.get(f"{prefix} IV")
+    )
+
+    delta = safe_float(
+        row.get(f"{prefix} Delta")
+    )
+
+    pop = normalize_pop(
+        row.get(f"{prefix} PoP")
+    )
+
+    if (
+        np.isfinite(bid)
+        and np.isfinite(ask)
+        and ask > 0
+        and ask >= bid >= 0
+    ):
+        spread_pct = (
+            (ask - bid)
+            / max(ask, 0.01)
+        ) * 100
+    else:
+        spread_pct = np.inf
 
     tf_points, alignment = timeframe_score(
         side,
@@ -2186,325 +2296,163 @@ def score_option(
         daily,
     )
 
-    # --------------------------------------------------------
-    # Momentum / trend = 15
-    # --------------------------------------------------------
-
-    momentum_points = 0
-
-    if tf5.get("trend") == desired:
-        momentum_points += 5
-
-    rsi = safe_float(
-        tf5.get("rsi"),
-        50,
-    )
+    score = tf_points
 
     momentum = safe_float(
         tf5.get("momentum"),
         0,
     )
 
-    if side == "CE":
-        if 52 <= rsi <= 68:
-            momentum_points += 3
-        elif 50 <= rsi < 52:
-            momentum_points += 1
+    desired_momentum = (
+        momentum
+        if side == "CE"
+        else -momentum
+    )
 
-        if momentum > 0:
-            momentum_points += 3
-
+    if desired_momentum > 0:
+        score += min(
+            15,
+            5 + desired_momentum * 2,
+        )
+    elif desired_momentum < 0:
+        score += 0
     else:
-        if 32 <= rsi <= 48:
-            momentum_points += 3
-        elif 48 < rsi <= 50:
-            momentum_points += 1
-
-        if momentum < 0:
-            momentum_points += 3
-
-    adx = safe_float(
-        tf5.get("adx"),
-        0,
-    )
-
-    if adx >= 25:
-        momentum_points += 4
-    elif adx >= 20:
-        momentum_points += 2
-
-    momentum_points = min(
-        momentum_points,
-        15,
-    )
-
-    # --------------------------------------------------------
-    # VWAP = 10
-    # --------------------------------------------------------
+        score += 3
 
     vwap = safe_float(
         tf5.get("vwap"),
         spot,
     )
 
-    vwap_points = 0
-
-    if (
-        np.isfinite(vwap)
-        and vwap > 0
-        and spot > 0
-    ):
-        vwap_gap_pct = (
-            (spot - vwap)
-            / spot
-            * 100
-        )
-
-        if side == "CE":
-            if (
-                spot > vwap
-                and momentum > 0
-            ):
-                vwap_points = 10
-
-            elif spot > vwap:
-                vwap_points = 6
-
-            elif spot >= vwap * 0.997:
-                vwap_points = 2
-
+    if side == "CE":
+        if spot > vwap:
+            score += 10
         else:
-            if (
-                spot < vwap
-                and momentum < 0
-            ):
-                vwap_points = 10
-
-            elif spot < vwap:
-                vwap_points = 6
-
-            elif spot <= vwap * 1.003:
-                vwap_points = 2
-
+            score += 0
     else:
-        vwap_gap_pct = 0
-
-    # --------------------------------------------------------
-    # PCR = 10
-    # --------------------------------------------------------
-
-    pcr_points = 0
+        if spot < vwap:
+            score += 10
+        else:
+            score += 0
 
     if np.isfinite(pcr):
+
         if side == "CE":
-            if 0.90 <= pcr <= 1.35:
-                pcr_points = 10
-            elif 0.80 <= pcr < 0.90:
-                pcr_points = 5
+
+            if 0.85 <= pcr <= 1.20:
+                score += 10
+            elif pcr < 0.75:
+                score += 3
+            else:
+                score += 5
 
         else:
-            if 0.65 <= pcr <= 1.10:
-                pcr_points = 10
-            elif 1.10 < pcr <= 1.25:
-                pcr_points = 5
 
-    # --------------------------------------------------------
-    # OI change = 5
-    # --------------------------------------------------------
+            if 0.80 <= pcr <= 1.25:
+                score += 10
+            elif pcr > 1.35:
+                score += 3
+            else:
+                score += 5
 
-    if chg_oi < 0:
-        oi_points = 5
-    elif chg_oi == 0:
-        oi_points = 3
-    else:
-        oi_points = 1
+    if np.isfinite(chg_oi):
 
-    # --------------------------------------------------------
-    # Option quality = 20
-    # --------------------------------------------------------
+        if side == "CE":
+            if chg_oi < 0:
+                score += 5
+            elif chg_oi == 0:
+                score += 3
+        else:
+            if chg_oi < 0:
+                score += 5
+            elif chg_oi == 0:
+                score += 3
 
-    quality = 0
+    if np.isfinite(delta):
 
-    abs_delta = (
-        abs(delta)
-        if np.isfinite(delta)
-        else np.nan
-    )
+        delta_abs = abs(delta)
 
-    if np.isfinite(abs_delta):
-        if 0.45 <= abs_delta <= 0.65:
-            quality += 6
-        elif (
-            0.40 <= abs_delta < 0.45
-            or 0.65 < abs_delta <= 0.75
-        ):
-            quality += 4
-        elif (
-            0.35 <= abs_delta < 0.40
-            or 0.75 < abs_delta <= 0.80
-        ):
-            quality += 2
+        if 0.45 <= delta_abs <= 0.70:
+            score += 15
+        elif 0.35 <= delta_abs <= 0.80:
+            score += 10
+        elif delta_abs <= 0.90:
+            score += 5
 
-    if (
-        np.isfinite(ask)
-        and np.isfinite(bid)
-        and ask > 0
-        and bid > 0
-    ):
-        midpoint = (
-            ask + bid
-        ) / 2
+    if np.isfinite(pop):
 
-        spread_pct = (
-            max(ask - bid, 0)
-            / max(midpoint, 0.01)
-            * 100
-        )
+        if pop >= 70:
+            score += 10
+        elif pop >= 60:
+            score += 8
+        elif pop >= 55:
+            score += 4
 
-    else:
-        spread_pct = 999
+    if np.isfinite(oi) and oi > 0:
+        score += 5
 
-    if spread_pct <= 1:
-        quality += 5
-    elif spread_pct <= 2:
-        quality += 4
-    elif spread_pct <= 3:
-        quality += 2
-
-    if volume >= 10000:
-        quality += 5
-    elif volume >= 5000:
-        quality += 4
+    if volume >= 100000:
+        score += 5
+    elif volume >= 10000:
+        score += 3
     elif volume >= 1000:
-        quality += 2
+        score += 1
 
-    if oi >= 10000:
-        quality += 4
-    elif oi >= 3000:
-        quality += 3
-    elif oi > 0:
-        quality += 1
+    if np.isfinite(spread_pct):
 
-    # --------------------------------------------------------
-    # Strike quality = 10
-    # --------------------------------------------------------
+        if spread_pct <= 1.5:
+            score += 5
+        elif spread_pct <= 3:
+            score += 3
 
     strike = safe_float(
         row.get("Strike")
     )
 
-    if np.isfinite(strike) and spot > 0:
-        distance_pct = (
-            abs(strike - spot)
-            / spot
-            * 100
-        )
-    else:
-        distance_pct = 999
+    if np.isfinite(strike):
 
-    if distance_pct <= 1:
-        strike_points = 6
-    elif distance_pct <= 2:
-        strike_points = 5
-    elif distance_pct <= 3:
-        strike_points = 3
-    elif distance_pct <= 5:
-        strike_points = 1
-    else:
-        strike_points = 0
+        if side == "CE":
 
-    room_points = 0
-    room_pct = np.nan
+            if np.isfinite(resistance):
+                room = (
+                    resistance - spot
+                ) / max(spot, 1) * 100
 
-    if (
-        side == "CE"
-        and np.isfinite(resistance)
-        and resistance > spot
-    ):
-        room_pct = (
-            resistance - spot
-        ) / max(spot, 1) * 100
+                if room >= 1.0:
+                    score += 5
+                elif room >= 0.5:
+                    score += 3
 
-        if room_pct >= 2:
-            room_points = 4
-        elif room_pct >= 1:
-            room_points = 2
+        else:
 
-    elif (
-        side == "PE"
-        and np.isfinite(support)
-        and support < spot
-    ):
-        room_pct = (
-            spot - support
-        ) / max(spot, 1) * 100
+            if np.isfinite(support):
+                room = (
+                    spot - support
+                ) / max(spot, 1) * 100
 
-        if room_pct >= 2:
-            room_points = 4
-        elif room_pct >= 1:
-            room_points = 2
+                if room >= 1.0:
+                    score += 5
+                elif room >= 0.5:
+                    score += 3
 
-    strike_quality = (
-        strike_points
-        + room_points
-    )
-
-    # --------------------------------------------------------
-    # PoP = 10
-    # --------------------------------------------------------
-
-    if np.isfinite(pop):
-        pop_points = float(
-            np.clip(
-                (pop - 55) / 3,
-                0,
-                10,
-            )
-        )
-    else:
-        pop_points = 0
-
-    # --------------------------------------------------------
-    # Final score
-    # --------------------------------------------------------
-
-    raw_score = (
-        tf_points
-        + momentum_points
-        + vwap_points
-        + pcr_points
-        + oi_points
-        + quality
-        + strike_quality
-        + pop_points
-    )
-
-    # Components total 110.
-    score = float(
-        np.clip(
-            raw_score / 110 * 100,
-            0,
-            100,
-        )
+    score = max(
+        0,
+        min(100, round(score)),
     )
 
     return {
         "score": score,
-        "premium": premium,
+        "alignment": alignment,
+        "pop": pop,
         "delta": delta,
         "iv": iv,
-        "pop": pop,
-        "chg_oi": chg_oi,
-        "volume": volume,
+        "ltp": ltp,
+        "bid": bid,
+        "ask": ask,
         "oi": oi,
+        "volume": volume,
         "spread_pct": spread_pct,
-        "alignment": alignment,
-        "distance_pct": distance_pct,
-        "quality": quality,
-        "vwap": vwap,
-        "vwap_gap_pct": vwap_gap_pct,
-        "room_pct": room_pct,
-        "strike_quality": strike_quality,
+        "chg_oi": chg_oi,
     }
 
 
@@ -2523,8 +2471,7 @@ def build_plan(
     tf30,
     daily,
     risk_profile,
-    chain,
-    oi_wall_info=None,
+    market_open=True,
 ):
     if row is None:
         return None
@@ -2537,37 +2484,25 @@ def build_plan(
         tf5,
         tf30,
         daily,
-        chain,
-        support=support,
-        resistance=resistance,
-        oi_wall_info=oi_wall_info,
-    )
-
-    prefix = (
-        "CE"
-        if side == "CE"
-        else "PE"
+        support,
+        resistance,
     )
 
     ask = safe_float(
-        row.get(f"{prefix} Ask")
+        scored["ask"]
     )
 
     ltp = safe_float(
-        row.get(f"{prefix} LTP")
+        scored["ltp"]
     )
 
-    # Ask is the realistic BUY entry when available.
     entry = (
         ask
         if np.isfinite(ask) and ask > 0
         else ltp
     )
 
-    if (
-        not np.isfinite(entry)
-        or entry <= 0
-    ):
+    if not np.isfinite(entry) or entry <= 0:
         return None
 
     risk_settings = {
@@ -2610,18 +2545,18 @@ def build_plan(
         2,
     )
 
-    risk_per_unit = max(
+    risk = max(
         entry - sl,
         0.01,
     )
 
     rr1 = (
         target1 - entry
-    ) / risk_per_unit
+    ) / risk
 
     rr2 = (
         target2 - entry
-    ) / risk_per_unit
+    ) / risk
 
     atr = safe_float(
         tf5.get("atr"),
@@ -2638,10 +2573,8 @@ def build_plan(
         spot * 0.0015,
     )
 
-    candle_confirmed = False
-    volume_confirmed = False
-
     if side == "CE":
+
         trigger_level = (
             resistance
             + trigger_buffer
@@ -2651,41 +2584,41 @@ def build_plan(
             spot >= trigger_level
         )
 
-        if trigger_hit:
-            candle_confirmed = (
-                tf5.get("trend")
-                == "Bullish"
-                and safe_float(
-                    tf5.get("momentum"),
-                    0,
-                ) > 0
-                and safe_float(
-                    tf5.get("rsi"),
-                    50,
-                ) >= 52
-            )
+        candle_confirmed = (
+            tf5.get("trend") == "Bullish"
+            and safe_float(
+                tf5.get("momentum"),
+                0,
+            ) > 0
+            and safe_float(
+                tf5.get("rsi"),
+                50,
+            ) >= 52
+        )
 
-            volume_confirmed = (
-                safe_float(
-                    tf5.get("volume_ratio"),
-                    1,
-                ) >= 1.10
-            )
+        volume_confirmed = (
+            safe_float(
+                tf5.get("volume_ratio"),
+                1,
+            ) >= 1.10
+        )
 
         trigger = (
-            f"Enter only after spot breaks and sustains "
-            f"above {fmt_price(trigger_level)} with 5-minute "
-            "bullish confirmation."
+            f"Enter only after spot breaks and "
+            f"sustains above {fmt_price(trigger_level)} "
+            f"with 5-minute bullish confirmation."
         )
 
         exit_rule = (
             f"Exit if spot loses support "
             f"{fmt_price(support)} or option premium "
             f"falls to {fmt_price(sl)}. "
-            "After Target 1, consider partial booking and trail."
+            f"After Target 1, consider partial booking "
+            f"and trail."
         )
 
     else:
+
         trigger_level = (
             support
             - trigger_buffer
@@ -2695,45 +2628,38 @@ def build_plan(
             spot <= trigger_level
         )
 
-        if trigger_hit:
-            candle_confirmed = (
-                tf5.get("trend")
-                == "Bearish"
-                and safe_float(
-                    tf5.get("momentum"),
-                    0,
-                ) < 0
-                and safe_float(
-                    tf5.get("rsi"),
-                    50,
-                ) <= 48
-            )
+        candle_confirmed = (
+            tf5.get("trend") == "Bearish"
+            and safe_float(
+                tf5.get("momentum"),
+                0,
+            ) < 0
+            and safe_float(
+                tf5.get("rsi"),
+                50,
+            ) <= 48
+        )
 
-            volume_confirmed = (
-                safe_float(
-                    tf5.get("volume_ratio"),
-                    1,
-                ) >= 1.10
-            )
+        volume_confirmed = (
+            safe_float(
+                tf5.get("volume_ratio"),
+                1,
+            ) >= 1.10
+        )
 
         trigger = (
-            f"Enter only after spot breaks and sustains "
-            f"below {fmt_price(trigger_level)} with 5-minute "
-            "bearish confirmation."
+            f"Enter only after spot breaks and "
+            f"sustains below {fmt_price(trigger_level)} "
+            f"with 5-minute bearish confirmation."
         )
 
         exit_rule = (
             f"Exit if spot reclaims resistance "
             f"{fmt_price(resistance)} or option premium "
             f"falls to {fmt_price(sl)}. "
-            "After Target 1, consider partial booking and trail."
+            f"After Target 1, consider partial booking "
+            f"and trail."
         )
-
-    opposite = (
-        "Bearish"
-        if side == "CE"
-        else "Bullish"
-    )
 
     hard_fail = []
 
@@ -2746,6 +2672,12 @@ def build_plan(
         hard_fail.append(
             "fewer than 2 aligned timeframes"
         )
+
+    opposite = (
+        "Bearish"
+        if side == "CE"
+        else "Bullish"
+    )
 
     if (
         tf5.get("trend") == opposite
@@ -2760,16 +2692,18 @@ def build_plan(
             "wide option spread"
         )
 
-    if (
-        not np.isfinite(scored["delta"])
-        or not (
-            0.35
-            <= abs(scored["delta"])
-            <= 0.80
+    delta_abs = abs(
+        safe_float(
+            scored["delta"]
         )
+    )
+
+    if (
+        not np.isfinite(delta_abs)
+        or not 0.35 <= delta_abs <= 0.80
     ):
         hard_fail.append(
-            "poor delta"
+            "delta outside 0.35–0.80"
         )
 
     if (
@@ -2793,117 +2727,42 @@ def build_plan(
             "no option OI"
         )
 
-    # --------------------------------------------------------
-    # Readiness
-    # --------------------------------------------------------
-
     if hard_fail:
-        readiness = "NO TRADE"
-        readiness_class = "status-red"
-    elif (
-        trigger_hit
-        and candle_confirmed
-        and volume_confirmed
-    ):
-        readiness = "TRIGGER CONFIRMED"
-        readiness_class = "status-green"
-    elif trigger_hit:
-        readiness = "TRIGGER HIT — CONFIRMATION WAIT"
-        readiness_class = "status-yellow"
+        status = "NO TRADE"
+    elif not market_open:
+        status = "MARKET CLOSED"
+    elif not trigger_hit:
+        status = "WAIT FOR TRIGGER"
+    elif not candle_confirmed:
+        status = "WAIT FOR 5M CONFIRMATION"
     else:
-        readiness = "WAIT FOR TRIGGER"
-        readiness_class = "status-yellow"
+        status = "READY"
 
-    # Actual action is deliberately stricter.
-    # A setup is not promoted to CALL BUY / PUT BUY merely because
-    # its score is high.
-    if (
-        not hard_fail
-        and trigger_hit
-        and candle_confirmed
-        and volume_confirmed
-    ):
-        action = (
-            "CALL BUY"
-            if side == "CE"
-            else "PUT BUY"
-        )
-    else:
-        action = "NO TRADE"
-
-    reasons = []
-
-    if scored["alignment"] >= 2:
-        reasons.append(
-            f"{scored['alignment']}/3 timeframes aligned"
-        )
-    else:
-        reasons.append(
-            "Timeframe alignment is incomplete"
-        )
-
-    if scored["score"] >= 72:
-        reasons.append(
-            f"setup score {scored['score']:.0f}/100"
-        )
-    else:
-        reasons.append(
-            f"setup score only {scored['score']:.0f}/100"
-        )
-
-    if np.isfinite(scored["pop"]):
-        reasons.append(
-            f"PoP {scored['pop']:.1f}%"
-        )
-
-    if np.isfinite(scored["delta"]):
-        reasons.append(
-            f"Delta {scored['delta']:.2f}"
-        )
-
-    if scored["spread_pct"] <= 3:
-        reasons.append(
-            f"spread {scored['spread_pct']:.1f}%"
-        )
-
-    if candle_confirmed:
-        reasons.append(
-            "5m candle confirmation passed"
-        )
-    else:
-        reasons.append(
-            "5m candle confirmation pending"
-        )
-
-    if volume_confirmed:
-        reasons.append(
-            "volume confirmation passed"
-        )
-    else:
-        reasons.append(
-            "volume confirmation pending"
-        )
+    ready = (
+        status == "READY"
+        and market_open
+    )
 
     return {
         "side": side,
-        "action": action,
-        "readiness": readiness,
-        "readiness_class": readiness_class,
-        "score": scored["score"],
-        "pop": scored["pop"],
-        "delta": scored["delta"],
-        "iv": scored["iv"],
-        "volume": scored["volume"],
-        "oi": scored["oi"],
-        "chg_oi": scored["chg_oi"],
-        "spread_pct": scored["spread_pct"],
-        "premium": scored["premium"],
+        "strike": safe_float(
+            row.get("Strike")
+        ),
         "entry": entry,
         "sl": sl,
         "target1": target1,
         "target2": target2,
         "rr1": rr1,
         "rr2": rr2,
+        "score": scored["score"],
+        "pop": scored["pop"],
+        "delta": scored["delta"],
+        "iv": scored["iv"],
+        "oi": scored["oi"],
+        "volume": scored["volume"],
+        "spread_pct": scored["spread_pct"],
+        "chg_oi": scored["chg_oi"],
+        "alignment": scored["alignment"],
         "trigger_level": trigger_level,
         "trigger_hit": trigger_hit,
         "candle_confirmed": candle_confirmed,
@@ -2911,56 +2770,14 @@ def build_plan(
         "trigger": trigger,
         "exit_rule": exit_rule,
         "hard_fail": hard_fail,
-        "reasons": reasons,
-        "strike": safe_float(
-            row.get("Strike")
-        ),
-        "key": row.get(
-            f"{prefix} Key"
-        ),
+        "status": status,
+        "ready": ready,
     }
 
 
 # ============================================================
-# FIND BEST OPTION
+# BEST PLAN
 # ============================================================
-
-def candidate_rows(chain, side, spot):
-    if chain.empty:
-        return pd.DataFrame()
-
-    prefix = (
-        "CE"
-        if side == "CE"
-        else "PE"
-    )
-
-    working = chain.copy()
-
-    working["_distance"] = (
-        working["Strike"] - spot
-    ).abs()
-
-    # Focus on reasonably close strikes.
-    working = working[
-        working["_distance"]
-        <= spot * 0.06
-    ]
-
-    working = working[
-        pd.to_numeric(
-            working[f"{prefix} LTP"],
-            errors="coerce",
-        ) > 0
-    ]
-
-    return (
-        working
-        .sort_values("_distance")
-        .head(15)
-        .drop(columns=["_distance"])
-    )
-
 
 def find_best_plan(
     chain,
@@ -2973,17 +2790,34 @@ def find_best_plan(
     tf30,
     daily,
     risk_profile,
-    oi_info,
+    market_open,
 ):
-    candidates = candidate_rows(
-        chain,
-        side,
-        spot,
+    if chain is None or chain.empty:
+        return None
+
+    distance = (
+        (chain["Strike"] - spot).abs()
+        / max(abs(spot), 1)
     )
+
+    candidates = chain[
+        distance <= 0.04
+    ].copy()
+
+    if candidates.empty:
+        candidates = (
+            chain.assign(
+                _distance=distance
+            )
+            .sort_values("_distance")
+            .head(10)
+            .drop(columns="_distance")
+        )
 
     plans = []
 
     for _, row in candidates.iterrows():
+
         plan = build_plan(
             row,
             side,
@@ -2995,8 +2829,7 @@ def find_best_plan(
             tf30,
             daily,
             risk_profile,
-            chain,
-            oi_wall_info=oi_info,
+            market_open,
         )
 
         if plan is not None:
@@ -3007,9 +2840,12 @@ def find_best_plan(
 
     plans.sort(
         key=lambda x: (
+            x["ready"],
             x["score"],
-            x["pop"] if np.isfinite(x["pop"]) else -1,
-            -x["spread_pct"],
+            x["alignment"],
+            x["pop"]
+            if np.isfinite(x["pop"])
+            else -1,
         ),
         reverse=True,
     )
@@ -3021,66 +2857,119 @@ def find_best_plan(
 # SCANNER
 # ============================================================
 
-def scanner_results(
+def scanner_candidates(
     chain,
     spot,
-    support,
-    resistance,
     pcr,
     tf5,
     tf30,
     daily,
-    risk_profile,
+    support,
+    resistance,
 ):
     results = []
 
-    for side in ("CE", "PE"):
-        candidates = candidate_rows(
-            chain,
-            side,
-            spot,
-        )
+    if chain is None or chain.empty:
+        return results
 
-        for _, row in candidates.iterrows():
-            plan = build_plan(
+    distance = (
+        (chain["Strike"] - spot).abs()
+        / max(abs(spot), 1)
+    )
+
+    candidates = chain[
+        distance <= 0.05
+    ].copy()
+
+    for _, row in candidates.iterrows():
+
+        for side in ("CE", "PE"):
+
+            prefix = (
+                "CE"
+                if side == "CE"
+                else "PE"
+            )
+
+            pop = normalize_pop(
+                row.get(f"{prefix} PoP")
+            )
+
+            if (
+                not np.isfinite(pop)
+                or pop <= 60
+            ):
+                continue
+
+            scored = score_option(
                 row,
                 side,
                 spot,
-                support,
-                resistance,
                 pcr,
                 tf5,
                 tf30,
                 daily,
-                risk_profile,
-                chain,
+                support,
+                resistance,
             )
 
-            if not plan:
-                continue
+            delta = abs(
+                safe_float(
+                    scored["delta"]
+                )
+            )
 
-            # User's requested scanner threshold.
             if (
-                not np.isfinite(plan["pop"])
-                or plan["pop"] <= 60
+                not np.isfinite(delta)
+                or delta < 0.35
+                or delta > 0.80
             ):
                 continue
 
-            # Keep scanner useful: only sufficiently liquid /
-            # structurally reasonable contracts.
-            if plan["spread_pct"] > 4:
+            if (
+                not np.isfinite(
+                    scored["spread_pct"]
+                )
+                or scored["spread_pct"] > 3
+            ):
                 continue
 
-            if plan["oi"] <= 0:
+            if scored["volume"] < 1000:
                 continue
 
-            results.append(plan)
+            if scored["oi"] <= 0:
+                continue
+
+            if scored["score"] < 72:
+                continue
+
+            results.append(
+                {
+                    "side": side,
+                    "strike": safe_float(
+                        row.get("Strike")
+                    ),
+                    "score": scored["score"],
+                    "pop": scored["pop"],
+                    "delta": scored["delta"],
+                    "iv": scored["iv"],
+                    "ltp": scored["ltp"],
+                    "volume": scored["volume"],
+                    "oi": scored["oi"],
+                    "spread": scored[
+                        "spread_pct"
+                    ],
+                    "alignment": scored[
+                        "alignment"
+                    ],
+                }
+            )
 
     results.sort(
         key=lambda x: (
-            x["pop"],
             x["score"],
-            x["rr1"],
+            x["pop"],
+            x["alignment"],
         ),
         reverse=True,
     )
@@ -3089,120 +2978,42 @@ def scanner_results(
 
 
 # ============================================================
-# UI HELPERS
+# RENDER HELPERS
 # ============================================================
 
-def metric_card(label, value, css="metric-neutral", note=""):
-    return f"""
-    <div class="metric-card {css}">
-        <span>{label}</span>
-        <b>{value}</b>
-        <small>{note}</small>
-    </div>
-    """
-
-
-def render_metric_grid(items, columns=4):
-    cols = st.columns(columns)
-
-    for index, item in enumerate(items):
-        with cols[index % columns]:
-            st.markdown(
-                metric_card(
-                    item[0],
-                    item[1],
-                    item[2] if len(item) > 2 else "metric-neutral",
-                    item[3] if len(item) > 3 else "",
-                ),
-                unsafe_allow_html=True,
-            )
-
-
-def render_decision(plan, fallback_side=None):
-    if plan is None:
-        action = "NO TRADE"
-        decision_class = "decision-neutral"
-        subtitle = "No valid option setup was found."
-        score = "—"
-        pop = "—"
-        entry = "—"
-        rr = "—"
-
-    else:
-        action = plan["action"]
-
-        if action == "CALL BUY":
-            decision_class = "decision-call"
-        elif action == "PUT BUY":
-            decision_class = "decision-put"
-        else:
-            decision_class = "decision-neutral"
-
-        if action == "NO TRADE":
-            subtitle = plan["readiness"]
-        else:
-            subtitle = "All entry conditions are currently confirmed."
-
-        score = (
-            f'{plan["score"]:.0f}/100'
-        )
-
-        pop = (
-            fmt_pct(plan["pop"])
-            if np.isfinite(plan["pop"])
-            else "—"
-        )
-
-        entry = fmt_price(
-            plan["entry"]
-        )
-
-        rr = (
-            f'1:{plan["rr1"]:.2f}'
-        )
-
-    html = f"""
-    <div class="decision-card {decision_class}">
-        <div class="decision-main">{action}</div>
-        <div class="decision-sub">{subtitle}</div>
-
-        <div class="decision-stats">
-            <div>
-                <span>SETUP SCORE</span>
-                <b>{score}</b>
+def render_metric(
+    label,
+    value,
+    note="",
+):
+    st.markdown(
+        f"""
+        <div class="metric-card">
+            <div class="metric-label">
+                {esc(label)}
             </div>
-
-            <div>
-                <span>PoP</span>
-                <b>{pop}</b>
+            <div class="metric-value">
+                {esc(value)}
             </div>
-
-            <div>
-                <span>ENTRY</span>
-                <b>{entry}</b>
-            </div>
-
-            <div>
-                <span>R:R</span>
-                <b>{rr}</b>
+            <div class="metric-note">
+                {esc(note)}
             </div>
         </div>
-    </div>
-    """
-
-    st.markdown(
-        html,
+        """,
         unsafe_allow_html=True,
     )
 
 
-def render_plan_card(plan):
-    if not plan:
+def render_trade_plan(plan, title):
+    if plan is None:
         st.markdown(
-            """
-            <div class="option-card option-muted">
-                <div class="option-empty">
-                    No valid option plan available.
+            f"""
+            <div class="option-card">
+                <div class="option-title">
+                    {esc(title)}
+                </div>
+                <div class="option-strike">
+                    No valid option
                 </div>
             </div>
             """,
@@ -3210,514 +3021,627 @@ def render_plan_card(plan):
         )
         return
 
-    side = plan["side"]
-
-    css = (
-        "option-call"
-        if side == "CE"
-        else "option-put"
+    side_class = (
+        "call"
+        if plan["side"] == "CE"
+        else "put"
     )
 
-    label = (
-        "CALL"
-        if side == "CE"
-        else "PUT"
+    if plan["status"] == "READY":
+        status_class = "status-green"
+    elif plan["status"] == "NO TRADE":
+        status_class = "status-red"
+    else:
+        status_class = "status-yellow"
+
+    side_label = (
+        "CALL BUY"
+        if plan["side"] == "CE"
+        else "PUT BUY"
     )
-
-    readiness = plan["readiness"]
-
-    readiness_class = plan[
-        "readiness_class"
-    ]
-
-    selected = (
-        " option-selected"
-        if plan["action"] != "NO TRADE"
-        else ""
-    )
-
-    html = f"""
-    <div class="option-card {css}{selected}">
-        <div class="option-head">
-            <span>{label} BUY</span>
-            <span class="selected-tag">
-                {readiness}
-            </span>
-        </div>
-
-        <div class="option-strike">
-            {fmt_price(plan["strike"])}
-        </div>
-
-        <div class="option-grid">
-
-            <div>
-                <span>ENTRY</span>
-                <b>{fmt_price(plan["entry"])}</b>
-            </div>
-
-            <div>
-                <span>STOP LOSS</span>
-                <b>{fmt_price(plan["sl"])}</b>
-            </div>
-
-            <div>
-                <span>TARGET 1</span>
-                <b>{fmt_price(plan["target1"])}</b>
-            </div>
-
-            <div>
-                <span>TARGET 2</span>
-                <b>{fmt_price(plan["target2"])}</b>
-            </div>
-
-            <div>
-                <span>PoP</span>
-                <b>{fmt_pct(plan["pop"])}</b>
-            </div>
-
-            <div>
-                <span>DELTA</span>
-                <b>{fmt_delta(plan["delta"])}</b>
-            </div>
-
-            <div>
-                <span>IV</span>
-                <b>{fmt_pct(plan["iv"])}</b>
-            </div>
-
-            <div>
-                <span>R:R</span>
-                <b>1:{plan["rr1"]:.2f}</b>
-            </div>
-
-        </div>
-
-        <div class="option-readiness {readiness_class}">
-            {readiness}
-        </div>
-
-        <div class="exit-rule">
-            <span>ENTRY TRIGGER</span>
-            <b>{plan["trigger"]}</b>
-        </div>
-
-        <div class="exit-rule">
-            <span>EXIT RULE</span>
-            <b>{plan["exit_rule"]}</b>
-        </div>
-    </div>
-    """
 
     st.markdown(
-        html,
+        f"""
+        <div class="option-card {side_class}">
+
+            <div class="option-header">
+
+                <div>
+                    <div class="option-title">
+                        {esc(side_label)}
+                    </div>
+
+                    <div class="option-strike">
+                        {esc(fmt_price(plan["strike"]))}
+                    </div>
+                </div>
+
+                <div class="option-readiness {status_class}">
+                    {esc(plan["status"])}
+                </div>
+
+            </div>
+
+            <div class="option-grid">
+
+                <div>
+                    <span>ENTRY</span>
+                    <b>{esc(fmt_price(plan["entry"]))}</b>
+                </div>
+
+                <div>
+                    <span>STOP LOSS</span>
+                    <b>{esc(fmt_price(plan["sl"]))}</b>
+                </div>
+
+                <div>
+                    <span>TARGET 1</span>
+                    <b>{esc(fmt_price(plan["target1"]))}</b>
+                </div>
+
+                <div>
+                    <span>TARGET 2</span>
+                    <b>{esc(fmt_price(plan["target2"]))}</b>
+                </div>
+
+                <div>
+                    <span>PoP</span>
+                    <b>{esc(fmt_pct(plan["pop"]))}</b>
+                </div>
+
+                <div>
+                    <span>DELTA</span>
+                    <b>{esc(fmt_delta(plan["delta"]))}</b>
+                </div>
+
+                <div>
+                    <span>IV</span>
+                    <b>{esc(fmt_pct(plan["iv"]))}</b>
+                </div>
+
+                <div>
+                    <span>R:R</span>
+                    <b>1:{esc(f"{plan['rr1']:.2f}")}</b>
+                </div>
+
+            </div>
+
+            <div class="exit-rule">
+                <span>ENTRY TRIGGER</span>
+                <b>{esc(plan["trigger"])}</b>
+            </div>
+
+            <div class="exit-rule">
+                <span>EXIT RULE</span>
+                <b>{esc(plan["exit_rule"])}</b>
+            </div>
+
+        </div>
+        """,
         unsafe_allow_html=True,
     )
 
 
-def render_checks(plan, tf5, tf30, daily):
+def render_validation(plan):
+    if plan is None:
+        return
+
     checks = []
 
-    if plan:
-        checks.append(
+    alignment_pass = (
+        plan["alignment"] >= 2
+    )
+
+    pop_pass = (
+        np.isfinite(plan["pop"])
+        and plan["pop"] >= 55
+    )
+
+    spread_pass = (
+        np.isfinite(plan["spread_pct"])
+        and plan["spread_pct"] <= 3
+    )
+
+    liquidity_pass = (
+        plan["volume"] >= 1000
+        and plan["oi"] > 0
+    )
+
+    trigger_pass = plan["trigger_hit"]
+
+    candle_pass = (
+        plan["candle_confirmed"]
+    )
+
+    volume_pass = (
+        plan["volume_confirmed"]
+    )
+
+    score_pass = (
+        plan["score"] >= 72
+    )
+
+    checks.extend(
+        [
             (
                 "Setup Score",
-                (
-                    "PASS"
-                    if plan["score"] >= 72
-                    else "FAIL"
-                ),
-                f'{plan["score"]:.0f}/100',
-            )
-        )
-
-        checks.append(
+                score_pass,
+                f"{plan['score']}/100",
+            ),
             (
                 "Timeframe Alignment",
-                (
-                    "PASS"
-                    if plan["score"] >= 72
-                    and not any(
-                        x.get("trend")
-                        in (
-                            "Unavailable",
-                        )
-                        for x in (
-                            tf5,
-                            tf30,
-                            daily,
-                        )
-                    )
-                    else "WAIT"
-                ),
-                "3 timeframe analysis",
-            )
-        )
-
-        checks.append(
+                alignment_pass,
+                f"{plan['alignment']}/3 aligned",
+            ),
             (
                 "Option PoP",
-                (
-                    "PASS"
-                    if np.isfinite(plan["pop"])
-                    and plan["pop"] > 60
-                    else "WAIT"
-                ),
+                pop_pass,
                 fmt_pct(plan["pop"]),
-            )
-        )
-
-        checks.append(
+            ),
             (
                 "Option Spread",
-                (
-                    "PASS"
-                    if plan["spread_pct"] <= 3
-                    else "FAIL"
-                ),
-                f'{plan["spread_pct"]:.1f}%',
-            )
-        )
-
-        checks.append(
+                spread_pass,
+                fmt_pct(plan["spread_pct"]),
+            ),
             (
                 "Liquidity",
-                (
-                    "PASS"
-                    if plan["volume"] >= 1000
-                    and plan["oi"] > 0
-                    else "FAIL"
-                ),
-                f'Vol {fmt_num(plan["volume"])}',
-            )
-        )
-
-        checks.append(
+                liquidity_pass,
+                f"Vol {fmt_num(plan['volume'])}",
+            ),
             (
                 "Entry Trigger",
-                (
-                    "PASS"
-                    if plan["trigger_hit"]
-                    else "WAIT"
-                ),
+                trigger_pass,
                 (
                     "Triggered"
-                    if plan["trigger_hit"]
+                    if trigger_pass
                     else "Not triggered"
                 ),
-            )
-        )
-
-        checks.append(
+            ),
             (
                 "5m Confirmation",
-                (
-                    "PASS"
-                    if plan["candle_confirmed"]
-                    else "WAIT"
-                ),
+                candle_pass,
                 (
                     "Confirmed"
-                    if plan["candle_confirmed"]
+                    if candle_pass
                     else "Pending"
                 ),
-            )
-        )
-
-        checks.append(
+            ),
             (
                 "Volume Confirmation",
-                (
-                    "PASS"
-                    if plan["volume_confirmed"]
-                    else "WAIT"
-                ),
+                volume_pass,
                 (
                     "Confirmed"
-                    if plan["volume_confirmed"]
+                    if volume_pass
                     else "Pending"
                 ),
-            )
-        )
-
-    else:
-        checks.append(
-            (
-                "Trade Setup",
-                "FAIL",
-                "No valid setup",
-            )
-        )
+            ),
+        ]
+    )
 
     passed = sum(
         1
-        for _, status, _ in checks
-        if status == "PASS"
-    )
-
-    html = [
-        '<div class="check-card">'
-    ]
-
-    for name, status, detail in checks:
-        css = (
-            "check-pass"
-            if status == "PASS"
-            else (
-                "check-fail"
-                if status == "FAIL"
-                else "check-wait"
-            )
-        )
-
-        html.append(
-            f"""
-            <div class="check-row">
-                <span>{name}</span>
-                <strong class="{css}">
-                    {status}
-                </strong>
-                <small>{detail}</small>
-            </div>
-            """
-        )
-
-    html.append(
-        f"""
-        <div class="check-total">
-            <span>Conditions Passed</span>
-            <b>{passed}/{len(checks)}</b>
-        </div>
-        </div>
-        """
+        for _, value, _ in checks
+        if value
     )
 
     st.markdown(
-        "".join(html),
+        '<div class="section-title">'
+        '✅ Trade Validation'
+        '</div>',
+        unsafe_allow_html=True,
+    )
+
+    rows_html = ""
+
+    for label, passed_flag, detail in checks:
+
+        if passed_flag:
+            cls = "check-pass"
+            text = "PASS"
+        else:
+            cls = "check-wait"
+
+            if label == "Setup Score" and plan[
+                "score"
+            ] < 72:
+                text = "FAIL"
+            else:
+                text = "WAIT"
+
+        rows_html += f"""
+        <div class="check-row">
+            <span>{esc(label)}</span>
+            <strong class="{cls}">
+                {text}
+            </strong>
+            <small>{esc(detail)}</small>
+        </div>
+        """
+
+    st.markdown(
+        f"""
+        <div class="validation-card">
+
+            {rows_html}
+
+            <div class="check-total">
+                <span>Conditions Passed</span>
+                <b>{passed}/{len(checks)}</b>
+            </div>
+
+        </div>
+        """,
         unsafe_allow_html=True,
     )
 
 
 def render_why(plan):
-    if not plan:
+    if plan is None:
+        return
+
+    reasons = []
+
+    if plan["score"] >= 72:
+        reasons.append(
+            (
+                "pass",
+                f"Setup score {plan['score']}/100"
+            )
+        )
+    else:
+        reasons.append(
+            (
+                "fail",
+                f"Blocked: setup score below 72"
+            )
+        )
+
+    if plan["alignment"] >= 2:
+        reasons.append(
+            (
+                "pass",
+                f"Timeframe alignment "
+                f"{plan['alignment']}/3"
+            )
+        )
+    else:
+        reasons.append(
+            (
+                "warning",
+                "Blocked: fewer than 2 aligned timeframes"
+            )
+        )
+
+    if (
+        np.isfinite(plan["pop"])
+        and plan["pop"] >= 55
+    ):
+        reasons.append(
+            (
+                "pass",
+                f"PoP {plan['pop']:.1f}%"
+            )
+        )
+    else:
+        reasons.append(
+            (
+                "warning",
+                "Blocked: low option PoP"
+            )
+        )
+
+    if (
+        np.isfinite(plan["delta"])
+        and 0.35 <= abs(plan["delta"]) <= 0.80
+    ):
+        reasons.append(
+            (
+                "pass",
+                f"Delta {plan['delta']:.2f}"
+            )
+        )
+    else:
+        reasons.append(
+            (
+                "warning",
+                "Delta outside preferred range"
+            )
+        )
+
+    if (
+        np.isfinite(plan["spread_pct"])
+        and plan["spread_pct"] <= 3
+    ):
+        reasons.append(
+            (
+                "pass",
+                f"Spread {plan['spread_pct']:.1f}%"
+            )
+        )
+    else:
+        reasons.append(
+            (
+                "warning",
+                "Option spread too wide"
+            )
+        )
+
+    if plan["candle_confirmed"]:
+        reasons.append(
+            (
+                "pass",
+                "5m candle confirmation present"
+            )
+        )
+    else:
+        reasons.append(
+            (
+                "warning",
+                "5m candle confirmation pending"
+            )
+        )
+
+    if plan["volume_confirmed"]:
+        reasons.append(
+            (
+                "pass",
+                "Volume confirmation present"
+            )
+        )
+    else:
+        reasons.append(
+            (
+                "warning",
+                "Volume confirmation pending"
+            )
+        )
+
+    if plan["hard_fail"]:
+        for failure in plan["hard_fail"]:
+            reasons.append(
+                (
+                    "warning",
+                    f"Blocked: {failure}"
+                )
+            )
+
+    items = ""
+
+    for kind, text_value in reasons:
+
+        if kind == "pass":
+            cls = "why-pass"
+        elif kind == "fail":
+            cls = "why-fail"
+        else:
+            cls = "why-warning"
+
+        items += f"""
+        <div class="why-item {cls}">
+            {esc(text_value)}
+        </div>
+        """
+
+    st.markdown(
+        f"""
+        <div class="section-title">
+            🧠 Why the Engine Says This
+        </div>
+
+        <div class="why-card">
+            {items}
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def render_scanner(results):
+    st.markdown(
+        '<div class="section-title">'
+        '🔎 F&O Scanner — Qualified PoP > 60%'
+        '</div>',
+        unsafe_allow_html=True,
+    )
+
+    if not results:
         st.markdown(
             """
-            <div class="why-card">
-                <div class="why-item why-warning">
-                    No valid option setup is available for the current
-                    market conditions.
-                </div>
+            <div class="info-box">
+                No option currently meets all scanner
+                requirements. The scanner requires PoP >60%,
+                setup score ≥72, Delta 0.35–0.80,
+                acceptable spread, liquidity and OI.
             </div>
             """,
             unsafe_allow_html=True,
         )
         return
 
-    items = []
+    for item in results:
 
-    for reason in plan["reasons"]:
-        warning = (
-            "pending"
-            in reason.lower()
-            or "only"
-            in reason.lower()
-            or "incomplete"
-            in reason.lower()
+        side_label = (
+            "CALL BUY"
+            if item["side"] == "CE"
+            else "PUT BUY"
         )
 
-        css = (
-            "why-item why-warning"
-            if warning
-            else "why-item"
-        )
+        st.markdown(
+            f"""
+            <div class="scanner-card">
 
-        items.append(
-            f'<div class="{css}">{reason}</div>'
-        )
+                <div class="scanner-header">
 
-    if plan["hard_fail"]:
-        for failure in plan["hard_fail"]:
-            items.append(
-                f"""
-                <div class="why-item why-warning">
-                    Blocked: {failure}
+                    <div>
+                        <div class="scanner-title">
+                            {esc(side_label)}
+                            •
+                            {esc(fmt_price(item["strike"]))}
+                        </div>
+
+                        <div class="scanner-meta">
+                            QUALIFIED • PoP above 60%
+                        </div>
+                    </div>
+
+                    <div style="text-align:right;">
+                        <div class="small-muted">
+                            PoP
+                        </div>
+                        <div style="
+                            font-size:20px;
+                            font-weight:900;
+                            color:#182230;">
+                            {esc(fmt_pct(item["pop"]))}
+                        </div>
+                    </div>
+
                 </div>
-                """
+
+                <div class="scanner-stats">
+
+                    <div>
+                        <span>SCORE</span>
+                        <b>{item["score"]}</b>
+                    </div>
+
+                    <div>
+                        <span>LTP</span>
+                        <b>{esc(fmt_price(item["ltp"]))}</b>
+                    </div>
+
+                    <div>
+                        <span>DELTA</span>
+                        <b>{esc(fmt_delta(item["delta"]))}</b>
+                    </div>
+
+                    <div>
+                        <span>IV</span>
+                        <b>{esc(fmt_pct(item["iv"]))}</b>
+                    </div>
+
+                    <div>
+                        <span>R:R SCREEN</span>
+                        <b>QUALIFIED</b>
+                    </div>
+
+                    <div>
+                        <span>ALIGNMENT</span>
+                        <b>{item["alignment"]}/3</b>
+                    </div>
+
+                </div>
+
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+
+
+# ============================================================
+# MAIN APPLICATION
+# ============================================================
+
+def main():
+
+    current = now_ist()
+    market_open = is_market_open(
+        current
+    )
+
+    # --------------------------------------------------------
+    # SIDEBAR
+    # --------------------------------------------------------
+
+    with st.sidebar:
+
+        st.markdown(
+            "## ⚙️ Analysis Settings"
+        )
+
+        symbol_input = st.text_input(
+            "F&O Symbol",
+            value="HDFCBANK",
+            help=(
+                "Enter NSE F&O stock/index symbol, "
+                "for example HDFCBANK, RELIANCE, "
+                "NIFTY or BANKNIFTY."
+            ),
+        )
+
+        risk_profile = st.selectbox(
+            "Risk Profile",
+            [
+                "Conservative",
+                "Balanced",
+                "Aggressive",
+            ],
+            index=1,
+        )
+
+        scanner_on = st.toggle(
+            "F&O Scanner",
+            value=True,
+            help=(
+                "Shows only qualified options with "
+                "PoP above 60% and setup-quality filters."
+            ),
+        )
+
+        refresh = st.button(
+            "🔄 Refresh Data",
+            use_container_width=True,
+        )
+
+        if refresh:
+            st.rerun()
+
+        st.divider()
+
+        if market_open:
+            st.success(
+                "● LIVE DATA\n\n"
+                "NSE regular session is open."
+            )
+        else:
+            st.warning(
+                "● MARKET CLOSED\n\n"
+                "NSE regular session is closed."
             )
 
-    html = (
-        '<div class="why-card">'
-        + "".join(items)
-        + "</div>"
-    )
+        remaining = rate_limit_remaining()
 
-    st.markdown(
-        html,
-        unsafe_allow_html=True,
-    )
+        if remaining > 0:
+            st.error(
+                f"Upstox rate-limit cooldown active: "
+                f"{remaining}s"
+            )
 
-
-# ============================================================
-# SIDEBAR
-# ============================================================
-
-with st.sidebar:
-    st.markdown(
-        "## ⚙️ Controls"
-    )
-
-    symbol_input = st.text_input(
-        "F&O Symbol",
-        value=st.session_state.get(
-            "symbol",
-            "HDFCBANK",
-        ),
-        help=(
-            "Example: HDFCBANK, RELIANCE, "
-            "SBIN, NIFTY, BANKNIFTY"
-        ),
-    ).strip().upper()
-
-    st.session_state["symbol"] = (
-        alias_symbol(symbol_input)
-    )
-
-    risk_profile = st.selectbox(
-        "Risk Profile",
-        [
-            "Conservative",
-            "Balanced",
-            "Aggressive",
-        ],
-        index=1,
-    )
-
-    scanner_enabled = st.toggle(
-        "🔎 F&O Scanner",
-        value=True,
-        help=(
-            "Shows option candidates with "
-            "PoP above 60% using the same live "
-            "option-chain data."
-        ),
-    )
-
-    auto_refresh = st.toggle(
-        "Auto Refresh",
-        value=True,
-    )
-
-    refresh_seconds = st.selectbox(
-        "Refresh Interval",
-        [30, 60, 90, 120],
-        index=1,
-    )
-
-    manual_refresh = st.button(
-        "🔄 Refresh Now",
-        use_container_width=True,
-    )
-
-    st.divider()
-
-    st.caption(
-        "REST API only • No automatic orders"
-    )
-
-    st.caption(
-        "Score is a rule-based setup score, "
-        "not a guaranteed win probability."
-    )
-
-
-# ============================================================
-# RATE LIMIT / AUTO REFRESH
-# ============================================================
-
-rate_remaining = cooldown_remaining()
-
-if (
-    auto_refresh
-    and st_autorefresh is not None
-    and market_is_open()
-    and rate_remaining <= 0
-):
-    st_autorefresh(
-        interval=refresh_seconds * 1000,
-        key="fo_pro_auto_refresh",
-    )
-
-if manual_refresh:
-    if rate_remaining > 0:
-        st.warning(
-            f"Upstox cooldown is active. "
-            f"Please wait about {rate_remaining} seconds."
-        )
-    else:
-        st.cache_data.clear()
-        st.rerun()
-
-
-# ============================================================
-# HEADER
-# ============================================================
-
-is_open = market_is_open()
-
-status_text = (
-    "● LIVE DATA"
-    if is_open
-    else "● MARKET CLOSED"
-)
-
-status_class = (
-    "live-block"
-    if is_open
-    else "closed-block"
-)
-
-current_time = now_ist().strftime(
-    "%d %b %Y • %I:%M:%S %p"
-)
-
-st.markdown(
-    f"""
-    <div class="topbar">
-        <div class="topbar-dashboard">
-            <div>
-                <div class="topbar-title">
-                    📊 FO PRO Trader Assistant
-                </div>
-                <div class="topbar-sub">
-                    Options Analysis • Upstox REST API •
-                    Live Option Chain • Technical + OI Analysis
-                </div>
-            </div>
-
-            <div class="{status_class}">
-                Data Status<br>
-                {status_text}
-            </div>
-        </div>
-    </div>
-    """,
-    unsafe_allow_html=True,
-)
-
-
-# ============================================================
-# LOAD MARKET DATA
-# ============================================================
-
-try:
-    with st.spinner(
-        f"Loading {symbol_input} market data..."
-    ):
-        instrument = search_underlying(
-            symbol_input
+        st.caption(
+            "REST API only • No automatic order execution"
         )
 
-        underlying_key = instrument.get(
+    symbol = alias_symbol(
+        symbol_input
+    )
+
+    if not symbol:
+        st.error(
+            "Please enter an F&O symbol."
+        )
+        return
+
+    # --------------------------------------------------------
+    # LOAD DATA
+    # --------------------------------------------------------
+
+    try:
+
+        underlying = search_underlying(
+            symbol
+        )
+
+        underlying_key = underlying.get(
             "instrument_key"
         )
 
@@ -3726,9 +3650,11 @@ try:
                 "Upstox did not return an instrument key."
             )
 
-        trading_symbol = (
-            instrument.get("trading_symbol")
-            or symbol_input
+        actual_symbol = (
+            underlying.get(
+                "trading_symbol"
+            )
+            or symbol
         )
 
         contracts = get_contracts(
@@ -3741,80 +3667,150 @@ try:
 
         if not expiries:
             raise UpstoxError(
-                "No valid future option expiry was returned."
+                "No future option expiries are available."
             )
 
-        selected_expiry = expiries[0]
+        expiry_options = [
+            str(x)
+            for x in expiries
+        ]
 
-        chain_raw = get_option_chain(
+        selected_expiry = st.sidebar.selectbox(
+            "Expiry",
+            expiry_options,
+            index=0,
+        )
+
+        raw_chain = get_option_chain(
             underlying_key,
             selected_expiry,
         )
 
         chain = normalize_chain(
-            chain_raw
+            raw_chain
         )
 
         if chain.empty:
             raise UpstoxError(
-                "Option chain could not be normalized."
+                "Option chain is empty after normalization."
             )
 
         quote_data = get_quote(
             underlying_key
         )
 
-        spot = extract_last_price(
+        spot = extract_ltp(
             quote_data
         )
 
-        if (
-            not np.isfinite(spot)
-            or spot <= 0
-        ):
+        # ----------------------------------------------------
+        # FALLBACK SPOT FROM OPTION CHAIN
+        # ----------------------------------------------------
+
+        if not np.isfinite(spot):
+
+            for raw in raw_chain:
+
+                possible = []
+
+                if isinstance(raw, dict):
+                    possible.extend(
+                        [
+                            raw.get(
+                                "underlying_spot_price"
+                            ),
+                            raw.get(
+                                "underlying_value"
+                            ),
+                            raw.get(
+                                "spot_price"
+                            ),
+                        ]
+                    )
+
+                for value in possible:
+
+                    candidate = safe_float(
+                        value
+                    )
+
+                    if np.isfinite(candidate):
+                        spot = candidate
+                        break
+
+                if np.isfinite(spot):
+                    break
+
+        if not np.isfinite(spot):
             raise UpstoxError(
-                "Upstox returned an invalid spot price."
+                "Unable to obtain the current underlying spot price."
             )
 
-        tf5_df = get_intraday_candles(
-            underlying_key,
-            interval=5,
-        )
+        # ----------------------------------------------------
+        # TECHNICAL DATA
+        # ----------------------------------------------------
 
-        tf30_df = get_30m_candles(
-            underlying_key
-        )
+        try:
+            candles_5 = get_intraday_candles(
+                underlying_key,
+                5,
+            )
+        except UpstoxError:
+            candles_5 = pd.DataFrame()
 
-        daily_df = get_daily_candles(
-            underlying_key
-        )
+        try:
+            candles_30 = get_30m_candles(
+                underlying_key
+            )
+        except UpstoxError:
+            candles_30 = pd.DataFrame()
+
+        try:
+            candles_daily = get_daily_candles(
+                underlying_key
+            )
+        except UpstoxError:
+            candles_daily = pd.DataFrame()
 
         tf5 = technicals(
-            tf5_df,
+            candles_5,
             spot,
         )
 
         tf30 = technicals(
-            tf30_df,
+            candles_30,
             spot,
         )
 
         daily = technicals(
-            daily_df,
+            candles_daily,
             spot,
         )
 
-        (
-            support,
-            resistance,
-            pcr,
-            oi_info,
-        ) = oi_levels(
+        bias, bias_count = overall_trend(
+            tf5,
+            tf30,
+            daily,
+        )
+
+        oi = oi_levels(
             chain,
             spot,
         )
 
-        call_plan = find_best_plan(
+        pcr = oi["pcr"]
+
+        support = oi["major_support"]
+
+        resistance = oi[
+            "major_resistance"
+        ]
+
+        # ----------------------------------------------------
+        # BEST CE / PE
+        # ----------------------------------------------------
+
+        best_ce = find_best_plan(
             chain,
             "CE",
             spot,
@@ -3825,10 +3821,10 @@ try:
             tf30,
             daily,
             risk_profile,
-            oi_info,
+            market_open,
         )
 
-        put_plan = find_best_plan(
+        best_pe = find_best_plan(
             chain,
             "PE",
             spot,
@@ -3839,929 +3835,1037 @@ try:
             tf30,
             daily,
             risk_profile,
-            oi_info,
+            market_open,
         )
 
-except UpstoxRateLimitError as exc:
-    st.markdown(
-        f"""
-        <div class="status-panel status-red">
-            <div class="status-title">
-                ⏳ Upstox Rate Limit Active
-            </div>
-
-            <div class="status-note">
-                {exc}<br><br>
-                The application has stopped sending new API requests
-                while the cooldown is active.
-            </div>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
-
-    st.stop()
-
-except UpstoxError as exc:
-    st.markdown(
-        f"""
-        <div class="status-panel status-red">
-            <div class="status-title">
-                ⚠️ DATA ERROR
-            </div>
-
-            <div class="status-note">
-                {str(exc)}
-            </div>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
-
-    st.stop()
-
-except Exception as exc:
-    st.markdown(
-        f"""
-        <div class="status-panel status-red">
-            <div class="status-title">
-                ⚠️ APPLICATION ERROR
-            </div>
-
-            <div class="status-note">
-                The application could not complete the analysis.<br>
-                {str(exc)}
-            </div>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
-
-    st.stop()
-
-
-# ============================================================
-# SELECT PRIMARY DECISION
-# ============================================================
-
-plans = [
-    plan
-    for plan in (
-        call_plan,
-        put_plan,
-    )
-    if plan is not None
-]
-
-triggered_plans = [
-    plan
-    for plan in plans
-    if plan["action"]
-    in (
-        "CALL BUY",
-        "PUT BUY",
-    )
-]
-
-if triggered_plans:
-    primary_plan = max(
-        triggered_plans,
-        key=lambda x: x["score"],
-    )
-else:
-    primary_plan = (
-        max(
-            plans,
-            key=lambda x: x["score"],
-        )
-        if plans
-        else None
-    )
-
-
-# ============================================================
-# TOP METRICS
-# ============================================================
-
-st.markdown(
-    f"""
-    <div class="card">
-        <div style="display:flex;justify-content:space-between;
-                    align-items:center;gap:15px;flex-wrap:wrap;">
-            <div>
-                <div style="font-size:12px;color:#667085;
-                            font-weight:800;">
-                    {trading_symbol} • F&O OPTIONS ANALYSIS
-                </div>
-
-                <div class="hero-price">
-                    {fmt_price(spot)}
-                </div>
-            </div>
-
-            <div style="text-align:right;">
-                <div style="font-size:11px;color:#667085;">
-                    Expiry
-                </div>
-
-                <div style="font-weight:850;color:#182230;">
-                    {selected_expiry}
-                </div>
-
-                <div style="font-size:10px;color:#98a2b3;">
-                    Updated {current_time}
-                </div>
-            </div>
-        </div>
-    </div>
-    """,
-    unsafe_allow_html=True,
-)
-
-
-trend, trend_count = overall_trend(
-    tf5,
-    tf30,
-    daily,
-)
-
-trend_css = (
-    "metric-positive"
-    if trend == "Bullish"
-    else (
-        "metric-negative"
-        if trend == "Bearish"
-        else "metric-neutral"
-    )
-)
-
-render_metric_grid(
-    [
-        (
-            "MARKET BIAS",
-            trend,
-            trend_css,
-            f"{trend_count}/3 timeframes",
-        ),
-        (
-            "PCR",
-            fmt_pct(pcr, 2)
-            if np.isfinite(pcr)
-            else "—",
-            "metric-neutral",
-            "OI-based local PCR",
-        ),
-        (
-            "OI SUPPORT",
-            fmt_price(support),
-            "metric-support",
-            "Major PE OI wall",
-        ),
-        (
-            "OI RESISTANCE",
-            fmt_price(resistance),
-            "metric-resistance",
-            "Major CE OI wall",
-        ),
-    ],
-    columns=4,
-)
-
-
-# ============================================================
-# DECISION
-# ============================================================
-
-st.markdown(
-    '<div class="section-heading">🎯 Trade Decision</div>',
-    unsafe_allow_html=True,
-)
-
-render_decision(
-    primary_plan
-)
-
-
-# ============================================================
-# SUPPORT / RESISTANCE MAP
-# ============================================================
-
-support_room = max(
-    (spot - support)
-    / max(spot, 1)
-    * 100,
-    0,
-)
-
-resistance_room = max(
-    (resistance - spot)
-    / max(spot, 1)
-    * 100,
-    0,
-)
-
-st.markdown(
-    '<div class="section-heading">📍 OI Support / Resistance Map</div>',
-    unsafe_allow_html=True,
-)
-
-st.markdown(
-    f"""
-    <div class="sr-map">
-
-        <div class="sr-side sr-support">
-            <span>SUPPORT</span>
-            <b>{fmt_price(support)}</b>
-            <small>
-                {support_room:.2f}% below spot
-            </small>
-        </div>
-
-        <div class="sr-line">
-            <div class="room-label">
-                CURRENT SPOT
-            </div>
-
-            <div class="current-marker">
-                {fmt_price(spot)}
-                <span>SPOT</span>
-            </div>
-
-            <div class="room-label">
-                {resistance_room:.2f}% to resistance
-            </div>
-        </div>
-
-        <div class="sr-side sr-resistance">
-            <span>RESISTANCE</span>
-            <b>{fmt_price(resistance)}</b>
-            <small>
-                {resistance_room:.2f}% above spot
-            </small>
-        </div>
-
-    </div>
-    """,
-    unsafe_allow_html=True,
-)
-
-
-# ============================================================
-# TRADE PLANS
-# ============================================================
-
-st.markdown(
-    '<div class="section-heading">📌 Trade Plans</div>',
-    unsafe_allow_html=True,
-)
-
-plan_col1, plan_col2 = st.columns(2)
-
-with plan_col1:
-    render_plan_card(
-        call_plan
-    )
-
-with plan_col2:
-    render_plan_card(
-        put_plan
-    )
-
-
-# ============================================================
-# TRADE CHECKS
-# ============================================================
-
-st.markdown(
-    '<div class="section-heading">✅ Trade Validation</div>',
-    unsafe_allow_html=True,
-)
-
-render_checks(
-    primary_plan,
-    tf5,
-    tf30,
-    daily,
-)
-
-
-# ============================================================
-# WHY THIS DECISION
-# ============================================================
-
-st.markdown(
-    '<div class="section-heading">🧠 Why the Engine Says This</div>',
-    unsafe_allow_html=True,
-)
-
-render_why(
-    primary_plan
-)
-
-
-# ============================================================
-# MARKET STATUS
-# ============================================================
-
-status_css = (
-    "status-green"
-    if is_open
-    else "status-grey"
-)
-
-status_title = (
-    "● LIVE DATA"
-    if is_open
-    else "● MARKET CLOSED"
-)
-
-st.markdown(
-    '<div class="section-heading">📡 Data Status</div>',
-    unsafe_allow_html=True,
-)
-
-st.markdown(
-    f"""
-    <div class="status-panel {status_css}">
-        <div class="status-title">
-            {status_title}
-        </div>
-
-        <div class="status-grid">
-
-            <div>
-                <span>SYMBOL</span>
-                <b>{trading_symbol}</b>
-            </div>
-
-            <div>
-                <span>SPOT</span>
-                <b>{fmt_price(spot)}</b>
-            </div>
-
-            <div>
-                <span>EXPIRY</span>
-                <b>{selected_expiry}</b>
-            </div>
-
-        </div>
-
-        <div class="status-note">
-            Analysis updated {current_time} IST.<br>
-            Market-status display follows the NSE regular-session clock.
-        </div>
-    </div>
-    """,
-    unsafe_allow_html=True,
-)
-
-
-# ============================================================
-# SCANNER
-# ============================================================
-
-if scanner_enabled:
-    st.markdown(
-        '<div class="section-heading">🔎 F&O Scanner — PoP &gt; 60%</div>',
-        unsafe_allow_html=True,
-    )
-
-    scanner = scanner_results(
-        chain,
-        spot,
-        support,
-        resistance,
-        pcr,
-        tf5,
-        tf30,
-        daily,
-        risk_profile,
-    )
-
-    if not scanner:
-        st.markdown(
+        # ----------------------------------------------------
+        # FINAL DECISION
+        # ----------------------------------------------------
+
+        ready_plans = [
+            x
+            for x in (
+                best_ce,
+                best_pe,
+            )
+            if x is not None
+            and x.get("ready")
+        ]
+
+        if ready_plans:
+
+            ready_plans.sort(
+                key=lambda x: (
+                    x["score"],
+                    x["alignment"],
+                    x["pop"]
+                    if np.isfinite(
+                        x["pop"]
+                    )
+                    else -1,
+                ),
+                reverse=True,
+            )
+
+            final_plan = ready_plans[0]
+
+            action = (
+                "CALL BUY"
+                if final_plan["side"] == "CE"
+                else "PUT BUY"
+            )
+
+        else:
+
+            final_plan = (
+                best_ce
+                if best_ce is not None
+                else best_pe
+            )
+
+            action = "NO TRADE"
+
+        # ----------------------------------------------------
+        # HEADER
+        # ----------------------------------------------------
+
+        status_block = (
             """
-            <div class="tab-alert tab-danger">
-                No option candidate currently satisfies the
-                PoP &gt; 60% scanner condition together with
-                basic liquidity/spread checks.
+            <div class="live-block">
+                Data Status<br>
+                <strong>● LIVE DATA</strong>
+            </div>
+            """
+            if market_open
+            else
+            """
+            <div class="closed-block">
+                Data Status<br>
+                <strong>● MARKET CLOSED</strong>
+            </div>
+            """
+        )
+
+        st.markdown(
+            f"""
+            <div class="topbar">
+
+                <div class="topbar-row">
+
+                    <div>
+                        <div class="topbar-title">
+                            📊 FO PRO Trader Assistant
+                        </div>
+
+                        <div class="topbar-sub">
+                            Options Analysis • Upstox REST API •
+                            Live Option Chain • Technical + OI Analysis
+                        </div>
+                    </div>
+
+                    {status_block}
+
+                </div>
+
             </div>
             """,
             unsafe_allow_html=True,
         )
-    else:
-        for item in scanner:
-            side_label = (
-                "CALL"
-                if item["side"] == "CE"
-                else "PUT"
+
+        # ----------------------------------------------------
+        # HERO
+        # ----------------------------------------------------
+
+        st.markdown(
+            f"""
+            <div class="hero-card">
+
+                <div style="
+                    display:flex;
+                    justify-content:space-between;
+                    align-items:center;
+                    gap:15px;
+                    flex-wrap:wrap;">
+
+                    <div>
+                        <div class="hero-title">
+                            {esc(actual_symbol)}
+                            • F&O OPTIONS ANALYSIS
+                        </div>
+
+                        <div class="hero-price">
+                            {esc(fmt_price(spot))}
+                        </div>
+
+                        <div class="hero-meta">
+                            Last Traded Price
+                        </div>
+                    </div>
+
+                    <div style="text-align:right;">
+
+                        <div class="small-muted">
+                            EXPIRY
+                        </div>
+
+                        <div style="
+                            font-weight:850;
+                            color:#182230;">
+                            {esc(str(selected_expiry))}
+                        </div>
+
+                        <div class="small-muted"
+                             style="margin-top:5px;">
+                            Updated
+                            {current.strftime(
+                                "%d %b %Y • %I:%M:%S %p"
+                            )}
+                        </div>
+
+                    </div>
+
+                </div>
+
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+
+        # ----------------------------------------------------
+        # METRICS
+        # ----------------------------------------------------
+
+        m1, m2, m3, m4, m5 = st.columns(5)
+
+        with m1:
+            render_metric(
+                "MARKET BIAS",
+                bias,
+                f"{bias_count}/3 timeframes",
             )
 
-            action_label = item["readiness"]
+        with m2:
+            render_metric(
+                "PCR",
+                fmt_pct(pcr),
+                "OI-based local PCR",
+            )
+
+        with m3:
+            render_metric(
+                "OI SUPPORT",
+                fmt_price(support),
+                "Major PE OI wall",
+            )
+
+        with m4:
+            render_metric(
+                "OI RESISTANCE",
+                fmt_price(resistance),
+                "Major CE OI wall",
+            )
+
+        with m5:
+            render_metric(
+                "5M RSI",
+                f"{tf5['rsi']:.1f}",
+                f"Trend: {tf5['trend']}",
+            )
+
+        # ----------------------------------------------------
+        # DECISION
+        # ----------------------------------------------------
+
+        if action == "CALL BUY":
+            decision_class = "decision-call"
+            decision_sub = (
+                "Qualified bullish setup with "
+                "trigger confirmation."
+            )
+        elif action == "PUT BUY":
+            decision_class = "decision-put"
+            decision_sub = (
+                "Qualified bearish setup with "
+                "trigger confirmation."
+            )
+        else:
+            decision_class = "decision-neutral"
+
+            if not market_open:
+                decision_sub = (
+                    "Market is closed. No new trade is permitted."
+                )
+            elif final_plan is not None:
+                decision_sub = (
+                    "Current conditions do not satisfy "
+                    "all trade-entry requirements."
+                )
+            else:
+                decision_sub = (
+                    "No sufficiently qualified option setup found."
+                )
+
+        score_value = (
+            final_plan["score"]
+            if final_plan
+            else 0
+        )
+
+        pop_value = (
+            final_plan["pop"]
+            if final_plan
+            and np.isfinite(
+                final_plan["pop"]
+            )
+            else np.nan
+        )
+
+        entry_value = (
+            final_plan["entry"]
+            if final_plan
+            else np.nan
+        )
+
+        rr_value = (
+            final_plan["rr1"]
+            if final_plan
+            else np.nan
+        )
+
+        st.markdown(
+            f"""
+            <div class="section-title">
+                🎯 Trade Decision
+            </div>
+
+            <div class="decision-card {decision_class}">
+
+                <div class="decision-title">
+                    {esc(action)}
+                </div>
+
+                <div class="decision-sub">
+                    {esc(decision_sub)}
+                </div>
+
+                <div class="decision-stats">
+
+                    <div>
+                        <span>SETUP SCORE</span>
+                        <b>{score_value}/100</b>
+                    </div>
+
+                    <div>
+                        <span>PoP</span>
+                        <b>{esc(fmt_pct(pop_value))}</b>
+                    </div>
+
+                    <div>
+                        <span>ENTRY</span>
+                        <b>{esc(fmt_price(entry_value))}</b>
+                    </div>
+
+                    <div>
+                        <span>R:R</span>
+                        <b>
+                            {
+                                "1:" + f"{rr_value:.2f}"
+                                if np.isfinite(rr_value)
+                                else "—"
+                            }
+                        </b>
+                    </div>
+
+                </div>
+
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+
+        # ----------------------------------------------------
+        # SUPPORT / RESISTANCE
+        # ----------------------------------------------------
+
+        support_distance = (
+            (spot - support)
+            / max(abs(spot), 1)
+        ) * 100
+
+        resistance_distance = (
+            (resistance - spot)
+            / max(abs(spot), 1)
+        ) * 100
+
+        st.markdown(
+            """
+            <div class="section-title">
+                📍 OI Support / Resistance Map
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+
+        st.markdown(
+            f"""
+            <div class="sr-map">
+
+                <div class="sr-side sr-support">
+
+                    <span>SUPPORT</span>
+
+                    <b>
+                        {esc(fmt_price(support))}
+                    </b>
+
+                    <small>
+                        {support_distance:.2f}% below spot
+                    </small>
+
+                </div>
+
+                <div class="sr-line">
+
+                    <div class="room-label">
+                        CURRENT SPOT
+                    </div>
+
+                    <div class="current-marker">
+                        {esc(fmt_price(spot))}
+                        <span>SPOT</span>
+                    </div>
+
+                    <div class="room-label">
+                        {resistance_distance:.2f}%
+                        to resistance
+                    </div>
+
+                </div>
+
+                <div class="sr-side sr-resistance">
+
+                    <span>RESISTANCE</span>
+
+                    <b>
+                        {esc(fmt_price(resistance))}
+                    </b>
+
+                    <small>
+                        {resistance_distance:.2f}% above spot
+                    </small>
+
+                </div>
+
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+
+        # ----------------------------------------------------
+        # TRADE PLANS
+        # ----------------------------------------------------
+
+        st.markdown(
+            '<div class="section-title">'
+            '📌 Trade Plans'
+            '</div>',
+            unsafe_allow_html=True,
+        )
+
+        c1, c2 = st.columns(2)
+
+        with c1:
+            render_trade_plan(
+                best_ce,
+                "CALL BUY",
+            )
+
+        with c2:
+            render_trade_plan(
+                best_pe,
+                "PUT BUY",
+            )
+
+        # ----------------------------------------------------
+        # VALIDATION
+        # ----------------------------------------------------
+
+        validation_plan = (
+            final_plan
+            if final_plan is not None
+            else best_ce
+            or best_pe
+        )
+
+        render_validation(
+            validation_plan
+        )
+
+        render_why(
+            validation_plan
+        )
+
+        # ----------------------------------------------------
+        # DATA STATUS
+        # ----------------------------------------------------
+
+        st.markdown(
+            '<div class="section-title">'
+            '📡 Data Status'
+            '</div>',
+            unsafe_allow_html=True,
+        )
+
+        status_text = (
+            "● LIVE DATA"
+            if market_open
+            else "● MARKET CLOSED"
+        )
+
+        st.markdown(
+            f"""
+            <div class="status-card">
+
+                <div style="
+                    font-size:20px;
+                    font-weight:900;
+                    color:#182230;
+                    margin-bottom:12px;">
+                    {esc(status_text)}
+                </div>
+
+                <div class="status-grid">
+
+                    <div>
+                        <span>SYMBOL</span>
+                        <b>{esc(actual_symbol)}</b>
+                    </div>
+
+                    <div>
+                        <span>SPOT</span>
+                        <b>{esc(fmt_price(spot))}</b>
+                    </div>
+
+                    <div>
+                        <span>EXPIRY</span>
+                        <b>{esc(str(selected_expiry))}</b>
+                    </div>
+
+                </div>
+
+                <div class="status-note">
+                    Analysis updated
+                    {current.strftime(
+                        "%d %b %Y • %I:%M:%S %p"
+                    )}
+                    IST.<br>
+                    Market-status display follows
+                    the NSE regular-session clock.
+                </div>
+
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+
+        # ----------------------------------------------------
+        # SCANNER
+        # ----------------------------------------------------
+
+        if scanner_on:
+
+            results = scanner_candidates(
+                chain,
+                spot,
+                pcr,
+                tf5,
+                tf30,
+                daily,
+                support,
+                resistance,
+            )
+
+            render_scanner(
+                results
+            )
+
+        # ----------------------------------------------------
+        # TABS
+        # ----------------------------------------------------
+
+        tabs = st.tabs(
+            [
+                "📋 Live Option Chain",
+                "📈 Technical Analysis",
+                "🏰 Major OI Walls",
+                "📅 Available Expiries",
+                "🧠 How the Engine Thinks",
+            ]
+        )
+
+        # ----------------------------------------------------
+        # OPTION CHAIN TAB
+        # ----------------------------------------------------
+
+        with tabs[0]:
+
+            st.subheader(
+                "📋 Live Option Chain"
+            )
+
+            display = chain.copy()
+
+            display = display[
+                [
+                    "CE OI",
+                    "CE Chg OI",
+                    "CE LTP",
+                    "CE IV",
+                    "CE Delta",
+                    "Strike",
+                    "PE Delta",
+                    "PE IV",
+                    "PE LTP",
+                    "PE Chg OI",
+                    "PE OI",
+                ]
+            ]
+
+            display.columns = [
+                "CE OI",
+                "CE Chg OI",
+                "CE LTP",
+                "CE IV",
+                "CE Delta",
+                "STRIKE",
+                "PE Delta",
+                "PE IV",
+                "PE LTP",
+                "PE Chg OI",
+                "PE OI",
+            ]
+
+            st.dataframe(
+                display,
+                use_container_width=True,
+                hide_index=True,
+                column_config={
+                    "CE OI": st.column_config.NumberColumn(
+                        format="%.0f"
+                    ),
+                    "CE Chg OI": st.column_config.NumberColumn(
+                        format="%.0f"
+                    ),
+                    "CE LTP": st.column_config.NumberColumn(
+                        format="₹%.2f"
+                    ),
+                    "CE IV": st.column_config.NumberColumn(
+                        format="%.1f"
+                    ),
+                    "CE Delta": st.column_config.NumberColumn(
+                        format="%.2f"
+                    ),
+                    "STRIKE": st.column_config.NumberColumn(
+                        format="%.2f"
+                    ),
+                    "PE Delta": st.column_config.NumberColumn(
+                        format="%.2f"
+                    ),
+                    "PE IV": st.column_config.NumberColumn(
+                        format="%.1f"
+                    ),
+                    "PE LTP": st.column_config.NumberColumn(
+                        format="₹%.2f"
+                    ),
+                    "PE Chg OI": st.column_config.NumberColumn(
+                        format="%.0f"
+                    ),
+                    "PE OI": st.column_config.NumberColumn(
+                        format="%.0f"
+                    ),
+                },
+            )
+
+        # ----------------------------------------------------
+        # TECHNICAL TAB
+        # ----------------------------------------------------
+
+        with tabs[1]:
+
+            st.subheader(
+                "📈 Technical Analysis"
+            )
+
+            tech_df = pd.DataFrame(
+                [
+                    {
+                        "Timeframe": "5 Minute",
+                        "Trend": tf5["trend"],
+                        "RSI": round(
+                            tf5["rsi"],
+                            1,
+                        ),
+                        "EMA20": round(
+                            tf5["ema20"],
+                            2,
+                        ),
+                        "EMA50": round(
+                            tf5["ema50"],
+                            2,
+                        ),
+                        "ATR": round(
+                            tf5["atr"],
+                            2,
+                        ),
+                        "ADX": round(
+                            tf5["adx"],
+                            1,
+                        ),
+                        "Momentum %": round(
+                            tf5["momentum"],
+                            2,
+                        ),
+                        "Volume Ratio": round(
+                            tf5["volume_ratio"],
+                            2,
+                        ),
+                    },
+                    {
+                        "Timeframe": "30 Minute",
+                        "Trend": tf30["trend"],
+                        "RSI": round(
+                            tf30["rsi"],
+                            1,
+                        ),
+                        "EMA20": round(
+                            tf30["ema20"],
+                            2,
+                        ),
+                        "EMA50": round(
+                            tf30["ema50"],
+                            2,
+                        ),
+                        "ATR": round(
+                            tf30["atr"],
+                            2,
+                        ),
+                        "ADX": round(
+                            tf30["adx"],
+                            1,
+                        ),
+                        "Momentum %": round(
+                            tf30["momentum"],
+                            2,
+                        ),
+                        "Volume Ratio": round(
+                            tf30["volume_ratio"],
+                            2,
+                        ),
+                    },
+                    {
+                        "Timeframe": "Daily",
+                        "Trend": daily["trend"],
+                        "RSI": round(
+                            daily["rsi"],
+                            1,
+                        ),
+                        "EMA20": round(
+                            daily["ema20"],
+                            2,
+                        ),
+                        "EMA50": round(
+                            daily["ema50"],
+                            2,
+                        ),
+                        "ATR": round(
+                            daily["atr"],
+                            2,
+                        ),
+                        "ADX": round(
+                            daily["adx"],
+                            1,
+                        ),
+                        "Momentum %": round(
+                            daily["momentum"],
+                            2,
+                        ),
+                        "Volume Ratio": round(
+                            daily["volume_ratio"],
+                            2,
+                        ),
+                    },
+                ]
+            )
+
+            st.dataframe(
+                tech_df,
+                use_container_width=True,
+                hide_index=True,
+            )
 
             st.markdown(
                 f"""
-                <div class="scanner-card">
-                    <div style="display:flex;
-                                justify-content:space-between;
-                                align-items:center;
-                                gap:10px;
-                                flex-wrap:wrap;">
-
-                        <div>
-                            <div class="scanner-title">
-                                {side_label} BUY •
-                                {fmt_price(item["strike"])}
-                            </div>
-
-                            <div class="scanner-meta">
-                                {action_label}
-                            </div>
-                        </div>
-
-                        <div style="text-align:right;">
-                            <div style="font-size:10px;
-                                        color:#667085;
-                                        font-weight:800;">
-                                PoP
-                            </div>
-
-                            <div style="font-size:20px;
-                                        font-weight:900;
-                                        color:#182230;">
-                                {fmt_pct(item["pop"])}
-                            </div>
-                        </div>
-
-                    </div>
-
-                    <div style="display:grid;
-                                grid-template-columns:
-                                repeat(6,1fr);
-                                gap:8px;
-                                margin-top:12px;">
-
-                        <div>
-                            <span style="font-size:9px;
-                                         color:#667085;">
-                                SCORE
-                            </span>
-                            <b>{item["score"]:.0f}</b>
-                        </div>
-
-                        <div>
-                            <span style="font-size:9px;
-                                         color:#667085;">
-                                ENTRY
-                            </span>
-                            <b>{fmt_price(item["entry"])}</b>
-                        </div>
-
-                        <div>
-                            <span style="font-size:9px;
-                                         color:#667085;">
-                                SL
-                            </span>
-                            <b>{fmt_price(item["sl"])}</b>
-                        </div>
-
-                        <div>
-                            <span style="font-size:9px;
-                                         color:#667085;">
-                                TARGET
-                            </span>
-                            <b>{fmt_price(item["target1"])}</b>
-                        </div>
-
-                        <div>
-                            <span style="font-size:9px;
-                                         color:#667085;">
-                                DELTA
-                            </span>
-                            <b>{fmt_delta(item["delta"])}</b>
-                        </div>
-
-                        <div>
-                            <span style="font-size:9px;
-                                         color:#667085;">
-                                R:R
-                            </span>
-                            <b>1:{item["rr1"]:.2f}</b>
-                        </div>
-
-                    </div>
+                <div class="info-box">
+                    Overall trend:
+                    <strong>{esc(bias)}</strong>.
+                    The engine requires at least two aligned
+                    timeframes before an option can become
+                    READY.
                 </div>
                 """,
                 unsafe_allow_html=True,
             )
 
+        # ----------------------------------------------------
+        # OI WALLS TAB
+        # ----------------------------------------------------
 
-# ============================================================
-# OPTION CHAIN
-# ============================================================
+        with tabs[2]:
 
-st.markdown(
-    '<div class="section-heading">📋 Live Option Chain</div>',
-    unsafe_allow_html=True,
-)
+            left, right = st.columns(2)
 
-display_chain = chain.copy()
+            with left:
 
-atm_index = (
-    (display_chain["Strike"] - spot)
-    .abs()
-    .idxmin()
-)
+                st.subheader(
+                    "🟢 Put OI Walls"
+                )
 
-atm_strike = safe_float(
-    display_chain.loc[
-        atm_index,
-        "Strike",
-    ]
-)
+                if oi["put_walls"]:
 
-display_chain["_distance"] = (
-    display_chain["Strike"] - spot
-).abs()
+                    for wall in oi[
+                        "put_walls"
+                    ]:
 
-# Show a useful local window around ATM.
-display_chain = (
-    display_chain
-    .sort_values("_distance")
-    .head(15)
-    .sort_values("Strike")
-    .drop(columns=["_distance"])
-    .copy()
-)
+                        st.markdown(
+                            f"""
+                            <div class="wall-card">
 
-table_columns = [
-    "CE OI",
-    "CE Chg OI",
-    "CE Volume",
-    "CE IV",
-    "CE LTP",
-    "Strike",
-    "PE LTP",
-    "PE IV",
-    "PE Volume",
-    "PE Chg OI",
-    "PE OI",
-]
+                                <div class="wall-title">
+                                    {esc(
+                                        fmt_price(
+                                            wall["strike"]
+                                        )
+                                    )}
+                                </div>
 
-available_columns = [
-    c
-    for c in table_columns
-    if c in display_chain.columns
-]
+                                <div class="wall-meta">
+                                    Put OI:
+                                    {esc(
+                                        fmt_num(
+                                            wall["oi"]
+                                        )
+                                    )}
+                                    &nbsp; • &nbsp;
+                                    Chg OI:
+                                    {esc(
+                                        fmt_num(
+                                            wall["chg"]
+                                        )
+                                    )}
+                                </div>
 
-chain_display = display_chain[
-    available_columns
-].copy()
+                            </div>
+                            """,
+                            unsafe_allow_html=True,
+                        )
 
-rename_map = {
-    "CE OI": "CE OI",
-    "CE Chg OI": "CE ΔOI",
-    "CE Volume": "CE Vol",
-    "CE IV": "CE IV",
-    "CE LTP": "CE LTP",
-    "Strike": "STRIKE",
-    "PE LTP": "PE LTP",
-    "PE IV": "PE IV",
-    "PE Volume": "PE Vol",
-    "PE Chg OI": "PE ΔOI",
-    "PE OI": "PE OI",
-}
+                else:
+                    st.info(
+                        "No significant Put OI wall found."
+                    )
 
-chain_display = chain_display.rename(
-    columns=rename_map
-)
+            with right:
 
-st.dataframe(
-    chain_display,
-    use_container_width=True,
-    hide_index=True,
-    column_config={
-        "CE OI": st.column_config.NumberColumn(
-            "CE OI",
-            format="%,.0f",
-        ),
-        "CE ΔOI": st.column_config.NumberColumn(
-            "CE ΔOI",
-            format="%,.0f",
-        ),
-        "CE Vol": st.column_config.NumberColumn(
-            "CE Vol",
-            format="%,.0f",
-        ),
-        "CE IV": st.column_config.NumberColumn(
-            "CE IV",
-            format="%.2f",
-        ),
-        "CE LTP": st.column_config.NumberColumn(
-            "CE LTP",
-            format="₹%.2f",
-        ),
-        "STRIKE": st.column_config.NumberColumn(
-            "STRIKE",
-            format="%.0f",
-        ),
-        "PE LTP": st.column_config.NumberColumn(
-            "PE LTP",
-            format="₹%.2f",
-        ),
-        "PE IV": st.column_config.NumberColumn(
-            "PE IV",
-            format="%.2f",
-        ),
-        "PE Vol": st.column_config.NumberColumn(
-            "PE Vol",
-            format="%,.0f",
-        ),
-        "PE ΔOI": st.column_config.NumberColumn(
-            "PE ΔOI",
-            format="%,.0f",
-        ),
-        "PE OI": st.column_config.NumberColumn(
-            "PE OI",
-            format="%,.0f",
-        ),
-    },
-)
+                st.subheader(
+                    "🔴 Call OI Walls"
+                )
 
+                if oi["call_walls"]:
 
-# ============================================================
-# TECHNICAL ANALYSIS
-# ============================================================
+                    for wall in oi[
+                        "call_walls"
+                    ]:
 
-st.markdown(
-    '<div class="section-heading">📈 Technical Analysis</div>',
-    unsafe_allow_html=True,
-)
+                        st.markdown(
+                            f"""
+                            <div class="wall-card">
 
-technical_table = pd.DataFrame(
-    [
-        {
-            "Timeframe": "5 Minute",
-            "Trend": tf5.get("trend"),
-            "RSI": round(
-                safe_float(tf5.get("rsi"), 50),
-                1,
-            ),
-            "EMA 20": round(
-                safe_float(tf5.get("ema20"), spot),
-                2,
-            ),
-            "EMA 50": round(
-                safe_float(tf5.get("ema50"), spot),
-                2,
-            ),
-            "ADX": round(
-                safe_float(tf5.get("adx"), 0),
-                1,
-            ),
-            "Momentum %": round(
-                safe_float(
-                    tf5.get("momentum"),
-                    0,
-                ),
-                2,
-            ),
-            "Volume Ratio": round(
-                safe_float(
-                    tf5.get("volume_ratio"),
-                    1,
-                ),
-                2,
-            ),
-        },
-        {
-            "Timeframe": "30 Minute",
-            "Trend": tf30.get("trend"),
-            "RSI": round(
-                safe_float(tf30.get("rsi"), 50),
-                1,
-            ),
-            "EMA 20": round(
-                safe_float(tf30.get("ema20"), spot),
-                2,
-            ),
-            "EMA 50": round(
-                safe_float(tf30.get("ema50"), spot),
-                2,
-            ),
-            "ADX": round(
-                safe_float(tf30.get("adx"), 0),
-                1,
-            ),
-            "Momentum %": round(
-                safe_float(
-                    tf30.get("momentum"),
-                    0,
-                ),
-                2,
-            ),
-            "Volume Ratio": round(
-                safe_float(
-                    tf30.get("volume_ratio"),
-                    1,
-                ),
-                2,
-            ),
-        },
-        {
-            "Timeframe": "Daily",
-            "Trend": daily.get("trend"),
-            "RSI": round(
-                safe_float(daily.get("rsi"), 50),
-                1,
-            ),
-            "EMA 20": round(
-                safe_float(daily.get("ema20"), spot),
-                2,
-            ),
-            "EMA 50": round(
-                safe_float(daily.get("ema50"), spot),
-                2,
-            ),
-            "ADX": round(
-                safe_float(daily.get("adx"), 0),
-                1,
-            ),
-            "Momentum %": round(
-                safe_float(
-                    daily.get("momentum"),
-                    0,
-                ),
-                2,
-            ),
-            "Volume Ratio": round(
-                safe_float(
-                    daily.get("volume_ratio"),
-                    1,
-                ),
-                2,
-            ),
-        },
-    ]
-)
+                                <div class="wall-title">
+                                    {esc(
+                                        fmt_price(
+                                            wall["strike"]
+                                        )
+                                    )}
+                                </div>
 
-st.dataframe(
-    technical_table,
-    use_container_width=True,
-    hide_index=True,
-)
+                                <div class="wall-meta">
+                                    Call OI:
+                                    {esc(
+                                        fmt_num(
+                                            wall["oi"]
+                                        )
+                                    )}
+                                    &nbsp; • &nbsp;
+                                    Chg OI:
+                                    {esc(
+                                        fmt_num(
+                                            wall["chg"]
+                                        )
+                                    )}
+                                </div>
 
+                            </div>
+                            """,
+                            unsafe_allow_html=True,
+                        )
 
-# ============================================================
-# OI WALLS
-# ============================================================
+                else:
+                    st.info(
+                        "No significant Call OI wall found."
+                    )
 
-st.markdown(
-    '<div class="section-heading">🏰 Major OI Walls</div>',
-    unsafe_allow_html=True,
-)
+        # ----------------------------------------------------
+        # EXPIRIES TAB
+        # ----------------------------------------------------
 
-wall_col1, wall_col2 = st.columns(2)
+        with tabs[3]:
 
-with wall_col1:
-    st.markdown(
-        "### 🟢 Put OI Walls"
+            st.subheader(
+                "📅 Available Expiries"
+            )
 
-    )
+            expiry_df = pd.DataFrame(
+                {
+                    "Expiry": [
+                        str(x)
+                        for x in expiries
+                    ],
+                    "Selected": [
+                        "✓"
+                        if str(x)
+                        == str(selected_expiry)
+                        else ""
+                        for x in expiries
+                    ],
+                }
+            )
 
-    put_wall_df = pd.DataFrame(
-        oi_info.get(
-            "put_walls",
-            [],
-        )
-    )
+            st.dataframe(
+                expiry_df,
+                use_container_width=True,
+                hide_index=True,
+            )
 
-    if not put_wall_df.empty:
-        put_wall_df = put_wall_df.rename(
-            columns={
-                "Strike": "Strike",
-                "PE OI": "PE OI",
-                "PE Chg OI": "PE ΔOI",
-            }
+        # ----------------------------------------------------
+        # ENGINE TAB
+        # ----------------------------------------------------
+
+        with tabs[4]:
+
+            st.subheader(
+                "🧠 How the Engine Thinks"
+            )
+
+            st.markdown(
+                """
+                <div class="info-box">
+
+                <strong>1. Market direction</strong><br>
+                The engine checks 5-minute, 30-minute and
+                daily trends using EMA, momentum and RSI.
+
+                <br><br>
+
+                <strong>2. OI structure</strong><br>
+                Put OI is used to identify potential support
+                and Call OI to identify potential resistance.
+
+                <br><br>
+
+                <strong>3. Option quality</strong><br>
+                Delta, IV, volume, OI, spread and Upstox PoP
+                are evaluated.
+
+                <br><br>
+
+                <strong>4. Setup score</strong><br>
+                The score combines the above factors into a
+                normalized 0–100 setup-quality score.
+
+                <br><br>
+
+                <strong>5. Entry trigger</strong><br>
+                A high score alone does not create a trade.
+                The underlying must also break the relevant
+                support/resistance trigger and show 5-minute
+                confirmation.
+
+                <br><br>
+
+                <strong>6. NO TRADE protection</strong><br>
+                If the setup score, timeframe alignment,
+                Delta, PoP, spread, liquidity or OI fails
+                the required conditions, the engine blocks
+                the trade.
+
+                <br><br>
+
+                <strong>Important:</strong>
+                PoP is an input supplied by the market-data
+                system. It is not a guarantee of actual trade
+                success, and the setup score is not a historical
+                win-rate percentage.
+
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+
+        # ----------------------------------------------------
+        # FOOTER
+        # ----------------------------------------------------
+
+        st.markdown(
+            """
+            <div class="footer">
+                FO PRO Trader Assistant • Upstox REST API •
+                Analysis only • No automatic order execution
+            </div>
+            """,
+            unsafe_allow_html=True,
         )
 
-        st.dataframe(
-            put_wall_df,
-            use_container_width=True,
-            hide_index=True,
-        )
-    else:
-        st.info(
-            "No put OI wall data available."
+    except UpstoxRateLimitError as exc:
+
+        st.markdown(
+            f"""
+            <div class="error-box">
+
+                <strong>⏳ Upstox rate limit reached</strong>
+
+                <br><br>
+
+                The app has stopped sending additional
+                requests during the cooldown.
+
+                <br><br>
+
+                Please wait approximately
+                <strong>{exc.retry_after} seconds</strong>
+                before refreshing.
+
+                <br><br>
+
+                This protection is intentional so the app
+                does not repeatedly hammer the Upstox API.
+
+            </div>
+            """,
+            unsafe_allow_html=True,
         )
 
-with wall_col2:
-    st.markdown(
-        "### 🔴 Call OI Walls"
-    )
+    except UpstoxError as exc:
 
-    call_wall_df = pd.DataFrame(
-        oi_info.get(
-            "call_walls",
-            [],
-        )
-    )
+        st.markdown(
+            f"""
+            <div class="error-box">
 
-    if not call_wall_df.empty:
-        call_wall_df = call_wall_df.rename(
-            columns={
-                "Strike": "Strike",
-                "CE OI": "CE OI",
-                "CE Chg OI": "CE ΔOI",
-            }
+                <strong>Upstox data error</strong>
+
+                <br><br>
+
+                {esc(str(exc))}
+
+            </div>
+            """,
+            unsafe_allow_html=True,
         )
 
-        st.dataframe(
-            call_wall_df,
-            use_container_width=True,
-            hide_index=True,
-        )
-    else:
-        st.info(
-            "No call OI wall data available."
+    except Exception as exc:
+
+        st.markdown(
+            f"""
+            <div class="error-box">
+
+                <strong>Application error</strong>
+
+                <br><br>
+
+                {esc(str(exc))}
+
+                <br><br>
+
+                Please use the Refresh Data button once
+                the error condition has cleared.
+
+            </div>
+            """,
+            unsafe_allow_html=True,
         )
 
 
 # ============================================================
-# EXPIRY INFORMATION
+# RUN
 # ============================================================
 
-with st.expander(
-    "📅 Available Expiries"
-):
-    st.write(
-        ", ".join(expiries[:10])
-    )
-
-
-# ============================================================
-# ENGINE NOTES
-# ============================================================
-
-with st.expander(
-    "🧠 How the Engine Thinks"
-):
-    st.markdown(
-        """
-        **The application does not treat one indicator as sufficient.**
-
-        The setup score combines:
-
-        - Multi-timeframe trend alignment
-        - 5-minute momentum
-        - RSI
-        - ADX
-        - VWAP relationship
-        - PCR
-        - Option OI and OI change
-        - Delta
-        - IV
-        - Option spread
-        - Option volume
-        - Option OI
-        - Strike distance from spot
-        - OI support/resistance room
-        - Upstox PoP
-
-        **Important distinction:**
-
-        `Setup Score` and `PoP` are not the same thing.
-
-        The setup score is a rule-based ranking of the current market
-        conditions. PoP is the probability value supplied by the option-chain
-        data. Neither should be interpreted as a guarantee that a trade will
-        be profitable.
-
-        The engine also deliberately requires an actual price trigger,
-        5-minute directional confirmation and volume confirmation before it
-        changes the final decision to `CALL BUY` or `PUT BUY`.
-
-        If those conditions are not satisfied, the final decision remains
-        `NO TRADE`, even when an option has a high score.
-        """
-    )
-
-
-# ============================================================
-# FOOTER
-# ============================================================
-
-st.markdown(
-    """
-    <div style="
-        text-align:center;
-        color:#98a2b3;
-        font-size:10px;
-        padding:20px 0 5px;
-    ">
-        FO PRO Trader Assistant • Upstox REST API •
-        Analysis only • No automatic order execution
-    </div>
-    """,
-    unsafe_allow_html=True,
-)
+main()
