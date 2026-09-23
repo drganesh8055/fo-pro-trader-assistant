@@ -10,8 +10,6 @@ import requests
 import streamlit as st
 import threading
 import time
-import os
-import sqlite3
 
 try:
     from streamlit_autorefresh import st_autorefresh
@@ -809,8 +807,14 @@ def oi_price_behavior(row, prefix):
     return "NEUTRAL"
 
 def score_option(row, side, spot, pcr, tf5, tf30, daily, chain,
-                 support=None, resistance=None, oi_wall_info=None, regime="MIXED"):
-    """Confluence score. It is a quality score, never a claimed win rate."""
+                 support=None, resistance=None, oi_wall_info=None, regime="MIXED",
+                 mode="BUY"):
+    """Realistic 0-100 setup-quality score.
+
+    The score is deliberately calibrated as a quality grade, not a probability.
+    It uses bounded component scores and explicit conflict penalties so a setup
+    cannot reach the high 90s merely because several indicators agree.
+    """
     prefix = "CE" if side == "CE" else "PE"
     premium = safe_float(row[f"{prefix} LTP"])
     delta = safe_float(row[f"{prefix} Delta"])
@@ -828,130 +832,183 @@ def score_option(row, side, spot, pcr, tf5, tf30, daily, chain,
     bid_qty = safe_float(row[f"{prefix} Bid Qty"], 0)
     ask_qty = safe_float(row[f"{prefix} Ask Qty"], 0)
 
-    desired = "Bullish" if side == "CE" else "Bearish"
-    opposite = "Bearish" if side == "CE" else "Bullish"
-    tf_points, alignment = timeframe_score(side, tf5, tf30, daily)
+    is_sell = mode == "SELL"
+    desired = ("Bearish" if side == "CE" else "Bullish") if is_sell else ("Bullish" if side == "CE" else "Bearish")
+    opposite = "Bullish" if desired == "Bearish" else "Bearish"
+    tf_points_raw, alignment = timeframe_score("PE" if is_sell and side == "CE" else "CE" if is_sell and side == "PE" else side, tf5, tf30, daily)
+    trends = [tf5.get("trend"), tf30.get("trend"), daily.get("trend")]
 
-    # 10 momentum points.
+    # 1) Multi-timeframe structure.
+    trend_points = 0.0
+    for trend in trends:
+        if trend == desired:
+            trend_points += 8.0
+        elif trend == "Sideways":
+            trend_points += 3.0
+        elif trend == opposite:
+            trend_points -= 7.0
+    trend_points = float(np.clip(trend_points, 0, 24))
+
+    # 2) Intraday momentum / RSI.
     momentum = safe_float(tf5.get("momentum"), 0)
     rsi = safe_float(tf5.get("rsi"), 50)
-    momentum_points = 0
+    momentum_points = 0.0
     if tf5.get("trend") == desired:
-        momentum_points += 3
-    if side == "CE":
-        if 52 <= rsi <= 68: momentum_points += 3
-        if momentum > 0: momentum_points += 2
+        momentum_points += 5
+    if (not is_sell and side == "CE") or (is_sell and side == "PE"):
+        if 52 <= rsi <= 68: momentum_points += 4
+        elif 68 < rsi <= 72: momentum_points += 2
+        if momentum > 0: momentum_points += 4
     else:
-        if 32 <= rsi <= 48: momentum_points += 3
-        if momentum < 0: momentum_points += 2
-    if safe_float(tf5.get("adx"), 0) >= 25: momentum_points += 2
-    momentum_points = min(momentum_points, 10)
+        if 32 <= rsi <= 48: momentum_points += 4
+        elif 28 <= rsi < 32: momentum_points += 2
+        if momentum < 0: momentum_points += 4
+    if safe_float(tf5.get("adx"), 0) >= 25:
+        momentum_points += 2
+    momentum_points = float(np.clip(momentum_points, 0, 15))
 
-    # 10 VWAP points.
+    # 3) VWAP alignment.
     vwap = safe_float(tf5.get("vwap"), spot)
     vwap_gap_pct = (spot - vwap) / max(spot, 1) * 100 if np.isfinite(vwap) else 0
-    vwap_points = 0
-    if side == "CE":
+    vwap_points = 0.0
+    if (not is_sell and side == "CE") or (is_sell and side == "PE"):
         if spot > vwap and momentum > 0: vwap_points = 10
-        elif spot > vwap: vwap_points = 6
-        elif spot >= vwap * 0.998: vwap_points = 2
+        elif spot > vwap: vwap_points = 7
+        elif spot >= vwap * 0.998: vwap_points = 3
     else:
         if spot < vwap and momentum < 0: vwap_points = 10
-        elif spot < vwap: vwap_points = 6
-        elif spot <= vwap * 1.002: vwap_points = 2
+        elif spot < vwap: vwap_points = 7
+        elif spot <= vwap * 1.002: vwap_points = 3
 
-    # 10 market-regime points.
-    regime_points = 0
-    if side == "CE" and regime in {"TRENDING UP", "BREAKOUT"}: regime_points = 10
-    elif side == "PE" and regime in {"TRENDING DOWN", "BREAKDOWN"}: regime_points = 10
-    elif regime == "HIGH VOLATILITY": regime_points = 5
-    elif regime == "RANGE": regime_points = 2
+    # 4) Regime fit. A breakout is good for directional BUYs but risky for
+    # short-premium SELLs, even when the underlying direction is favorable.
+    regime_points = 0.0
+    if is_sell:
+        if regime == "RANGE": regime_points = 12
+        elif side == "CE" and regime in {"TRENDING DOWN", "BREAKDOWN"}: regime_points = 12
+        elif side == "PE" and regime in {"TRENDING UP", "BREAKOUT"}: regime_points = 8
+        elif regime in {"TRENDING UP", "TRENDING DOWN"}: regime_points = 6
+        elif regime in {"BREAKOUT", "BREAKDOWN"}: regime_points = 0
+        elif regime == "HIGH VOLATILITY": regime_points = 2
+    else:
+        if side == "CE" and regime in {"TRENDING UP", "BREAKOUT"}: regime_points = 10
+        elif side == "PE" and regime in {"TRENDING DOWN", "BREAKDOWN"}: regime_points = 10
+        elif regime == "HIGH VOLATILITY": regime_points = 5
+        elif regime == "RANGE": regime_points = 2
 
-    # 15 OI structure points: wall strength + change in OI + direction.
-    oi_points = 0
+    # 5) OI structure.
+    oi_points = 0.0
     wall_room = np.nan
     if oi_wall_info:
         if side == "CE":
             wall_room = (resistance - spot) / max(spot, 1) * 100
             wall_strength = safe_float(oi_wall_info.get("resistance_strength"), 0)
             wall_chg = safe_float(oi_wall_info.get("resistance_chg_oi"), 0)
-            if wall_strength >= 70: oi_points += 5
-            elif wall_strength >= 40: oi_points += 3
-            if wall_chg > 0: oi_points += 5
-            elif wall_chg < 0: oi_points += 2
         else:
             wall_room = (spot - support) / max(spot, 1) * 100
             wall_strength = safe_float(oi_wall_info.get("support_strength"), 0)
             wall_chg = safe_float(oi_wall_info.get("support_chg_oi"), 0)
-            if wall_strength >= 70: oi_points += 5
-            elif wall_strength >= 40: oi_points += 3
+        if wall_strength >= 70: oi_points += 6
+        elif wall_strength >= 40: oi_points += 4
+        elif wall_strength >= 20: oi_points += 2
+        if is_sell:
             if wall_chg > 0: oi_points += 5
+            elif wall_chg == 0: oi_points += 2
+        else:
+            if wall_chg > 0: oi_points += 4
             elif wall_chg < 0: oi_points += 2
-    if chg_oi < 0:
-        oi_points = max(0, oi_points - 2)
     if oi_behavior in {"LONG BUILDUP", "SHORT BUILDUP"}:
-        oi_points = min(15, oi_points + 2)
+        oi_points += 2
     elif oi_behavior in {"SHORT COVERING", "LONG UNWINDING"}:
-        oi_points = max(0, oi_points - 1)
-    oi_points = min(oi_points, 15)
+        oi_points -= 1
+    oi_points = float(np.clip(oi_points, 0, 15))
 
-    # 15 option quality/liquidity points.
+    # 6) Option liquidity / execution quality.
     abs_delta = abs(delta) if np.isfinite(delta) else np.nan
-    quality = 0
-    if np.isfinite(abs_delta):
-        if 0.45 <= abs_delta <= 0.65: quality += 5
-        elif 0.35 <= abs_delta <= 0.75: quality += 3
-        elif 0.30 <= abs_delta <= 0.80: quality += 1
     spread_pct = (
         max(ask - bid, 0) / max((ask + bid) / 2, 0.01) * 100
         if np.isfinite(ask) and np.isfinite(bid) and ask > 0 and bid > 0 else 999
     )
-    if spread_pct <= 1: quality += 3
-    elif spread_pct <= 2: quality += 2
-    elif spread_pct <= 3: quality += 1
-    if volume >= 10000: quality += 3
-    elif volume >= 3000: quality += 2
-    elif volume >= 1000: quality += 1
-    if oi >= 10000: quality += 2
-    elif oi >= 3000: quality += 1
     depth_ratio = min(bid_qty, ask_qty) / max(max(bid_qty, ask_qty), 1)
-    if depth_ratio >= 0.50: quality += 2
-    elif depth_ratio >= 0.25: quality += 1
-    quality = min(quality, 15)
+    liquidity_points = 0.0
+    if spread_pct <= 1: liquidity_points += 5
+    elif spread_pct <= 2: liquidity_points += 4
+    elif spread_pct <= 3: liquidity_points += 2
+    elif spread_pct <= 4: liquidity_points += 1
+    if volume >= 10000: liquidity_points += 4
+    elif volume >= 3000: liquidity_points += 3
+    elif volume >= 1000: liquidity_points += 2
+    elif volume >= 500: liquidity_points += 1
+    if oi >= 10000: liquidity_points += 3
+    elif oi >= 3000: liquidity_points += 2
+    elif oi > 0: liquidity_points += 1
+    if depth_ratio >= 0.50: liquidity_points += 3
+    elif depth_ratio >= 0.25: liquidity_points += 2
+    elif depth_ratio > 0: liquidity_points += 1
+    liquidity_points = float(np.clip(liquidity_points, 0, 15))
 
-    # 10 room/strike points.
+    # 7) Strike location and room to the relevant OI wall.
     distance_pct = abs(float(row["Strike"]) - spot) / max(spot, 1) * 100
     strike_points = 5 if distance_pct <= 1 else 4 if distance_pct <= 2 else 2 if distance_pct <= 3 else 0
     room_points = 0
     if np.isfinite(wall_room):
-        if wall_room >= 2: room_points = 5
-        elif wall_room >= 1: room_points = 3
-        elif wall_room >= 0.5: room_points = 1
-    room_quality = strike_points + room_points
+        if wall_room >= 2.0: room_points = 6
+        elif wall_room >= 1.25: room_points = 4
+        elif wall_room >= 0.75: room_points = 2
+        elif wall_room >= 0.50: room_points = 1
+    room_quality = float(np.clip(strike_points + room_points, 0, 11))
 
-    # 5 PoP points only: PoP informs selection but cannot dominate the signal.
-    pop_points = float(np.clip((pop - 55) / 3.0, 0, 5)) if np.isfinite(pop) else 0
-
-    # Greek context: theta/IV penalty for buys when decay/volatility is extreme.
-    greek_adjust = 0.0
+    # 8) Greeks / IV context. This is deliberately small so Greeks cannot
+    # manufacture a high score without underlying confirmation.
+    greek_points = 0.0
+    if np.isfinite(abs_delta):
+        if is_sell:
+            if 0.18 <= abs_delta <= 0.35: greek_points += 3
+            elif 0.15 <= abs_delta <= 0.45: greek_points += 2
+            elif 0.10 <= abs_delta <= 0.50: greek_points += 1
+        else:
+            if 0.45 <= abs_delta <= 0.65: greek_points += 3
+            elif 0.35 <= abs_delta <= 0.75: greek_points += 2
+            elif 0.30 <= abs_delta <= 0.80: greek_points += 1
     if np.isfinite(iv):
-        if iv >= 80: greek_adjust -= 3
-        elif iv >= 60: greek_adjust -= 1
+        if is_sell:
+            if 20 <= iv <= 45: greek_points += 2
+            elif 45 < iv <= 60: greek_points += 1
+            elif iv < 12: greek_points -= 1
+        else:
+            if 20 <= iv <= 50: greek_points += 1
+            elif iv >= 80: greek_points -= 2
     if np.isfinite(theta) and np.isfinite(premium) and premium > 0:
         theta_pct = abs(theta) / premium
-        if theta_pct > 0.15: greek_adjust -= 2
-        elif theta_pct > 0.08: greek_adjust -= 1
-    if np.isfinite(gamma) and gamma > 0: greek_adjust += 0.5
-    if np.isfinite(vega) and vega > 0 and np.isfinite(iv) and iv < 40: greek_adjust += 0.5
+        if is_sell and theta_pct > 0.02: greek_points += 1
+        elif not is_sell and theta_pct > 0.15: greek_points -= 2
+    greek_points = float(np.clip(greek_points, 0, 6))
 
-    conflict_penalty = 0
+    # PoP is intentionally capped at 4 points and never acts as a proxy for
+    # strategy win probability.
+    pop_points = float(np.clip((pop - 55) / 4.0, 0, 4)) if np.isfinite(pop) else 0
+
+    # Explicit conflicts. These are applied after component scoring so one
+    # strong feature cannot hide a structural contradiction.
+    conflict_penalty = 0.0
     if tf5.get("trend") == opposite: conflict_penalty += 8
-    if tf30.get("trend") == opposite and daily.get("trend") == opposite: conflict_penalty += 5
-    if side == "CE" and spot < vwap * 0.997: conflict_penalty += 4
-    if side == "PE" and spot > vwap * 1.003: conflict_penalty += 4
+    if tf30.get("trend") == opposite and daily.get("trend") == opposite: conflict_penalty += 6
+    if (not is_sell and side == "CE" and spot < vwap * 0.997) or (not is_sell and side == "PE" and spot > vwap * 1.003):
+        conflict_penalty += 5
+    if is_sell and regime in {"BREAKOUT", "BREAKDOWN"}: conflict_penalty += 8
+    if spread_pct > 4: conflict_penalty += 8
+    if not np.isfinite(abs_delta): conflict_penalty += 6
 
-    raw = tf_points + momentum_points + vwap_points + regime_points + oi_points + quality + room_quality + pop_points + greek_adjust - conflict_penalty
-    score = float(np.clip(raw, 0, 100))
+    # Base maximum before penalties is 100. The score is intentionally harder
+    # to push above 90: 90+ means very strong confluence, not merely a good setup.
+    raw = (trend_points + momentum_points + vwap_points + regime_points +
+           oi_points + liquidity_points + room_quality + greek_points + pop_points)
+    # Normalize against the theoretical component maximum instead of simply
+    # clipping the raw sum. This prevents a setup from reaching 95-100 merely
+    # because several components can each award points above the intended
+    # 100-point scale.
+    theoretical_max = 110.0 if not is_sell else 112.0
+    score = float(np.clip((raw / theoretical_max) * 100.0 - conflict_penalty, 0, 100))
 
     return {
         "score": score, "premium": premium, "delta": delta, "iv": iv,
@@ -959,11 +1016,14 @@ def score_option(row, side, spot, pcr, tf5, tf30, daily, chain,
         "chg_oi": chg_oi, "oi_behavior": oi_behavior, "volume": volume, "oi": oi,
         "bid_qty": bid_qty, "ask_qty": ask_qty, "depth_ratio": depth_ratio,
         "spread_pct": spread_pct, "alignment": alignment, "distance_pct": distance_pct,
-        "quality": quality, "vwap": vwap, "vwap_gap_pct": vwap_gap_pct,
+        "quality": liquidity_points, "vwap": vwap, "vwap_gap_pct": vwap_gap_pct,
         "room_pct": wall_room, "regime_points": regime_points,
-        "greek_adjust": greek_adjust, "conflict_penalty": conflict_penalty,
+        "greek_adjust": greek_points, "conflict_penalty": conflict_penalty,
+        "trend_points": trend_points, "momentum_points": momentum_points,
+        "vwap_points": vwap_points, "oi_points": oi_points,
+        "liquidity_points": liquidity_points, "room_quality": room_quality,
+        "greek_points": greek_points, "pop_points": pop_points,
     }
-
 
 def adaptive_buy_levels(entry, side, spot, support, resistance, tf5, delta, iv, risk_profile):
     """Derive option levels from underlying ATR + Delta instead of fixed premium multiples."""
@@ -998,7 +1058,7 @@ def build_plan(row, side, spot, support, resistance, pcr, tf5, tf30, daily,
         return None
     scored = score_option(row, side, spot, pcr, tf5, tf30, daily, chain,
                           support=support, resistance=resistance,
-                          oi_wall_info=oi_wall_info, regime=regime)
+                          oi_wall_info=oi_wall_info, regime=regime, mode="BUY")
     ask = safe_float(row[f"{side} Ask"])
     ltp = safe_float(row[f"{side} LTP"])
     entry = ask if np.isfinite(ask) and ask > 0 else ltp
@@ -1076,11 +1136,27 @@ def build_plan(row, side, spot, support, resistance, pcr, tf5, tf30, daily,
     else:
         readiness = "READY"
 
+    # A BUY quality score must also reflect entry risk. These penalties stop
+    # strong directional indicators from producing an unrealistically high
+    # score when the option is late, trapped near a wall, or has poor payoff.
+    buy_risk_penalty = 0.0
+    if late_entry:
+        buy_risk_penalty += 8
+    if wall_room < 0.75:
+        buy_risk_penalty += 8
+    elif wall_room < 1.00:
+        buy_risk_penalty += 4
+    if rr1 < 0.80:
+        buy_risk_penalty += 5
+    elif rr1 < 1.00:
+        buy_risk_penalty += 2
+    adjusted_score = float(np.clip(scored["score"] - buy_risk_penalty, 0, 100))
+
     return {
-        "side": side, "strike": float(row["Strike"]), "instrument_key": row.get(f"{side} Key"), "entry": float(entry),
+        "side": side, "strike": float(row["Strike"]), "entry": float(entry),
         "sl": sl, "target1": target1, "target2": target2,
         "pop": scored["pop"], "delta": scored["delta"], "iv": scored["iv"],
-        "score": scored["score"], "rr1": rr1, "rr2": rr2,
+        "score": adjusted_score, "rr1": rr1, "rr2": rr2,
         "trigger": trigger, "trigger_level": trigger_level, "trigger_hit": trigger_hit,
         "candle_confirmed": candle_confirmed, "volume_confirmed": volume_confirmed,
         "readiness": readiness, "fail_reasons": hard_fail,
@@ -1093,7 +1169,7 @@ def build_plan(row, side, spot, support, resistance, pcr, tf5, tf30, daily,
         "alignment": scored["alignment"], "vwap": scored["vwap"],
         "room_pct": scored["room_pct"], "gamma": scored["gamma"],
         "theta": scored["theta"], "vega": scored["vega"],
-        "regime": regime, "late_entry": late_entry,
+        "regime": regime, "late_entry": late_entry, "risk_penalty": buy_risk_penalty,
     }
 
 
@@ -1116,113 +1192,117 @@ def rsi_ok_for_breakout(tf, side):
 
 def build_sell_plan(row, side, spot, support, resistance, pcr, tf5, tf30, daily,
                     risk_profile, chain, oi_wall_info=None, regime="MIXED"):
+    """Build a premium-selling plan using the same calibrated quality framework.
+
+    SELL scores are intentionally stricter than BUY scores. A high option PoP
+    cannot compensate for a poor market regime, weak liquidity, close wall or
+    unattractive risk/reward.
+    """
     if row is None:
         return None
     prefix = "CE" if side == "CE" else "PE"
     ltp = safe_float(row[f"{prefix} LTP"])
     bid = safe_float(row[f"{prefix} Bid"])
     ask = safe_float(row[f"{prefix} Ask"])
-    oi = safe_float(row[f"{prefix} OI"], 0)
-    chg_oi = safe_float(row[f"{prefix} Chg OI"], 0)
-    oi_behavior = oi_price_behavior(row, prefix)
-    volume = safe_float(row[f"{prefix} Volume"], 0)
-    delta = safe_float(row[f"{prefix} Delta"])
-    iv = safe_float(row[f"{prefix} IV"])
-    gamma = safe_float(row[f"{prefix} Gamma"])
-    theta = safe_float(row[f"{prefix} Theta"])
-    vega = safe_float(row[f"{prefix} Vega"])
-    long_pop = safe_float(row[f"{prefix} PoP"])
-    bid_qty = safe_float(row[f"{prefix} Bid Qty"], 0)
-    ask_qty = safe_float(row[f"{prefix} Ask Qty"], 0)
     entry = bid if np.isfinite(bid) and bid > 0 else ltp
     if not np.isfinite(entry) or entry <= 0:
         return None
 
-    # Do NOT equate 100-PoP with strategy win probability; it is only an option-level complement.
+    scored = score_option(row, side, spot, pcr, tf5, tf30, daily, chain,
+                          support=support, resistance=resistance,
+                          oi_wall_info=oi_wall_info, regime=regime, mode="SELL")
+    delta = scored["delta"]
+    iv = scored["iv"]
+    gamma = scored["gamma"]
+    theta = scored["theta"]
+    vega = scored["vega"]
+    oi = scored["oi"]
+    chg_oi = scored["chg_oi"]
+    volume = scored["volume"]
+    spread_pct = scored["spread_pct"]
+    depth_ratio = scored["depth_ratio"]
+    long_pop = safe_float(row[f"{prefix} PoP"])
+    # Keep the legacy display meaning, but do not treat it as a measured win rate.
     short_pop = 100.0 - long_pop if np.isfinite(long_pop) else np.nan
-    spread_pct = max(ask - bid, 0) / max((ask + bid) / 2, 0.01) * 100 if np.isfinite(ask) and np.isfinite(bid) and ask > 0 and bid > 0 else 999
-    desired = "Bearish" if side == "CE" else "Bullish"
-    opposite = "Bullish" if side == "CE" else "Bearish"
-    trends = [tf5.get("trend"), tf30.get("trend"), daily.get("trend")]
-    alignment = trends.count(desired)
-    opposite_count = trends.count(opposite)
-    score = alignment * 9 + max(0, 5 - opposite_count * 4)
-
-    momentum = safe_float(tf5.get("momentum"), 0)
-    rsi = safe_float(tf5.get("rsi"), 50)
-    if side == "CE":
-        score += 12 if tf5.get("trend") == "Bearish" else 0
-        score += 7 if momentum < 0 else 0
-        score += 6 if 30 <= rsi <= 48 else 3 if rsi <= 50 else 0
-    else:
-        score += 12 if tf5.get("trend") == "Bullish" else 0
-        score += 7 if momentum > 0 else 0
-        score += 6 if 52 <= rsi <= 70 else 3 if rsi >= 50 else 0
-
-    vwap = vwap_value(tf5, spot)
-    if side == "CE": score += 12 if spot < vwap else 4 if spot <= vwap * 1.003 else 0
-    else: score += 12 if spot > vwap else 4 if spot >= vwap * 0.997 else 0
-
-    # Seller wants increasing OI at the sold strike plus adequate room to the wall.
-    if chg_oi > 0: score += 10
-    elif chg_oi == 0: score += 4
-    if oi_behavior == "SHORT BUILDUP": score += 4
-    elif oi_behavior == "LONG BUILDUP": score -= 2
-    if oi >= 5000: score += 4
-    elif oi >= 2000: score += 2
-
     abs_delta = abs(delta) if np.isfinite(delta) else np.nan
-    if 0.20 <= abs_delta <= 0.40: score += 8
-    elif 0.15 <= abs_delta <= 0.50: score += 4
-    if spread_pct <= 1: score += 4
-    elif spread_pct <= 2: score += 2
-    if volume >= 10000: score += 4
-    elif volume >= 3000: score += 2
-    depth_ratio = min(bid_qty, ask_qty) / max(max(bid_qty, ask_qty), 1)
-    if depth_ratio >= 0.50: score += 2
+    oi_behavior = scored["oi_behavior"]
 
-    wall_room = (resistance - spot) / max(spot, 1) * 100 if side == "CE" else (spot - support) / max(spot, 1) * 100
-    if wall_room >= 2: score += 7
-    elif wall_room >= 1: score += 3
-    elif wall_room < 0.5: score -= 12
+    wall_room = ((resistance - spot) / max(spot, 1) * 100
+                 if side == "CE" else
+                 (spot - support) / max(spot, 1) * 100)
 
-    # IV/Theta are supportive context for sellers, but never a standalone trigger.
-    if np.isfinite(iv):
-        if iv >= 60: score += 4
-        elif iv >= 40: score += 2
-    if np.isfinite(theta) and theta < 0: score += 2
-    if np.isfinite(vega) and vega > 0: score += 1
-    if regime == "RANGE": score += 5
-    elif (side == "CE" and regime in {"TRENDING DOWN", "BREAKDOWN"}) or (side == "PE" and regime in {"TRENDING UP", "BREAKOUT"}): score += 5
-    elif regime in {"BREAKOUT", "BREAKDOWN"}: score -= 6
-
-    # Conflict and risk penalties.
-    if opposite_count >= 2: score -= 10
-    if side == "CE" and spot > resistance: score -= 20
-    if side == "PE" and spot < support: score -= 20
-    if spread_pct > 3: score -= 8
-    score = float(np.clip(score, 0, 100))
-
-    hard_fail = []
-    if tf5.get("trend") == opposite: hard_fail.append("5m trend conflict")
-    if spread_pct > 4: hard_fail.append("wide option spread")
-    if not np.isfinite(abs_delta) or not (0.15 <= abs_delta <= 0.55): hard_fail.append("delta unsuitable for selling")
-    if volume < 500: hard_fail.append("weak option liquidity")
-    if oi <= 0: hard_fail.append("no option OI")
-    if not np.isfinite(short_pop) or short_pop < 50: hard_fail.append("low strategy PoP")
-    if side == "CE" and spot >= resistance: hard_fail.append("resistance breached")
-    if side == "PE" and spot <= support: hard_fail.append("support breached")
-    if wall_room < 0.75: hard_fail.append("insufficient room to wall")
-    if regime in {"BREAKOUT", "BREAKDOWN"}: hard_fail.append("breakout regime unsuitable for short premium")
-
-    # Adaptive seller risk: use ATR and delta rather than one fixed 35% SL.
+    # Adaptive seller risk.
     atr = max(safe_float(tf5.get("atr"), spot * 0.01), spot * 0.001)
     underlying_risk = atr * {"Conservative": 0.50, "Balanced": 0.65, "Aggressive": 0.80}.get(risk_profile, 0.65)
-    premium_risk = max(entry * 0.18, underlying_risk * max(abs_delta, 0.20) * (1 + max((safe_float(iv, 20) - 30) / 200, 0)))
+    premium_risk = max(
+        entry * 0.18,
+        underlying_risk * max(abs_delta if np.isfinite(abs_delta) else 0.20, 0.20)
+        * (1 + max((safe_float(iv, 20) - 30) / 200, 0))
+    )
     sl = round(entry + premium_risk, 2)
     target1 = round(max(entry - premium_risk * 0.90, entry * 0.45), 2)
     target2 = round(max(entry - premium_risk * 1.35, entry * 0.25), 2)
-    if target2 >= target1: target2 = round(max(entry * 0.30, target1 - entry * 0.10), 2)
+    if target2 >= target1:
+        target2 = round(max(entry * 0.30, target1 - entry * 0.10), 2)
+
+    rr1 = (entry - target1) / max(sl - entry, 0.01)
+    rr2 = (entry - target2) / max(sl - entry, 0.01)
+
+    # Seller-specific quality penalties. These are the main calibration change:
+    # a setup with a near wall or poor T1 reward cannot remain in the 90s.
+    risk_penalty = 0.0
+    if wall_room < 0.75:
+        risk_penalty += 18
+    elif wall_room < 1.00:
+        risk_penalty += 10
+    elif wall_room < 1.50:
+        risk_penalty += 5
+
+    if rr1 < 0.75:
+        risk_penalty += 8
+    elif rr1 < 1.00:
+        risk_penalty += 5
+    if rr2 < 1.20:
+        risk_penalty += 3
+
+    if regime in {"BREAKOUT", "BREAKDOWN"}:
+        risk_penalty += 8
+    if spread_pct > 3:
+        risk_penalty += 7
+    if depth_ratio < 0.20:
+        risk_penalty += 4
+    if np.isfinite(abs_delta) and abs_delta > 0.45:
+        risk_penalty += 5
+    if np.isfinite(gamma) and gamma > 0 and np.isfinite(abs_delta) and abs_delta > 0.35:
+        risk_penalty += 3
+
+    score = float(np.clip(scored["score"] - risk_penalty, 0, 100))
+
+    hard_fail = []
+    if tf5.get("trend") == ("Bullish" if side == "CE" else "Bearish"):
+        hard_fail.append("5m trend conflict")
+    if spread_pct > 4:
+        hard_fail.append("wide option spread")
+    if not np.isfinite(abs_delta) or not (0.15 <= abs_delta <= 0.55):
+        hard_fail.append("delta unsuitable for selling")
+    if volume < 500:
+        hard_fail.append("weak option liquidity")
+    if oi <= 0:
+        hard_fail.append("no option OI")
+    if not np.isfinite(short_pop) or short_pop < 50:
+        hard_fail.append("low strategy PoP")
+    if side == "CE" and spot >= resistance:
+        hard_fail.append("resistance breached")
+    if side == "PE" and spot <= support:
+        hard_fail.append("support breached")
+    if wall_room < 0.75:
+        hard_fail.append("insufficient room to wall")
+    if regime in {"BREAKOUT", "BREAKDOWN"}:
+        hard_fail.append("breakout regime unsuitable for short premium")
+    if rr1 < 0.75:
+        hard_fail.append("poor target 1 risk/reward")
+    if score < 60:
+        hard_fail.append("quality score below threshold")
 
     if side == "CE":
         trigger = f"Sell only while spot remains below {fmt_price(resistance)} and 5m shows rejection/weakness; avoid fresh shorts after a breakout."
@@ -1231,287 +1311,54 @@ def build_sell_plan(row, side, spot, support, resistance, pcr, tf5, tf30, daily,
         trigger = f"Sell only while spot remains above {fmt_price(support)} and 5m shows rejection/strength; avoid fresh shorts after a breakdown."
         exit_rule = f"Exit if spot sustains below support {fmt_price(support)} or premium reaches {fmt_price(sl)}. Book profit progressively."
 
-    readiness = "READY" if not hard_fail and score >= 62 and np.isfinite(short_pop) and short_pop >= 55 else "NO TRADE"
+    readiness = "READY" if not hard_fail and score >= 65 and np.isfinite(short_pop) and short_pop >= 55 else "NO TRADE"
     return {
-        "side": side, "strike": float(row["Strike"]), "instrument_key": row.get(f"{prefix} Key"),
+        "side": side, "strike": float(row["Strike"]),
         "action": "CALL SELL" if side == "CE" else "PUT SELL",
         "entry": entry, "sl": sl, "target1": target1, "target2": target2,
-        "pop": short_pop, "long_pop": long_pop, "delta": delta, "iv": iv, "oi_behavior": oi_behavior,
-        "gamma": gamma, "theta": theta, "vega": vega, "score": score,
-        "rr1": (entry - target1) / max(sl - entry, 0.01),
-        "rr2": (entry - target2) / max(sl - entry, 0.01),
+        "pop": short_pop, "long_pop": long_pop, "delta": delta, "iv": iv,
+        "oi_behavior": oi_behavior, "gamma": gamma, "theta": theta, "vega": vega,
+        "score": score, "rr1": rr1, "rr2": rr2,
         "trigger": trigger, "trigger_level": resistance if side == "CE" else support,
         "trigger_hit": not hard_fail, "fail_reasons": hard_fail,
         "oi": oi, "chg_oi": chg_oi, "volume": volume, "spread_pct": spread_pct,
-        "alignment": alignment, "vwap": vwap, "room_pct": wall_room,
+        "alignment": scored["alignment"], "vwap": scored["vwap"], "room_pct": wall_room,
         "readiness": readiness, "exit": exit_rule, "regime": regime,
-        "depth_ratio": depth_ratio,
+        "depth_ratio": depth_ratio, "risk_penalty": risk_penalty,
     }
 
 
 # ============================================================
-# BACKEND QUALITY / FORWARD-TESTING ENGINE — NO UI CHANGES
+# BACKEND QUALITY / LOGGING HELPERS — NO UI CHANGES
 # ============================================================
-# This layer records each unique executable signal, follows it with live
-# option quotes, and closes it when SL / Target 1 / Target 2 / expiry is hit.
-# It is deliberately hidden from the UI so the existing dashboard remains
-# unchanged.
-#
-# IMPORTANT: this is a forward-test tracker, not a historical backtest.
-# Historical win rate becomes measurable only after enough completed signals
-# have accumulated. The tracker also stores the raw inputs needed for later
-# analysis by action, PoP bucket, regime, score, etc.
-
-DB_PATH = os.environ.get(
-    "FO_PRO_PERFORMANCE_DB",
-    os.path.join(os.path.dirname(os.path.abspath(__file__)), "fo_pro_performance.db"),
-)
+def _signal_log_path():
+    return "/tmp/fo_pro_trader_signal_log.csv"
 
 
-def _db_connect():
-    conn = sqlite3.connect(DB_PATH, timeout=10)
-    conn.execute("PRAGMA journal_mode=WAL")
-    conn.execute("PRAGMA busy_timeout=10000")
-    return conn
-
-
-def _init_performance_db():
-    try:
-        conn = _db_connect()
-        conn.execute("""
-            CREATE TABLE IF NOT EXISTS signals (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                signal_key TEXT UNIQUE NOT NULL,
-                signal_time TEXT NOT NULL,
-                symbol TEXT NOT NULL,
-                expiry TEXT,
-                decision TEXT NOT NULL,
-                instrument_key TEXT,
-                spot REAL,
-                strike REAL,
-                entry REAL,
-                sl REAL,
-                target1 REAL,
-                target2 REAL,
-                pop REAL,
-                score REAL,
-                delta REAL,
-                iv REAL,
-                gamma REAL,
-                theta REAL,
-                vega REAL,
-                pcr REAL,
-                support REAL,
-                resistance REAL,
-                vwap REAL,
-                trend5 TEXT,
-                trend30 TEXT,
-                trend_daily TEXT,
-                regime TEXT,
-                oi REAL,
-                volume REAL,
-                spread_pct REAL,
-                outcome TEXT DEFAULT 'OPEN',
-                outcome_time TEXT,
-                outcome_price REAL,
-                pnl_per_unit REAL,
-                r_multiple REAL,
-                last_price REAL,
-                updates INTEGER DEFAULT 0
-            )
-        """)
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_signals_status ON signals(outcome)")
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_signals_action ON signals(decision)")
-        conn.commit()
-        conn.close()
-    except Exception:
-        # Tracking must never prevent the live trading dashboard from loading.
-        pass
-
-
-_init_performance_db()
-
-
-def _signal_log_key(symbol, expiry, decision, plan):
-    """Stable key that prevents 60-second refreshes from creating duplicates."""
-    strike = safe_float(plan.get("strike"), 0)
-    entry = safe_float(plan.get("entry"), 0)
-    # Entry is rounded so tiny quote changes do not create a new 'trade'.
-    entry_bucket = round(entry, 1)
-    return f"{symbol}|{expiry}|{decision}|{strike:.2f}|{entry_bucket:.1f}"
-
-
-def log_signal(symbol, expiry, decision, plan, spot, pcr, support, resistance,
-               tf5, tf30, daily, regime):
-    """Record one unique actionable signal for objective forward testing."""
+def log_signal(symbol, expiry, decision, plan, spot, pcr, support, resistance, tf5, tf30, daily, regime):
+    """Append selected signals for objective forward testing. No UI is changed."""
     if not plan or decision == "NO TRADE":
-        return None
-
-    instrument_key = plan.get("instrument_key")
-    if not instrument_key:
-        return None
-
-    now = datetime.now(ZoneInfo("Asia/Kolkata"))
-    key = _signal_log_key(symbol, expiry, decision, plan)
-
-    row = (
-        key, now.isoformat(), symbol, expiry, decision, instrument_key,
-        safe_float(spot), safe_float(plan.get("strike")), safe_float(plan.get("entry")),
-        safe_float(plan.get("sl")), safe_float(plan.get("target1")), safe_float(plan.get("target2")),
-        safe_float(plan.get("pop")), safe_float(plan.get("score")), safe_float(plan.get("delta")),
-        safe_float(plan.get("iv")), safe_float(plan.get("gamma")), safe_float(plan.get("theta")),
-        safe_float(plan.get("vega")), safe_float(pcr), safe_float(support), safe_float(resistance),
-        safe_float(tf5.get("vwap")), tf5.get("trend"), tf30.get("trend"), daily.get("trend"),
-        regime, safe_float(plan.get("oi")), safe_float(plan.get("volume")),
-        safe_float(plan.get("spread_pct")),
-    )
-
+        return
     try:
-        conn = _db_connect()
-        conn.execute("""
-            INSERT OR IGNORE INTO signals (
-                signal_key, signal_time, symbol, expiry, decision, instrument_key,
-                spot, strike, entry, sl, target1, target2, pop, score, delta, iv,
-                gamma, theta, vega, pcr, support, resistance, vwap, trend5, trend30,
-                trend_daily, regime, oi, volume, spread_pct
-            ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
-        """, row)
-        conn.commit()
-        cur = conn.execute("SELECT id FROM signals WHERE signal_key=?", (key,))
-        result = cur.fetchone()
-        conn.close()
-        return result[0] if result else None
-    except Exception:
-        return None
-
-
-def _performance_stats():
-    """Return objective completed-trade metrics for future diagnostics/export."""
-    try:
-        conn = _db_connect()
-        total = conn.execute("SELECT COUNT(*) FROM signals WHERE outcome <> 'OPEN'").fetchone()[0]
-        wins = conn.execute("SELECT COUNT(*) FROM signals WHERE outcome IN ('TARGET 1','TARGET 2')").fetchone()[0]
-        gross_profit = conn.execute("SELECT COALESCE(SUM(pnl_per_unit),0) FROM signals WHERE pnl_per_unit > 0").fetchone()[0]
-        gross_loss = conn.execute("SELECT COALESCE(SUM(ABS(pnl_per_unit)),0) FROM signals WHERE pnl_per_unit < 0").fetchone()[0]
-        expectancy = conn.execute("SELECT COALESCE(AVG(pnl_per_unit),0) FROM signals WHERE outcome <> 'OPEN'").fetchone()[0]
-        max_r = conn.execute("SELECT COALESCE(MAX(r_multiple),0) FROM signals WHERE outcome <> 'OPEN'").fetchone()[0]
-        min_r = conn.execute("SELECT COALESCE(MIN(r_multiple),0) FROM signals WHERE outcome <> 'OPEN'").fetchone()[0]
-        conn.close()
-        win_rate = (wins / total * 100) if total else np.nan
-        profit_factor = (gross_profit / gross_loss) if gross_loss else (np.inf if gross_profit else np.nan)
-        return {
-            "completed": total,
-            "wins": wins,
-            "win_rate": win_rate,
-            "profit_factor": profit_factor,
-            "expectancy_per_unit": expectancy,
-            "max_r": max_r,
-            "min_r": min_r,
+        row = {
+            "timestamp": datetime.now(ZoneInfo("Asia/Kolkata")).isoformat(),
+            "symbol": symbol, "expiry": expiry, "decision": decision,
+            "spot": spot, "strike": plan.get("strike"), "pop": plan.get("pop"),
+            "score": plan.get("score"), "entry": plan.get("entry"), "sl": plan.get("sl"),
+            "target1": plan.get("target1"), "target2": plan.get("target2"),
+            "delta": plan.get("delta"), "iv": plan.get("iv"),
+            "gamma": plan.get("gamma"), "theta": plan.get("theta"), "vega": plan.get("vega"),
+            "pcr": pcr, "support": support, "resistance": resistance,
+            "vwap": tf5.get("vwap"), "trend5": tf5.get("trend"),
+            "trend30": tf30.get("trend"), "trend_daily": daily.get("trend"),
+            "regime": regime,
         }
-    except Exception:
-        return {"completed": 0, "wins": 0, "win_rate": np.nan, "profit_factor": np.nan,
-                "expectancy_per_unit": np.nan, "max_r": np.nan, "min_r": np.nan}
-
-
-def update_open_signals():
-    """Evaluate currently open forward-test signals against live option quotes.
-
-    Detection is deliberately conservative:
-      BUY exits are evaluated against the option's bid.
-      SELL exits are evaluated against the option's ask.
-    This better approximates executable exit prices than using LTP alone.
-    """
-    try:
-        conn = _db_connect()
-        rows = conn.execute("""
-            SELECT id, signal_time, symbol, expiry, decision, instrument_key,
-                   entry, sl, target1, target2, last_price, updates
-            FROM signals WHERE outcome='OPEN'
-            ORDER BY id ASC
-        """).fetchall()
-        conn.close()
-    except Exception:
-        return
-
-    if not rows:
-        return
-
-    now = datetime.now(ZoneInfo("Asia/Kolkata"))
-    for row in rows:
-        (
-            signal_id, signal_time, symbol, expiry, decision, instrument_key,
-            entry, sl, target1, target2, last_price, updates
-        ) = row
-        try:
-            q = get_quote(instrument_key)
-            ltp = safe_float(q.get("last_price"), np.nan)
-            bid = safe_float(q.get("bid_price"), np.nan)
-            ask = safe_float(q.get("ask_price"), np.nan)
-            if not np.isfinite(ltp):
-                continue
-
-            is_buy = decision in {"CALL BUY", "PUT BUY"}
-            # Conservative executable exit price.
-            exit_px = bid if is_buy and np.isfinite(bid) and bid > 0 else ask if (not is_buy and np.isfinite(ask) and ask > 0) else ltp
-
-            outcome = None
-            threshold = None
-            if is_buy:
-                if np.isfinite(exit_px) and exit_px <= sl:
-                    outcome, threshold = "SL HIT", sl
-                elif np.isfinite(exit_px) and exit_px >= target2:
-                    outcome, threshold = "TARGET 2", target2
-                elif np.isfinite(exit_px) and exit_px >= target1:
-                    outcome, threshold = "TARGET 1", target1
-            else:
-                if np.isfinite(exit_px) and exit_px >= sl:
-                    outcome, threshold = "SL HIT", sl
-                elif np.isfinite(exit_px) and exit_px <= target2:
-                    outcome, threshold = "TARGET 2", target2
-                elif np.isfinite(exit_px) and exit_px <= target1:
-                    outcome, threshold = "TARGET 1", target1
-
-            # If the option has expired, close any still-open observation at
-            # the last executable quote rather than leaving it OPEN forever.
-            try:
-                expiry_dt = datetime.fromisoformat(str(expiry)).date()
-                if outcome is None and now.date() > expiry_dt:
-                    outcome = "EXPIRY EXIT"
-                    threshold = exit_px
-            except Exception:
-                pass
-
-            if outcome:
-                pnl = (exit_px - entry) if is_buy else (entry - exit_px)
-                initial_risk = abs(entry - sl)
-                r_multiple = pnl / initial_risk if initial_risk > 0 else np.nan
-                conn = _db_connect()
-                conn.execute("""
-                    UPDATE signals
-                    SET outcome=?, outcome_time=?, outcome_price=?, pnl_per_unit=?,
-                        r_multiple=?, last_price=?, updates=COALESCE(updates,0)+1
-                    WHERE id=? AND outcome='OPEN'
-                """, (outcome, now.isoformat(), exit_px, pnl, r_multiple, ltp, signal_id))
-                conn.commit()
-                conn.close()
-            else:
-                conn = _db_connect()
-                conn.execute("""
-                    UPDATE signals
-                    SET last_price=?, updates=COALESCE(updates,0)+1
-                    WHERE id=? AND outcome='OPEN'
-                """, (ltp, signal_id))
-                conn.commit()
-                conn.close()
-        except Exception:
-            # One stale/invalid contract must not stop monitoring other signals.
-            continue
-
-
-def _maybe_update_performance():
-    """Run monitoring once per app rerun without creating UI elements."""
-    try:
-        update_open_signals()
+        df = pd.DataFrame([row])
+        path = _signal_log_path()
+        if __import__("os").path.exists(path):
+            df.to_csv(path, mode="a", header=False, index=False)
+        else:
+            df.to_csv(path, index=False)
     except Exception:
         pass
 
@@ -1649,7 +1496,7 @@ put_sell = sell_candidate("PE")
 # ============================================================
 # FINAL 5-WAY DECISION
 # ============================================================
-MIN_SCORE = 63
+MIN_SCORE = 65
 MIN_POP = 55
 MIN_ALIGNMENT = 2
 
@@ -1659,10 +1506,6 @@ strategy_plans = {
     "PUT BUY": put_buy,
     "PUT SELL": put_sell,
 }
-
-# Monitor previously logged forward-test signals before logging the new signal.
-# This is backend-only and does not change the dashboard.
-_maybe_update_performance()
 
 eligible = []
 for action, plan in strategy_plans.items():
@@ -1683,7 +1526,8 @@ for action, plan in strategy_plans.items():
         # SELLs need stronger structure and are never selected during a breakout regime.
         ready = (
             score >= MIN_SCORE and pop >= MIN_POP and alignment >= 2 and
-            not hard_fail and plan.get("readiness") == "READY"
+            not hard_fail and plan.get("readiness") == "READY" and
+            safe_float(plan.get("rr1"), 0) >= 0.75
         )
     if ready:
         # Small tie-breaker for score, then PoP, then option liquidity.
