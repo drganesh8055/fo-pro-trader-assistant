@@ -1611,17 +1611,37 @@ def _actionable(plan, score, side):
     )
 
 def _wait_candidate(plan, score, side):
-    if not plan or score < 58 or _severe_reasons(plan):
+    """Identify a genuine developing setup without forcing PoP to be a hard
+    blocker.
+
+    PoP remains important for executable trades, but a lower PoP should not
+    turn a strongly aligned underlying setup into NO TRADE before the price
+    trigger is reached. This separates setup direction/quality from entry
+    timing and option-selection quality.
+    """
+    if not plan or score < 65 or _severe_reasons(plan):
         return False
+
     desired_direction = "Bullish" if side == "CE" else "Bearish"
-    # At least one timeframe must support the direction; the 5m timeframe
-    # must not be directly opposite. This prevents random WAIT signals.
-    return (
-        plan.get("alignment", 0) >= 1
-        and tf5.get("trend") != ("Bearish" if side == "CE" else "Bullish")
-        and (overall_direction in {desired_direction, "Mixed"} or plan.get("alignment", 0) >= 2)
-        and plan.get("pop_ok", False)
+    opposite = "Bearish" if side == "CE" else "Bullish"
+
+    # A developing candidate needs meaningful directional confluence.
+    # The 5m timeframe must not directly oppose the candidate and at least
+    # two timeframes should agree with the direction.
+    direction_ok = (
+        overall_direction == desired_direction
+        and plan.get("alignment", 0) >= 2
+        and tf5.get("trend") != opposite
     )
+
+    if not direction_ok:
+        return False
+
+    # Very low PoP is still treated as poor option quality. It is displayed
+    # as a warning/reference condition rather than silently converting a
+    # strong underlying setup into NO TRADE.
+    pop = safe_float(plan.get("pop"))
+    return np.isfinite(pop) and pop >= 35
 
 ce_actionable = _actionable(ce_plan, ce_score, "CE")
 pe_actionable = _actionable(pe_plan, pe_score, "PE")
