@@ -1731,6 +1731,14 @@ st.markdown(f"""
 """, unsafe_allow_html=True)
 
 st.markdown("<div class='fo-section'>ENGINE RESULT · ALL 4 STRATEGIES</div>", unsafe_allow_html=True)
+
+st.markdown("""<style>
+/* FORCE ENGINE RESULT 2x2 GRID */
+.fo-engine.fo-engine-grid{display:grid!important;grid-template-columns:repeat(2,minmax(0,1fr))!important;grid-auto-rows:1fr!important;gap:14px!important;width:100%!important;align-items:stretch!important;}
+.fo-engine.fo-engine-grid .fo-engine-card{display:flex!important;flex-direction:column!important;min-width:0!important;width:100%!important;height:100%!important;margin:0!important;box-sizing:border-box!important;}
+@media(max-width:720px){.fo-engine.fo-engine-grid{grid-template-columns:1fr!important;}}
+</style>""", unsafe_allow_html=True)
+
 engine_html = "<div class='fo-engine fo-engine-grid'>"
 for action in ["CALL BUY","CALL SELL","PUT BUY","PUT SELL"]:
     plan = strategy_plans[action]
