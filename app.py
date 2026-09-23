@@ -10,6 +10,8 @@ import requests
 import streamlit as st
 import threading
 import time
+import os
+import sqlite3
 
 try:
     from streamlit_autorefresh import st_autorefresh
@@ -1075,7 +1077,7 @@ def build_plan(row, side, spot, support, resistance, pcr, tf5, tf30, daily,
         readiness = "READY"
 
     return {
-        "side": side, "strike": float(row["Strike"]), "entry": float(entry),
+        "side": side, "strike": float(row["Strike"]), "instrument_key": row.get(f"{side} Key"), "entry": float(entry),
         "sl": sl, "target1": target1, "target2": target2,
         "pop": scored["pop"], "delta": scored["delta"], "iv": scored["iv"],
         "score": scored["score"], "rr1": rr1, "rr2": rr2,
@@ -1231,7 +1233,7 @@ def build_sell_plan(row, side, spot, support, resistance, pcr, tf5, tf30, daily,
 
     readiness = "READY" if not hard_fail and score >= 62 and np.isfinite(short_pop) and short_pop >= 55 else "NO TRADE"
     return {
-        "side": side, "strike": float(row["Strike"]),
+        "side": side, "strike": float(row["Strike"]), "instrument_key": row.get(f"{prefix} Key"),
         "action": "CALL SELL" if side == "CE" else "PUT SELL",
         "entry": entry, "sl": sl, "target1": target1, "target2": target2,
         "pop": short_pop, "long_pop": long_pop, "delta": delta, "iv": iv, "oi_behavior": oi_behavior,
@@ -1248,36 +1250,268 @@ def build_sell_plan(row, side, spot, support, resistance, pcr, tf5, tf30, daily,
 
 
 # ============================================================
-# BACKEND QUALITY / LOGGING HELPERS — NO UI CHANGES
+# BACKEND QUALITY / FORWARD-TESTING ENGINE — NO UI CHANGES
 # ============================================================
-def _signal_log_path():
-    return "/tmp/fo_pro_trader_signal_log.csv"
+# This layer records each unique executable signal, follows it with live
+# option quotes, and closes it when SL / Target 1 / Target 2 / expiry is hit.
+# It is deliberately hidden from the UI so the existing dashboard remains
+# unchanged.
+#
+# IMPORTANT: this is a forward-test tracker, not a historical backtest.
+# Historical win rate becomes measurable only after enough completed signals
+# have accumulated. The tracker also stores the raw inputs needed for later
+# analysis by action, PoP bucket, regime, score, etc.
+
+DB_PATH = os.environ.get(
+    "FO_PRO_PERFORMANCE_DB",
+    os.path.join(os.path.dirname(os.path.abspath(__file__)), "fo_pro_performance.db"),
+)
 
 
-def log_signal(symbol, expiry, decision, plan, spot, pcr, support, resistance, tf5, tf30, daily, regime):
-    """Append selected signals for objective forward testing. No UI is changed."""
-    if not plan or decision == "NO TRADE":
-        return
+def _db_connect():
+    conn = sqlite3.connect(DB_PATH, timeout=10)
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA busy_timeout=10000")
+    return conn
+
+
+def _init_performance_db():
     try:
-        row = {
-            "timestamp": datetime.now(ZoneInfo("Asia/Kolkata")).isoformat(),
-            "symbol": symbol, "expiry": expiry, "decision": decision,
-            "spot": spot, "strike": plan.get("strike"), "pop": plan.get("pop"),
-            "score": plan.get("score"), "entry": plan.get("entry"), "sl": plan.get("sl"),
-            "target1": plan.get("target1"), "target2": plan.get("target2"),
-            "delta": plan.get("delta"), "iv": plan.get("iv"),
-            "gamma": plan.get("gamma"), "theta": plan.get("theta"), "vega": plan.get("vega"),
-            "pcr": pcr, "support": support, "resistance": resistance,
-            "vwap": tf5.get("vwap"), "trend5": tf5.get("trend"),
-            "trend30": tf30.get("trend"), "trend_daily": daily.get("trend"),
-            "regime": regime,
+        conn = _db_connect()
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS signals (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                signal_key TEXT UNIQUE NOT NULL,
+                signal_time TEXT NOT NULL,
+                symbol TEXT NOT NULL,
+                expiry TEXT,
+                decision TEXT NOT NULL,
+                instrument_key TEXT,
+                spot REAL,
+                strike REAL,
+                entry REAL,
+                sl REAL,
+                target1 REAL,
+                target2 REAL,
+                pop REAL,
+                score REAL,
+                delta REAL,
+                iv REAL,
+                gamma REAL,
+                theta REAL,
+                vega REAL,
+                pcr REAL,
+                support REAL,
+                resistance REAL,
+                vwap REAL,
+                trend5 TEXT,
+                trend30 TEXT,
+                trend_daily TEXT,
+                regime TEXT,
+                oi REAL,
+                volume REAL,
+                spread_pct REAL,
+                outcome TEXT DEFAULT 'OPEN',
+                outcome_time TEXT,
+                outcome_price REAL,
+                pnl_per_unit REAL,
+                r_multiple REAL,
+                last_price REAL,
+                updates INTEGER DEFAULT 0
+            )
+        """)
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_signals_status ON signals(outcome)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_signals_action ON signals(decision)")
+        conn.commit()
+        conn.close()
+    except Exception:
+        # Tracking must never prevent the live trading dashboard from loading.
+        pass
+
+
+_init_performance_db()
+
+
+def _signal_log_key(symbol, expiry, decision, plan):
+    """Stable key that prevents 60-second refreshes from creating duplicates."""
+    strike = safe_float(plan.get("strike"), 0)
+    entry = safe_float(plan.get("entry"), 0)
+    # Entry is rounded so tiny quote changes do not create a new 'trade'.
+    entry_bucket = round(entry, 1)
+    return f"{symbol}|{expiry}|{decision}|{strike:.2f}|{entry_bucket:.1f}"
+
+
+def log_signal(symbol, expiry, decision, plan, spot, pcr, support, resistance,
+               tf5, tf30, daily, regime):
+    """Record one unique actionable signal for objective forward testing."""
+    if not plan or decision == "NO TRADE":
+        return None
+
+    instrument_key = plan.get("instrument_key")
+    if not instrument_key:
+        return None
+
+    now = datetime.now(ZoneInfo("Asia/Kolkata"))
+    key = _signal_log_key(symbol, expiry, decision, plan)
+
+    row = (
+        key, now.isoformat(), symbol, expiry, decision, instrument_key,
+        safe_float(spot), safe_float(plan.get("strike")), safe_float(plan.get("entry")),
+        safe_float(plan.get("sl")), safe_float(plan.get("target1")), safe_float(plan.get("target2")),
+        safe_float(plan.get("pop")), safe_float(plan.get("score")), safe_float(plan.get("delta")),
+        safe_float(plan.get("iv")), safe_float(plan.get("gamma")), safe_float(plan.get("theta")),
+        safe_float(plan.get("vega")), safe_float(pcr), safe_float(support), safe_float(resistance),
+        safe_float(tf5.get("vwap")), tf5.get("trend"), tf30.get("trend"), daily.get("trend"),
+        regime, safe_float(plan.get("oi")), safe_float(plan.get("volume")),
+        safe_float(plan.get("spread_pct")),
+    )
+
+    try:
+        conn = _db_connect()
+        conn.execute("""
+            INSERT OR IGNORE INTO signals (
+                signal_key, signal_time, symbol, expiry, decision, instrument_key,
+                spot, strike, entry, sl, target1, target2, pop, score, delta, iv,
+                gamma, theta, vega, pcr, support, resistance, vwap, trend5, trend30,
+                trend_daily, regime, oi, volume, spread_pct
+            ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+        """, row)
+        conn.commit()
+        cur = conn.execute("SELECT id FROM signals WHERE signal_key=?", (key,))
+        result = cur.fetchone()
+        conn.close()
+        return result[0] if result else None
+    except Exception:
+        return None
+
+
+def _performance_stats():
+    """Return objective completed-trade metrics for future diagnostics/export."""
+    try:
+        conn = _db_connect()
+        total = conn.execute("SELECT COUNT(*) FROM signals WHERE outcome <> 'OPEN'").fetchone()[0]
+        wins = conn.execute("SELECT COUNT(*) FROM signals WHERE outcome IN ('TARGET 1','TARGET 2')").fetchone()[0]
+        gross_profit = conn.execute("SELECT COALESCE(SUM(pnl_per_unit),0) FROM signals WHERE pnl_per_unit > 0").fetchone()[0]
+        gross_loss = conn.execute("SELECT COALESCE(SUM(ABS(pnl_per_unit)),0) FROM signals WHERE pnl_per_unit < 0").fetchone()[0]
+        expectancy = conn.execute("SELECT COALESCE(AVG(pnl_per_unit),0) FROM signals WHERE outcome <> 'OPEN'").fetchone()[0]
+        max_r = conn.execute("SELECT COALESCE(MAX(r_multiple),0) FROM signals WHERE outcome <> 'OPEN'").fetchone()[0]
+        min_r = conn.execute("SELECT COALESCE(MIN(r_multiple),0) FROM signals WHERE outcome <> 'OPEN'").fetchone()[0]
+        conn.close()
+        win_rate = (wins / total * 100) if total else np.nan
+        profit_factor = (gross_profit / gross_loss) if gross_loss else (np.inf if gross_profit else np.nan)
+        return {
+            "completed": total,
+            "wins": wins,
+            "win_rate": win_rate,
+            "profit_factor": profit_factor,
+            "expectancy_per_unit": expectancy,
+            "max_r": max_r,
+            "min_r": min_r,
         }
-        df = pd.DataFrame([row])
-        path = _signal_log_path()
-        if __import__("os").path.exists(path):
-            df.to_csv(path, mode="a", header=False, index=False)
-        else:
-            df.to_csv(path, index=False)
+    except Exception:
+        return {"completed": 0, "wins": 0, "win_rate": np.nan, "profit_factor": np.nan,
+                "expectancy_per_unit": np.nan, "max_r": np.nan, "min_r": np.nan}
+
+
+def update_open_signals():
+    """Evaluate currently open forward-test signals against live option quotes.
+
+    Detection is deliberately conservative:
+      BUY exits are evaluated against the option's bid.
+      SELL exits are evaluated against the option's ask.
+    This better approximates executable exit prices than using LTP alone.
+    """
+    try:
+        conn = _db_connect()
+        rows = conn.execute("""
+            SELECT id, signal_time, symbol, expiry, decision, instrument_key,
+                   entry, sl, target1, target2, last_price, updates
+            FROM signals WHERE outcome='OPEN'
+            ORDER BY id ASC
+        """).fetchall()
+        conn.close()
+    except Exception:
+        return
+
+    if not rows:
+        return
+
+    now = datetime.now(ZoneInfo("Asia/Kolkata"))
+    for row in rows:
+        (
+            signal_id, signal_time, symbol, expiry, decision, instrument_key,
+            entry, sl, target1, target2, last_price, updates
+        ) = row
+        try:
+            q = get_quote(instrument_key)
+            ltp = safe_float(q.get("last_price"), np.nan)
+            bid = safe_float(q.get("bid_price"), np.nan)
+            ask = safe_float(q.get("ask_price"), np.nan)
+            if not np.isfinite(ltp):
+                continue
+
+            is_buy = decision in {"CALL BUY", "PUT BUY"}
+            # Conservative executable exit price.
+            exit_px = bid if is_buy and np.isfinite(bid) and bid > 0 else ask if (not is_buy and np.isfinite(ask) and ask > 0) else ltp
+
+            outcome = None
+            threshold = None
+            if is_buy:
+                if np.isfinite(exit_px) and exit_px <= sl:
+                    outcome, threshold = "SL HIT", sl
+                elif np.isfinite(exit_px) and exit_px >= target2:
+                    outcome, threshold = "TARGET 2", target2
+                elif np.isfinite(exit_px) and exit_px >= target1:
+                    outcome, threshold = "TARGET 1", target1
+            else:
+                if np.isfinite(exit_px) and exit_px >= sl:
+                    outcome, threshold = "SL HIT", sl
+                elif np.isfinite(exit_px) and exit_px <= target2:
+                    outcome, threshold = "TARGET 2", target2
+                elif np.isfinite(exit_px) and exit_px <= target1:
+                    outcome, threshold = "TARGET 1", target1
+
+            # If the option has expired, close any still-open observation at
+            # the last executable quote rather than leaving it OPEN forever.
+            try:
+                expiry_dt = datetime.fromisoformat(str(expiry)).date()
+                if outcome is None and now.date() > expiry_dt:
+                    outcome = "EXPIRY EXIT"
+                    threshold = exit_px
+            except Exception:
+                pass
+
+            if outcome:
+                pnl = (exit_px - entry) if is_buy else (entry - exit_px)
+                initial_risk = abs(entry - sl)
+                r_multiple = pnl / initial_risk if initial_risk > 0 else np.nan
+                conn = _db_connect()
+                conn.execute("""
+                    UPDATE signals
+                    SET outcome=?, outcome_time=?, outcome_price=?, pnl_per_unit=?,
+                        r_multiple=?, last_price=?, updates=COALESCE(updates,0)+1
+                    WHERE id=? AND outcome='OPEN'
+                """, (outcome, now.isoformat(), exit_px, pnl, r_multiple, ltp, signal_id))
+                conn.commit()
+                conn.close()
+            else:
+                conn = _db_connect()
+                conn.execute("""
+                    UPDATE signals
+                    SET last_price=?, updates=COALESCE(updates,0)+1
+                    WHERE id=? AND outcome='OPEN'
+                """, (ltp, signal_id))
+                conn.commit()
+                conn.close()
+        except Exception:
+            # One stale/invalid contract must not stop monitoring other signals.
+            continue
+
+
+def _maybe_update_performance():
+    """Run monitoring once per app rerun without creating UI elements."""
+    try:
+        update_open_signals()
     except Exception:
         pass
 
@@ -1425,6 +1659,10 @@ strategy_plans = {
     "PUT BUY": put_buy,
     "PUT SELL": put_sell,
 }
+
+# Monitor previously logged forward-test signals before logging the new signal.
+# This is backend-only and does not change the dashboard.
+_maybe_update_performance()
 
 eligible = []
 for action, plan in strategy_plans.items():
