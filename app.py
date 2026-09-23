@@ -136,6 +136,58 @@ st.markdown(
 .tab-alert{border-radius:12px;padding:14px 16px;margin-bottom:16px;line-height:1.55;font-size:12px;}.tab-positive{background:#f4fbf6;border:1px solid #bde5c9;color:#147a3d}.tab-danger{background:#fff6f6;border:1px solid #f2c5c8;color:#b4232f}
 @media (max-width:900px){.decision-stats,.status-grid{grid-template-columns:repeat(2,1fr)}.option-grid{grid-template-columns:repeat(2,1fr)}.sr-map{grid-template-columns:1fr}.sr-line{padding:15px;border-top:1px dashed #dfe3e8;border-bottom:1px dashed #dfe3e8}.topbar-dashboard{align-items:flex-start}.header-live{display:none}}
 @media (max-width:600px){.block-container{padding-left:.7rem;padding-right:.7rem}.decision-main{font-size:25px}.check-row{grid-template-columns:1fr .9fr}.check-row small{grid-column:1 / -1}.metric-card,.entry-card{min-height:95px}.option-grid{grid-template-columns:repeat(2,1fr)}}
+
+/* ============================================================
+   COLOR CLARITY UPGRADE — UI ONLY
+   ============================================================ */
+.stApp { background:linear-gradient(180deg,#f3f7fb 0%,#eef3f8 100%); }
+.topbar-dashboard { background:linear-gradient(105deg,#0b1f3a 0%,#123f67 55%,#176b87 100%); box-shadow:0 8px 24px rgba(11,31,58,.16); }
+.section-heading { color:#12395b; border-left:5px solid #1f8a9e; padding-left:10px; }
+.metric-card { position:relative; overflow:hidden; border-top:4px solid #5b8def; background:linear-gradient(180deg,#ffffff,#f8fbff); }
+.metric-card:nth-child(1) { border-top-color:#2563eb; }
+.metric-card:nth-child(2) { border-top-color:#7c3aed; }
+.metric-card:nth-child(3) { border-top-color:#0891b2; }
+.metric-card:nth-child(4) { border-top-color:#16a34a; }
+.metric-card:nth-child(5) { border-top-color:#dc2626; }
+.metric-card:nth-child(6) { border-top-color:#f59e0b; }
+.metric-card span { color:#52657a; }
+.metric-card b { color:#102a43; }
+.decision-card { border:2px solid #cbd5e1; box-shadow:0 8px 24px rgba(16,42,67,.08); }
+.decision-call { background:linear-gradient(135deg,#ecfdf3,#f8fffb); border-color:#4ade80; }
+.decision-call .decision-main { color:#087f3e; }
+.decision-put { background:linear-gradient(135deg,#fff1f2,#fffafb); border-color:#fb7185; }
+.decision-put .decision-main { color:#c81e3a; }
+.decision-neutral { background:linear-gradient(135deg,#f8fafc,#eef2f7); border-color:#94a3b8; }
+.decision-neutral .decision-main { color:#475569; }
+.decision-stats>div { background:#fff; box-shadow:0 2px 8px rgba(15,23,42,.05); }
+.decision-stats>div:nth-child(1) { border-top:3px solid #2563eb; }
+.decision-stats>div:nth-child(2) { border-top:3px solid #16a34a; }
+.decision-stats>div:nth-child(3) { border-top:3px solid #f59e0b; }
+.decision-stats>div:nth-child(4) { border-top:3px solid #8b5cf6; }
+.status-panel { box-shadow:0 5px 18px rgba(16,42,67,.06); }
+.status-green { background:#ecfdf3; border-color:#4ade80; }
+.status-yellow { background:#fffbeb; border-color:#fbbf24; }
+.status-red { background:#fff1f2; border-color:#fb7185; }
+.status-grey { background:#f1f5f9; border-color:#94a3b8; }
+.check-pass { color:#087f3e; font-weight:800; }
+.check-wait { color:#b45309; font-weight:800; }
+.check-fail { color:#c81e3a; font-weight:800; }
+.option-call { border-top:5px solid #16a34a; background:linear-gradient(180deg,#f0fdf4,#ffffff); }
+.option-put { border-top:5px solid #dc2626; background:linear-gradient(180deg,#fff1f2,#ffffff); }
+.option-selected { box-shadow:0 8px 22px rgba(15,23,42,.10); transform:translateY(-1px); }
+.selected-tag { background:#dcfce7; color:#087f3e; border:1px solid #86efac; }
+.option-readiness.status-green { background:#dcfce7; border:1px solid #86efac; }
+.option-readiness.status-yellow { background:#fef3c7; border:1px solid #fbbf24; }
+.option-readiness.status-red { background:#ffe4e6; border:1px solid #fb7185; }
+.option-readiness.status-grey { background:#e2e8f0; border:1px solid #94a3b8; }
+.option-grid>div { background:#f1f5f9; border:1px solid #e2e8f0; }
+.sr-resistance { background:linear-gradient(180deg,#fff1f2,#fff); }
+.sr-support { background:linear-gradient(180deg,#ecfdf3,#fff); }
+.current-marker { background:#e0f2fe; border-color:#7dd3fc; color:#075985; }
+.why-warning { background:#fffbeb; border-left:4px solid #f59e0b; }
+.exit-rule { background:#eff6ff; border-color:#bfdbfe; }
+.tab-positive { background:#ecfdf3; border-color:#86efac; }
+.tab-danger { background:#fff1f2; border-color:#fb7185; }
 </style>
 """,
     unsafe_allow_html=True,
