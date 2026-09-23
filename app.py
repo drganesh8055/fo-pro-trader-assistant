@@ -1266,6 +1266,20 @@ try:
         if not expiries:
             raise UpstoxError("No upcoming F&O expiry was returned by Upstox.")
         selected_expiry = expiries[0]
+        # Upstox provides lot_size at the option-contract level. Use the
+        # selected nearest expiry so the displayed lot size always matches
+        # the contracts being analyzed.
+        expiry_contracts = [
+            c for c in contracts
+            if str(c.get("expiry", "")) == selected_expiry
+            and str(c.get("instrument_type", "")).upper() in {"CE", "PE"}
+        ]
+        lot_sizes = [
+            safe_float(c.get("lot_size"))
+            for c in expiry_contracts
+            if np.isfinite(safe_float(c.get("lot_size"))) and safe_float(c.get("lot_size")) > 0
+        ]
+        lot_size = int(round(lot_sizes[0])) if lot_sizes else np.nan
         raw_chain = get_option_chain(underlying_key, selected_expiry)
         chain = normalize_chain(raw_chain)
         quote_data = get_quote(underlying_key)
@@ -1399,7 +1413,7 @@ st.markdown(
 <div class="topbar topbar-dashboard">
   <div><div class="topbar-title">📊 FO PRO Trader Assistant</div>
   <div class="topbar-sub">Simple 5-way F&O decision engine • Live Upstox market data</div></div>
-  <div class="{status_class}">{status_text}</div>
+  <div class="{status_class}">{status_text}<div style="font-size:10px;font-weight:600;opacity:.88;margin-top:4px;letter-spacing:.2px;">{now_ist.strftime('%d-%b-%Y %H:%M:%S IST')}</div></div>
 </div>
 """,
     unsafe_allow_html=True,
@@ -1413,7 +1427,7 @@ st.markdown(
 
 # Instrument snapshot
 st.markdown("<div class='section-heading'>MARKET SNAPSHOT</div>", unsafe_allow_html=True)
-cols = st.columns(6)
+cols = st.columns(7)
 snapshot = [
     ("SPOT", fmt_price(spot), f"{net_change:+.2f} ({change_pct:+.2f}%)"),
     ("EXPIRY", selected_expiry, "Nearest F&O expiry"),
@@ -1421,6 +1435,7 @@ snapshot = [
     ("SUPPORT", fmt_price(support), "Put OI zone"),
     ("RESISTANCE", fmt_price(resistance), "Call OI zone"),
     ("VWAP", fmt_price(tf5.get("vwap")), "5m VWAP"),
+    ("LOT SIZE", fmt_num(lot_size), "1 F&O lot"),
 ]
 for col, (title, value, note) in zip(cols, snapshot):
     with col:
