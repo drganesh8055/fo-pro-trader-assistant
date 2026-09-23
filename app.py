@@ -141,6 +141,74 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
+st.markdown("""<style>
+
+
+/* ============================================================
+   PREMIUM TRADING TERMINAL UI — VISUAL OVERRIDES ONLY
+   Analysis / API / scanner logic intentionally untouched.
+   ============================================================ */
+.stApp { background: #0b0f14 !important; color: #e8edf3; }
+[data-testid="stAppViewContainer"] { background: radial-gradient(circle at 50% -10%, #182331 0%, #0b0f14 42%, #080b0f 100%); }
+[data-testid="stHeader"] { background: rgba(8,11,15,.82) !important; }
+.block-container { max-width: 1450px !important; padding-top: 1.25rem !important; padding-bottom: 3rem !important; }
+[data-testid="stSidebar"] { background: linear-gradient(180deg,#0d131a 0%,#090d12 100%) !important; border-right: 1px solid #202a35; }
+[data-testid="stSidebar"] * { color: #dce4ec; }
+[data-testid="stSidebar"] .stButton > button { border:1px solid #2a3948; background:#111923; border-radius:10px; font-weight:700; }
+[data-testid="stSidebar"] .stButton > button:hover { border-color:#4d718e; background:#172330; }
+
+.fo-header, .topbar-dashboard { background: linear-gradient(135deg,rgba(20,31,43,.96),rgba(12,17,23,.96)) !important; border:1px solid #263442 !important; border-radius:18px !important; box-shadow:0 12px 40px rgba(0,0,0,.25); }
+.fo-header-title, .dashboard-title { letter-spacing:-.02em; }
+.section-heading { margin-top:1.25rem !important; margin-bottom:.65rem !important; font-size:14px !important; font-weight:800 !important; letter-spacing:.11em !important; color:#91a5b8 !important; }
+
+.metric-card, .entry-card, .check-card, .why-card, .sr-map, .option-card { background:linear-gradient(145deg,#121a23,#0e141b) !important; border:1px solid #263442 !important; border-radius:14px !important; box-shadow:0 8px 24px rgba(0,0,0,.18) !important; }
+.metric-card:hover, .entry-card:hover, .option-card:hover { border-color:#3a5063 !important; transform:translateY(-1px); transition:.18s ease; }
+.metric-label, .metric-card span, .entry-card span { color:#8396a8 !important; }
+.metric-value, .entry-card b { color:#f3f6f9 !important; }
+
+/* Make the decision the visual focal point */
+.decision-card, .trade-decision-card { background:linear-gradient(135deg,#111b25,#0d141b) !important; border:1px solid #34495b !important; border-radius:18px !important; box-shadow:0 14px 45px rgba(0,0,0,.30) !important; padding:22px !important; }
+.decision-main { font-size:34px !important; font-weight:900 !important; letter-spacing:-.025em; }
+.decision-sub { color:#8fa2b4 !important; }
+
+/* Native Streamlit trade plan */
+div[data-testid="stVerticalBlockBorderWrapper"] { border-color:#263442 !important; background:linear-gradient(145deg,#111922,#0c1218) !important; border-radius:16px !important; }
+div[data-testid="stMetric"] { background:#101820; border:1px solid #263442; border-radius:11px; padding:10px 12px; }
+[data-testid="stMetricLabel"] { color:#8194a6 !important; }
+[data-testid="stMetricValue"] { color:#f4f7fa !important; font-weight:800 !important; }
+
+/* Tabs */
+button[data-baseweb="tab"] { color:#8498aa !important; font-weight:700 !important; }
+button[data-baseweb="tab"][aria-selected="true"] { color:#eaf1f7 !important; }
+[role="tablist"] { border-bottom:1px solid #263442 !important; gap:8px; }
+
+/* Inputs */
+[data-baseweb="input"], [data-baseweb="select"] > div { background:#101820 !important; border-color:#2a3948 !important; border-radius:10px !important; }
+[data-baseweb="input"] input { color:#eef3f7 !important; }
+.stButton > button[kind="primary"] { background:linear-gradient(135deg,#1f6f55,#164b3d) !important; border:1px solid #34886c !important; box-shadow:0 6px 18px rgba(27,112,82,.20); font-weight:800; }
+.stButton > button[kind="primary"]:hover { background:linear-gradient(135deg,#278565,#1b5948) !important; }
+
+/* Dataframe */
+[data-testid="stDataFrame"] { border:1px solid #263442 !important; border-radius:12px; overflow:hidden; }
+
+/* Status badges */
+.header-live { background:#10251d !important; border:1px solid #245d48 !important; color:#65d6a8 !important; border-radius:999px !important; padding:7px 13px !important; font-weight:800 !important; }
+
+/* Streamlit alerts */
+[data-testid="stAlert"] { border-radius:12px !important; border:1px solid #2a3948 !important; background:#111922 !important; }
+
+/* Scrollbar */
+::-webkit-scrollbar { width:8px; height:8px; }
+::-webkit-scrollbar-track { background:#090d12; }
+::-webkit-scrollbar-thumb { background:#2b3947; border-radius:10px; }
+
+@media (max-width:900px){
+  .block-container{padding-left:.9rem !important;padding-right:.9rem !important;}
+  .decision-main{font-size:28px !important;}
+}
+
+</style>""", unsafe_allow_html=True)
+
 
 class UpstoxError(RuntimeError):
     pass
