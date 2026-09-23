@@ -1261,7 +1261,6 @@ try:
     with st.spinner(f"Analyzing live {symbol} data..."):
         underlying = search_underlying(symbol)
         underlying_key = underlying["instrument_key"]
-        analyzed_name = str(underlying.get("trading_symbol") or underlying.get("name") or symbol).strip()
         contracts = get_contracts(underlying_key)
         expiries = available_expiries(contracts)
         if not expiries:
@@ -1399,10 +1398,16 @@ st.markdown(
     f"""
 <div class="topbar topbar-dashboard">
   <div><div class="topbar-title">📊 FO PRO Trader Assistant</div>
-  <div class="topbar-sub">ANALYZING: <strong>{analyzed_name}</strong> • Simple 5-way F&O decision engine • Live Upstox market data</div></div>
+  <div class="topbar-sub">Simple 5-way F&O decision engine • Live Upstox market data</div></div>
   <div class="{status_class}">{status_text}</div>
 </div>
 """,
+    unsafe_allow_html=True,
+)
+
+# Stock / index name — displayed once, directly above the market snapshot
+st.markdown(
+    f"""<div style="font-size:24px;font-weight:900;color:#182230;margin:4px 0 10px 2px;">{symbol}</div>""",
     unsafe_allow_html=True,
 )
 
@@ -1548,6 +1553,6 @@ else:
     st.write("No option is currently selected for execution.")
 
 st.caption(
-    f"Live Upstox snapshot • {symbol} • Expiry {selected_expiry} • Updated {now_ist.strftime('%d-%b-%Y %H:%M:%S IST')}. "
+    f"Live Upstox snapshot • Expiry {selected_expiry} • Updated {now_ist.strftime('%d-%b-%Y %H:%M:%S IST')}. "
     "PoP is a model input from the Upstox option chain; it is not a guaranteed win probability. Option selling can carry substantial risk."
 )
