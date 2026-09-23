@@ -141,100 +141,6 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-st.markdown("""<style>
-/* ============================================================
-   SYSTEM / LIGHT UI — VISUAL ONLY
-   Keeps all analysis, API and scanner logic unchanged.
-   ============================================================ */
-:root{--bg:#f4f6f8;--surface:#ffffff;--surface2:#f8fafc;--ink:#182230;--muted:#667085;--line:#dfe5eb;--green:#147a3d;--red:#b4232f;--blue:#175cd3;}
-.stApp{background:var(--bg)!important;color:var(--ink)!important;}
-[data-testid="stAppViewContainer"]{background:#f4f6f8!important;}
-[data-testid="stHeader"]{background:rgba(244,246,248,.96)!important;}
-.block-container{max-width:1500px!important;padding:1rem 1.05rem 2.5rem!important;}
-[data-testid="stSidebar"]{background:#ffffff!important;border-right:1px solid #dfe5eb!important;}
-[data-testid="stSidebar"] *{color:#344054!important;}
-[data-testid="stSidebar"] .stButton>button{background:#f8fafc!important;border:1px solid #d0d5dd!important;color:#182230!important;border-radius:10px!important;font-weight:750!important;}
-[data-testid="stSidebar"] .stButton>button:hover{background:#eef4ff!important;border-color:#98b5e8!important;}
-[data-testid="stSidebar"] input,[data-testid="stSidebar"] select{background:#fff!important;color:#182230!important;}
-[data-testid="stSidebar"] hr{border-color:#eaecf0!important;}
-
-.fo-header,.topbar-dashboard{background:linear-gradient(135deg,#102a43,#1f4b73)!important;border:1px solid #163b5d!important;border-radius:16px!important;box-shadow:0 8px 24px rgba(16,42,67,.12)!important;color:#fff!important;}
-.fo-header-title,.dashboard-title{color:#fff!important;}
-.section-heading{color:#344054!important;font-size:15px!important;font-weight:850!important;letter-spacing:.09em!important;}
-.metric-card,.entry-card,.check-card,.why-card,.sr-map,.option-card{background:#fff!important;border:1px solid #e1e6eb!important;border-radius:14px!important;box-shadow:0 3px 12px rgba(16,42,67,.055)!important;}
-.metric-card:hover,.entry-card:hover,.option-card:hover{border-color:#b9c7d5!important;transform:translateY(-1px);transition:.18s ease;}
-.metric-card span,.entry-card span,.metric-label{color:#667085!important;}
-.metric-card b,.entry-card b,.sr-side b,.option-strike{color:#182230!important;white-space:normal!important;overflow:visible!important;text-overflow:clip!important;word-break:normal!important;overflow-wrap:anywhere!important;}
-.metric-card b,.entry-card b{font-size:19px!important;line-height:1.2!important;}
-
-.decision-card,.trade-decision-card{background:#fff!important;border:1px solid #dfe5eb!important;border-radius:16px!important;box-shadow:0 5px 18px rgba(16,42,67,.07)!important;}
-.decision-main{font-size:34px!important;font-weight:900!important;}
-.decision-sub{color:#667085!important;}
-.decision-stats>div{background:#f8fafc!important;border:1px solid #eaecf0!important;}
-
-.status-panel{background:#fff!important;border-color:#dfe5eb!important;}
-.status-grid>div{background:#f8fafc!important;border-color:#eaecf0!important;}
-.check-row{border-bottom-color:#eef0f2!important;}
-.check-row>span{color:#344054!important;}
-.check-row small{color:#667085!important;}
-
-.option-card{padding:17px!important;}
-.option-grid>div{background:#f8fafc!important;}
-.option-grid b{color:#182230!important;white-space:normal!important;overflow:visible!important;text-overflow:clip!important;}
-.option-readiness{border:1px solid #e4e7ec!important;}
-.exit-rule{background:#f8fafc!important;border-color:#e1e6eb!important;}
-.why-item{color:#344054!important;}
-
-/* OI map */
-.sr-map{overflow:visible!important;}
-.sr-line{background:#fff!important;}
-.current-marker{color:#182230!important;background:#f2f4f7!important;}
-
-/* Native Streamlit containers / metrics: never clip numeric values. */
-div[data-testid="stVerticalBlockBorderWrapper"]{background:#fff!important;border-color:#dfe5eb!important;border-radius:15px!important;}
-div[data-testid="stMetric"]{background:#fff!important;border:1px solid #e1e6eb!important;border-radius:11px!important;padding:10px 12px!important;min-width:0!important;overflow:visible!important;}
-[data-testid="stMetricLabel"]{color:#667085!important;white-space:normal!important;overflow:visible!important;text-overflow:clip!important;}
-[data-testid="stMetricValue"]{color:#182230!important;font-weight:800!important;white-space:normal!important;overflow:visible!important;text-overflow:clip!important;word-break:normal!important;overflow-wrap:anywhere!important;font-size:clamp(15px,1.55vw,22px)!important;line-height:1.2!important;}
-[data-testid="stMetricValue"] div{white-space:normal!important;overflow:visible!important;text-overflow:clip!important;}
-
-/* Dataframes: allow full cell content and prevent ellipsis. */
-[data-testid="stDataFrame"]{border:1px solid #dfe5eb!important;border-radius:12px!important;overflow:visible!important;background:#fff!important;}
-[data-testid="stDataFrame"] *{text-overflow:clip!important;}
-
-/* Inputs */
-[data-baseweb="input"],[data-baseweb="select"]>div{background:#fff!important;border-color:#d0d5dd!important;border-radius:10px!important;}
-[data-baseweb="input"] input{color:#182230!important;}
-.stButton>button[kind="primary"]{background:#175cd3!important;border:1px solid #175cd3!important;color:#fff!important;border-radius:10px!important;font-weight:800!important;}
-.stButton>button[kind="primary"]:hover{background:#124bb5!important;}
-
-/* Tabs and alerts */
-button[data-baseweb="tab"]{color:#667085!important;font-weight:700!important;}
-button[data-baseweb="tab"][aria-selected="true"]{color:#175cd3!important;}
-[role="tablist"]{border-bottom:1px solid #dfe5eb!important;}
-[data-testid="stAlert"]{border-radius:12px!important;}
-
-/* Prevent clipping of all dashboard text/numbers. */
-.stMarkdown,.stText,.stCaption,p,span,b,strong,div{max-width:100%;}
-.hero-price{font-size:29px!important;font-weight:850!important;color:#182230!important;white-space:normal!important;overflow:visible!important;text-overflow:clip!important;}
-.header-live,.live-block,.closed-block{white-space:normal!important;overflow:visible!important;}
-
-@media(max-width:1100px){
- .decision-stats{grid-template-columns:repeat(2,1fr)!important;}
- .option-grid{grid-template-columns:repeat(2,1fr)!important;}
- .status-grid{grid-template-columns:repeat(2,1fr)!important;}
-}
-@media(max-width:700px){
- .block-container{padding-left:.7rem!important;padding-right:.7rem!important;}
- .decision-main{font-size:27px!important;}
- .decision-stats,.status-grid,.option-grid{grid-template-columns:1fr 1fr!important;}
- .metric-card,.entry-card{min-height:92px!important;}
- [data-testid="stMetricValue"]{font-size:16px!important;}
-}
-@media(max-width:480px){
- .decision-stats,.status-grid,.option-grid{grid-template-columns:1fr!important;}
-}
-</style>""", unsafe_allow_html=True)
-
 
 class UpstoxError(RuntimeError):
     pass
@@ -344,7 +250,7 @@ def fmt_price(value):
         return "—"
     if np.isnan(x):
         return "—"
-    return f"₹{x:,.2f}"
+    return f"₹{x:,.2f}" if abs(x) < 1000 else f"₹{x:,.0f}"
 
 
 def fmt_num(value):
@@ -1611,37 +1517,17 @@ def _actionable(plan, score, side):
     )
 
 def _wait_candidate(plan, score, side):
-    """Identify a genuine developing setup without forcing PoP to be a hard
-    blocker.
-
-    PoP remains important for executable trades, but a lower PoP should not
-    turn a strongly aligned underlying setup into NO TRADE before the price
-    trigger is reached. This separates setup direction/quality from entry
-    timing and option-selection quality.
-    """
-    if not plan or score < 65 or _severe_reasons(plan):
+    if not plan or score < 58 or _severe_reasons(plan):
         return False
-
     desired_direction = "Bullish" if side == "CE" else "Bearish"
-    opposite = "Bearish" if side == "CE" else "Bullish"
-
-    # A developing candidate needs meaningful directional confluence.
-    # The 5m timeframe must not directly oppose the candidate and at least
-    # two timeframes should agree with the direction.
-    direction_ok = (
-        overall_direction == desired_direction
-        and plan.get("alignment", 0) >= 2
-        and tf5.get("trend") != opposite
+    # At least one timeframe must support the direction; the 5m timeframe
+    # must not be directly opposite. This prevents random WAIT signals.
+    return (
+        plan.get("alignment", 0) >= 1
+        and tf5.get("trend") != ("Bearish" if side == "CE" else "Bullish")
+        and (overall_direction in {desired_direction, "Mixed"} or plan.get("alignment", 0) >= 2)
+        and plan.get("pop_ok", False)
     )
-
-    if not direction_ok:
-        return False
-
-    # Very low PoP is still treated as poor option quality. It is displayed
-    # as a warning/reference condition rather than silently converting a
-    # strong underlying setup into NO TRADE.
-    pop = safe_float(plan.get("pop"))
-    return np.isfinite(pop) and pop >= 35
 
 ce_actionable = _actionable(ce_plan, ce_score, "CE")
 pe_actionable = _actionable(pe_plan, pe_score, "PE")
@@ -2056,8 +1942,8 @@ st.markdown(
 )
 
 # ---------- Tabs ----------
-tab1, tab2, tab3, tab4 = st.tabs([
-    "🏆 Best Trade", "🔎 Live Option Chain", "📊 Market Analysis", "🧠 How Engine Thinks"
+tab1, tab2, tab3 = st.tabs([
+    "🏆 Best Trade", "🔎 Live Option Chain", "📊 Market Analysis"
 ])
 
 with tab1:
@@ -2068,13 +1954,6 @@ with tab1:
     elif best_plan:
         tab_icon = "🟢" if best_plan["side"] == "CE" else "🔴"
         st.markdown(f"<div class='tab-alert tab-positive'><b>{tab_icon} {decision}</b><br>Strike {best_plan['strike']:.0f} • Entry {fmt_price(best_plan['entry'])} • SL {fmt_price(best_plan['sl'])} • T1 {fmt_price(best_plan['target1'])} • T2 {fmt_price(best_plan['target2'])}</div>", unsafe_allow_html=True)
-
-    st.markdown("### Engine Summary")
-    summary_cols = st.columns(4)
-    summary_cols[0].metric("CALL SCORE", f"{ce_score:.0f}/100")
-    summary_cols[1].metric("PUT SCORE", f"{pe_score:.0f}/100")
-    summary_cols[2].metric("ALIGNMENT", f"{overall_alignment}/3")
-    summary_cols[3].metric("CHECKLIST", f"{check_overall}/5")
 
 with tab2:
     st.markdown(f"### Live Option Chain — {selected_expiry}")
@@ -2142,53 +2021,6 @@ with tab3:
     if not candles.empty:
         chart = candles.set_index("timestamp")[["close"]].tail(80)
         st.line_chart(chart, use_container_width=True)
-
-with tab4:
-    st.markdown("### Live-data decision framework")
-    st.markdown("""
-**1. Market direction**
-- Live spot
-- 5-minute + 30-minute + Daily trend alignment
-- EMA20 / EMA50
-- RSI
-- ADX / momentum
-- Intraday VWAP where volume is available
-
-**2. Option-chain structure**
-- Put OI / Change in OI
-- Call OI / Change in OI
-- PCR
-- OI-derived support and resistance
-
-**3. Option quality**
-- LTP
-- Bid / Ask
-- Volume
-- IV
-- Delta
-- Upstox PoP
-
-**4. Trade plan**
-- Entry trigger
-- Entry price
-- Stop Loss
-- Target 1
-- Target 2
-- Exit / invalidation rule
-- Risk / Reward
-
-**5. Quality gate**
-- Minimum setup score: 72/100
-- At least 2 of 3 timeframes must agree
-- VWAP must confirm the intraday direction
-- Short-term trend conflict blocks the trade
-- Delta, OI, tiered liquidity and bid/ask spread are checked
-- Upstox PoP must be at least 55%
-- The underlying breakout requires 5m trend/momentum confirmation
-- A close OI wall can block a setup even when PoP is high
-- The engine can return **WAIT FOR TRIGGER**, **WAIT FOR CONFIRMATION** or **NO TRADE**
-- The score is a rule-based quality measure, not a backtested win rate or guarantee of profit.
-""")
 
 st.divider()
 
