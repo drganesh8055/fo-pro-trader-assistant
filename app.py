@@ -448,37 +448,33 @@ def _rsi(close, period=14):
 
 
 def technicals(df, spot):
-    """Trend/volatility features for one timeframe."""
+    """Trend, volatility, candle-quality and entry-timing features for one timeframe."""
     if df.empty or len(df) < 20:
         return {
             "rsi": 50.0, "ema20": spot, "ema50": spot, "atr": spot * 0.01,
             "trend": "Unavailable", "adx": 0.0, "momentum": 0.0,
-            "volume_ratio": 1.0, "vwap": spot
+            "volume_ratio": 1.0, "vwap": spot, "recent_high": spot,
+            "recent_low": spot, "body_strength": 0.0, "close_location": 0.5,
+            "breakout_up": False, "breakout_down": False, "volatility_pct": 1.0,
         }
 
     close = df["close"].astype(float)
     high = df["high"].astype(float)
     low = df["low"].astype(float)
+    open_ = df["open"].astype(float)
     volume = df["volume"].fillna(0).astype(float)
 
     rsi = _rsi(close)
     ema20 = close.ewm(span=20, adjust=False).mean()
     ema50 = close.ewm(span=50, adjust=False).mean()
-
     prev_close = close.shift(1)
-    tr = pd.concat(
-        [(high-low), (high-prev_close).abs(), (low-prev_close).abs()], axis=1
-    ).max(axis=1)
+    tr = pd.concat([(high-low), (high-prev_close).abs(), (low-prev_close).abs()], axis=1).max(axis=1)
     atr = tr.ewm(alpha=1/14, adjust=False).mean()
 
     up_move = high.diff()
     down_move = -low.diff()
-    plus_dm = pd.Series(
-        np.where((up_move > down_move) & (up_move > 0), up_move, 0.0), index=df.index
-    )
-    minus_dm = pd.Series(
-        np.where((down_move > up_move) & (down_move > 0), down_move, 0.0), index=df.index
-    )
+    plus_dm = pd.Series(np.where((up_move > down_move) & (up_move > 0), up_move, 0.0), index=df.index)
+    minus_dm = pd.Series(np.where((down_move > up_move) & (down_move > 0), down_move, 0.0), index=df.index)
     atr_safe = atr.replace(0, np.nan)
     plus_di = 100 * plus_dm.ewm(alpha=1/14, adjust=False).mean() / atr_safe
     minus_di = 100 * minus_dm.ewm(alpha=1/14, adjust=False).mean() / atr_safe
@@ -493,10 +489,7 @@ def technicals(df, spot):
         latest_vwap = spot
 
     lookback = min(10, len(close)-1)
-    momentum = (
-        (close.iloc[-1] / close.iloc[-1-lookback] - 1) * 100
-        if lookback > 0 and close.iloc[-1-lookback] else 0.0
-    )
+    momentum = ((close.iloc[-1] / close.iloc[-1-lookback] - 1) * 100) if lookback > 0 and close.iloc[-1-lookback] else 0.0
     vol_base = volume.rolling(20).median().iloc[-1]
     volume_ratio = volume.iloc[-1] / vol_base if vol_base and np.isfinite(vol_base) else 1.0
 
@@ -508,18 +501,29 @@ def technicals(df, spot):
 
     bullish = spot > e20 > e50
     bearish = spot < e20 < e50
+    if bullish: trend = "Bullish"
+    elif bearish: trend = "Bearish"
+    else: trend = "Sideways"
 
-    if bullish:
-        trend = "Bullish"
-    elif bearish:
-        trend = "Bearish"
-    else:
-        trend = "Sideways"
+    recent_high = safe_float(high.iloc[-11:-1].max(), spot) if len(high) > 11 else spot
+    recent_low = safe_float(low.iloc[-11:-1].min(), spot) if len(low) > 11 else spot
+    last_range = max(safe_float(high.iloc[-1]) - safe_float(low.iloc[-1]), 0.0)
+    last_body = abs(safe_float(close.iloc[-1]) - safe_float(open_.iloc[-1]))
+    body_strength = last_body / max(last_range, a * 0.10, 0.0001)
+    close_location = (safe_float(close.iloc[-1]) - safe_float(low.iloc[-1])) / max(last_range, 0.0001)
+    breakout_up = bool(close.iloc[-1] > recent_high + max(a * 0.05, spot * 0.0005))
+    breakout_down = bool(close.iloc[-1] < recent_low - max(a * 0.05, spot * 0.0005))
+    volatility_pct = a / max(spot, 1) * 100
 
     return {
         "rsi": r, "ema20": e20, "ema50": e50, "atr": max(a, spot*0.001),
         "trend": trend, "adx": adx_v, "momentum": momentum,
-        "volume_ratio": volume_ratio, "vwap": latest_vwap
+        "volume_ratio": volume_ratio, "vwap": latest_vwap,
+        "recent_high": recent_high, "recent_low": recent_low,
+        "body_strength": float(np.clip(body_strength, 0, 1.5)),
+        "close_location": float(np.clip(close_location, 0, 1)),
+        "breakout_up": breakout_up, "breakout_down": breakout_down,
+        "volatility_pct": volatility_pct,
     }
 
 
@@ -619,14 +623,12 @@ def nearest_row(chain, strike):
 
 
 def normalize_chain(rows):
+    """Normalize the Upstox option chain while preserving all useful Greeks/depth."""
     records = []
-
     for item in rows:
         strike = safe_float(item.get("strike_price"))
-
         call = item.get("call_options") or {}
         put = item.get("put_options") or {}
-
         call_market = call.get("market_data") or {}
         call_greeks = call.get("option_greeks") or {}
         put_market = put.get("market_data") or {}
@@ -634,598 +636,650 @@ def normalize_chain(rows):
 
         call_oi = safe_float(call_market.get("oi"), 0)
         put_oi = safe_float(put_market.get("oi"), 0)
-
         call_prev_oi = safe_float(call_market.get("prev_oi"), 0)
         put_prev_oi = safe_float(put_market.get("prev_oi"), 0)
 
-        records.append(
-            {
-                "Strike": strike,
-                "CE Key": call.get("instrument_key"),
-                "CE LTP": safe_float(call_market.get("ltp")),
-                "CE Bid": safe_float(call_market.get("bid_price")),
-                "CE Ask": safe_float(call_market.get("ask_price")),
-                "CE OI": call_oi,
-                "CE Chg OI": call_oi - call_prev_oi,
-                "CE Volume": safe_float(call_market.get("volume"), 0),
-                "CE IV": safe_float(call_greeks.get("iv")),
-                "CE Delta": safe_float(call_greeks.get("delta")),
-                "CE PoP": safe_float(call_greeks.get("pop")),
-                "PE Key": put.get("instrument_key"),
-                "PE LTP": safe_float(put_market.get("ltp")),
-                "PE Bid": safe_float(put_market.get("bid_price")),
-                "PE Ask": safe_float(put_market.get("ask_price")),
-                "PE OI": put_oi,
-                "PE Chg OI": put_oi - put_prev_oi,
-                "PE Volume": safe_float(put_market.get("volume"), 0),
-                "PE IV": safe_float(put_greeks.get("iv")),
-                "PE Delta": safe_float(put_greeks.get("delta")),
-                "PE PoP": safe_float(put_greeks.get("pop")),
-            }
-        )
-
+        records.append({
+            "Strike": strike,
+            "CE Key": call.get("instrument_key"),
+            "CE LTP": safe_float(call_market.get("ltp")),
+            "CE Bid": safe_float(call_market.get("bid_price")),
+            "CE Ask": safe_float(call_market.get("ask_price")),
+            "CE Bid Qty": safe_float(call_market.get("bid_qty"), 0),
+            "CE Ask Qty": safe_float(call_market.get("ask_qty"), 0),
+            "CE Prev Close": safe_float(call_market.get("close_price")),
+            "CE OI": call_oi,
+            "CE Chg OI": call_oi - call_prev_oi,
+            "CE Volume": safe_float(call_market.get("volume"), 0),
+            "CE IV": safe_float(call_greeks.get("iv")),
+            "CE Delta": safe_float(call_greeks.get("delta")),
+            "CE Gamma": safe_float(call_greeks.get("gamma")),
+            "CE Theta": safe_float(call_greeks.get("theta")),
+            "CE Vega": safe_float(call_greeks.get("vega")),
+            "CE PoP": safe_float(call_greeks.get("pop")),
+            "PE Key": put.get("instrument_key"),
+            "PE LTP": safe_float(put_market.get("ltp")),
+            "PE Bid": safe_float(put_market.get("bid_price")),
+            "PE Ask": safe_float(put_market.get("ask_price")),
+            "PE Bid Qty": safe_float(put_market.get("bid_qty"), 0),
+            "PE Ask Qty": safe_float(put_market.get("ask_qty"), 0),
+            "PE Prev Close": safe_float(put_market.get("close_price")),
+            "PE OI": put_oi,
+            "PE Chg OI": put_oi - put_prev_oi,
+            "PE Volume": safe_float(put_market.get("volume"), 0),
+            "PE IV": safe_float(put_greeks.get("iv")),
+            "PE Delta": safe_float(put_greeks.get("delta")),
+            "PE Gamma": safe_float(put_greeks.get("gamma")),
+            "PE Theta": safe_float(put_greeks.get("theta")),
+            "PE Vega": safe_float(put_greeks.get("vega")),
+            "PE PoP": safe_float(put_greeks.get("pop")),
+        })
+    if not records:
+        return pd.DataFrame()
     return pd.DataFrame(records).sort_values("Strike").reset_index(drop=True)
 
 
-def score_option(row, side, spot, pcr, tf5, tf30, daily, chain,
-                 support=None, resistance=None, oi_wall_info=None):
-    """100-point trade-quality engine.
+def _pct_distance(a, b):
+    a, b = safe_float(a), safe_float(b)
+    if not np.isfinite(a) or not np.isfinite(b) or b == 0:
+        return np.nan
+    return abs(a - b) / abs(b) * 100
 
-    This is a rule-based setup score, not a historical win probability.
-    It deliberately rewards confluence and penalizes poor liquidity, weak room,
-    VWAP conflict and expensive/poorly placed strikes.
-    """
-    if side == "CE":
-        premium = safe_float(row["CE LTP"])
-        delta = safe_float(row["CE Delta"])
-        iv = safe_float(row["CE IV"])
-        pop = safe_float(row["CE PoP"])
-        chg_oi = safe_float(row["CE Chg OI"], 0)
-        volume = safe_float(row["CE Volume"], 0)
-        oi = safe_float(row["CE OI"], 0)
-        bid = safe_float(row["CE Bid"])
-        ask = safe_float(row["CE Ask"])
+
+def market_regime(tf5, tf30, daily, spot):
+    """Classify the current environment without changing the visible UI."""
+    trends = [tf5.get("trend"), tf30.get("trend"), daily.get("trend")]
+    adx5 = safe_float(tf5.get("adx"), 0)
+    adx30 = safe_float(tf30.get("adx"), 0)
+    atr_pct = safe_float(tf5.get("atr"), spot * 0.01) / max(spot, 1) * 100
+    momentum = safe_float(tf5.get("momentum"), 0)
+    breakout_up = bool(tf5.get("breakout_up"))
+    breakout_down = bool(tf5.get("breakout_down"))
+
+    if breakout_up and momentum > 0:
+        regime = "BREAKOUT"
+    elif breakout_down and momentum < 0:
+        regime = "BREAKDOWN"
+    elif atr_pct >= 1.5 or adx5 >= 32:
+        regime = "HIGH VOLATILITY"
+    elif adx5 < 17 and adx30 < 20 and len(set([t for t in trends if t])) <= 2:
+        regime = "RANGE"
+    elif trends.count("Bullish") >= 2:
+        regime = "TRENDING UP"
+    elif trends.count("Bearish") >= 2:
+        regime = "TRENDING DOWN"
     else:
-        premium = safe_float(row["PE LTP"])
-        delta = safe_float(row["PE Delta"])
-        iv = safe_float(row["PE IV"])
-        pop = safe_float(row["PE PoP"])
-        chg_oi = safe_float(row["PE Chg OI"], 0)
-        volume = safe_float(row["PE Volume"], 0)
-        oi = safe_float(row["PE OI"], 0)
-        bid = safe_float(row["PE Bid"])
-        ask = safe_float(row["PE Ask"])
+        regime = "MIXED"
+    return regime
 
-    desired = "Bullish" if side == "CE" else "Bearish"
-    opposite = "Bearish" if side == "CE" else "Bullish"
 
-    # 30 points: multi-timeframe agreement.
-    tf_points, alignment = timeframe_score(side, tf5, tf30, daily)
+def oi_levels(chain, spot):
+    """Build support/resistance plus OI behaviour and wall strength."""
+    valid = chain.dropna(subset=["Strike"]).copy()
+    if valid.empty or not np.isfinite(spot):
+        return spot, spot, np.nan, {
+            "put_walls": [], "call_walls": [], "major_support": spot,
+            "major_resistance": spot, "nearest_support": spot,
+            "nearest_resistance": spot, "support_strength": 0,
+            "resistance_strength": 0, "ce_behavior": "Unknown", "pe_behavior": "Unknown",
+        }
 
-    # 15 points: momentum + trend strength.
-    tf = tf5
-    momentum_points = 0
-    if tf.get("trend") == desired:
-        momentum_points += 5
-    rsi = tf.get("rsi", 50)
-    if side == "CE":
-        if 52 <= rsi <= 68:
-            momentum_points += 3
-        elif 50 <= rsi < 52:
-            momentum_points += 1
-        if tf.get("momentum", 0) > 0:
-            momentum_points += 3
-    else:
-        if 32 <= rsi <= 48:
-            momentum_points += 3
-        elif 48 < rsi <= 50:
-            momentum_points += 1
-        if tf.get("momentum", 0) < 0:
-            momentum_points += 3
-    if tf.get("adx", 0) >= 25:
-        momentum_points += 4
-    elif tf.get("adx", 0) >= 20:
-        momentum_points += 2
-    momentum_points = min(momentum_points, 15)
+    band = valid[(valid["Strike"] >= spot * 0.90) & (valid["Strike"] <= spot * 1.10)].copy()
+    if band.empty:
+        band = valid.copy()
+    for c in ["PE OI", "CE OI", "PE Chg OI", "CE Chg OI", "PE LTP", "CE LTP"]:
+        band[c] = pd.to_numeric(band[c], errors="coerce").fillna(0)
 
-    # 10 points: VWAP confirmation. This was previously calculated but not
-    # actually used in the trade score.
-    vwap = safe_float(tf5.get("vwap"), spot)
-    vwap_points = 0
-    if np.isfinite(vwap) and vwap > 0:
-        vwap_gap_pct = (spot - vwap) / spot * 100
-        if side == "CE":
-            if spot > vwap and tf5.get("momentum", 0) > 0:
-                vwap_points = 10
-            elif spot > vwap:
-                vwap_points = 6
-            elif spot >= vwap * 0.997:
-                vwap_points = 2
-        else:
-            if spot < vwap and tf5.get("momentum", 0) < 0:
-                vwap_points = 10
-            elif spot < vwap:
-                vwap_points = 6
-            elif spot <= vwap * 1.003:
-                vwap_points = 2
-    else:
-        vwap_gap_pct = 0.0
+    below = band[band["Strike"] <= spot].copy()
+    above = band[band["Strike"] >= spot].copy()
+    nearest_support = float(below["Strike"].max()) if not below.empty else float(band["Strike"].min())
+    nearest_resistance = float(above["Strike"].min()) if not above.empty else float(band["Strike"].max())
 
-    # 10 points: PCR as secondary confirmation.
-    pcr_points = 0
-    if np.isfinite(pcr):
-        if side == "CE":
-            pcr_points = 10 if 0.90 <= pcr <= 1.35 else 5 if 0.80 <= pcr < 0.90 else 0
-        else:
-            pcr_points = 10 if 0.65 <= pcr <= 1.10 else 5 if 1.10 < pcr <= 1.25 else 0
+    support_row = below.loc[below["PE OI"].idxmax()] if not below.empty else band.loc[band["PE OI"].idxmax()]
+    resistance_row = above.loc[above["CE OI"].idxmax()] if not above.empty else band.loc[band["CE OI"].idxmax()]
+    major_support = float(support_row["Strike"])
+    major_resistance = float(resistance_row["Strike"])
 
-    # 5 points: option OI change direction. Small weight because the endpoint
-    # gives current-vs-previous OI, not a full intraday OI sequence.
-    oi_points = 0
-    if chg_oi < 0:
-        oi_points = 5
-    elif chg_oi == 0:
-        oi_points = 3
-    else:
-        oi_points = 1
+    total_call_oi = float(band["CE OI"].sum())
+    total_put_oi = float(band["PE OI"].sum())
+    pcr = total_put_oi / total_call_oi if total_call_oi > 0 else np.nan
 
-    # 20 points: option quality and liquidity.
-    quality = 0
-    abs_delta = abs(delta) if np.isfinite(delta) else np.nan
-    if np.isfinite(abs_delta):
-        if 0.45 <= abs_delta <= 0.65:
-            quality += 6
-        elif 0.40 <= abs_delta < 0.45 or 0.65 < abs_delta <= 0.75:
-            quality += 4
-        elif 0.35 <= abs_delta < 0.40 or 0.75 < abs_delta <= 0.80:
-            quality += 2
+    put_walls = band.nlargest(3, "PE OI")[["Strike", "PE OI", "PE Chg OI"]].to_dict("records")
+    call_walls = band.nlargest(3, "CE OI")[["Strike", "CE OI", "CE Chg OI"]].to_dict("records")
 
-    spread_pct = (
-        max(ask - bid, 0) / max((ask + bid) / 2, 0.01) * 100
-        if np.isfinite(ask) and np.isfinite(bid) and ask > 0 and bid > 0
-        else 999
-    )
-    if spread_pct <= 1.0:
-        quality += 5
-    elif spread_pct <= 2.0:
-        quality += 4
-    elif spread_pct <= 3.0:
-        quality += 2
+    # Relative wall strength prevents a tiny OI spike from being treated as a major barrier.
+    put_max = max(float(band["PE OI"].max()), 1.0)
+    call_max = max(float(band["CE OI"].max()), 1.0)
+    support_strength = float(np.clip(support_row["PE OI"] / put_max * 100, 0, 100))
+    resistance_strength = float(np.clip(resistance_row["CE OI"] / call_max * 100, 0, 100))
 
-    # Liquidity is tiered rather than treating any volume > 0 as equal.
-    if volume >= 10000:
-        quality += 5
-    elif volume >= 5000:
-        quality += 4
-    elif volume >= 1000:
-        quality += 2
+    # OI behaviour is directional context, not proof of writing/unwinding.
+    def behaviour(oi, chg, ltp, prev_oi):
+        if chg > 0 and ltp <= 0:
+            return "OI BUILDUP"
+        if chg > 0:
+            return "OI BUILDUP"
+        if chg < 0:
+            return "OI UNWINDING"
+        return "NEUTRAL"
 
-    if oi >= 10000:
-        quality += 4
-    elif oi >= 3000:
-        quality += 3
-    elif oi > 0:
-        quality += 1
+    ce_behavior = behaviour(resistance_row["CE OI"], resistance_row["CE Chg OI"], resistance_row.get("CE LTP", 0), 0)
+    pe_behavior = behaviour(support_row["PE OI"], support_row["PE Chg OI"], support_row.get("PE LTP", 0), 0)
 
-    # 10 points: strike placement + room to the OI barrier.
-    distance_pct = abs(float(row["Strike"]) - spot) / max(spot, 1) * 100
-    if distance_pct <= 1.0:
-        strike_points = 6
-    elif distance_pct <= 2.0:
-        strike_points = 5
-    elif distance_pct <= 3.0:
-        strike_points = 3
-    elif distance_pct <= 5.0:
-        strike_points = 1
-    else:
-        strike_points = 0
-
-    room_points = 0
-    room_pct = np.nan
-    if side == "CE" and np.isfinite(resistance):
-        room_pct = max((resistance - spot) / max(spot, 1) * 100, 0)
-        if spot >= resistance:
-            room_points = 4
-        elif room_pct >= 2.0:
-            room_points = 4
-        elif room_pct >= 1.0:
-            room_points = 2
-    elif side == "PE" and np.isfinite(support):
-        room_pct = max((spot - support) / max(spot, 1) * 100, 0)
-        if spot <= support:
-            room_points = 4
-        elif room_pct >= 2.0:
-            room_points = 4
-        elif room_pct >= 1.0:
-            room_points = 2
-
-    strike_quality = strike_points + room_points
-
-    # 10 points: PoP is useful but capped so it cannot dominate direction.
-    pop_points = float(np.clip((pop - 55) / 3.0, 0, 10)) if np.isfinite(pop) else 0
-
-    # Total: 30 + 15 + 10 + 10 + 5 + 20 + 10 + 10 = 110.
-    raw_score = (
-        tf_points + momentum_points + vwap_points + pcr_points + oi_points +
-        quality + strike_quality + pop_points
-    )
-    score = float(np.clip(raw_score / 110 * 100, 0, 100))
-
-    return {
-        "score": score,
-        "premium": premium,
-        "delta": delta,
-        "iv": iv,
-        "pop": pop,
-        "chg_oi": chg_oi,
-        "volume": volume,
-        "oi": oi,
-        "spread_pct": spread_pct,
-        "alignment": alignment,
-        "distance_pct": distance_pct,
-        "quality": quality,
-        "vwap": vwap,
-        "vwap_gap_pct": vwap_gap_pct,
-        "room_pct": room_pct,
-        "strike_quality": strike_quality,
+    return major_support, major_resistance, pcr, {
+        "put_walls": put_walls, "call_walls": call_walls,
+        "major_support": major_support, "major_resistance": major_resistance,
+        "nearest_support": nearest_support, "nearest_resistance": nearest_resistance,
+        "support_room_pct": max((spot - major_support) / max(spot, 1) * 100, 0),
+        "resistance_room_pct": max((major_resistance - spot) / max(spot, 1) * 100, 0),
+        "support_strength": support_strength, "resistance_strength": resistance_strength,
+        "ce_behavior": ce_behavior, "pe_behavior": pe_behavior,
+        "support_chg_oi": safe_float(support_row.get("PE Chg OI"), 0),
+        "resistance_chg_oi": safe_float(resistance_row.get("CE Chg OI"), 0),
     }
 
 
+def nearest_row(chain, strike):
+    if chain.empty or not np.isfinite(strike):
+        return None
+    index = (chain["Strike"] - strike).abs().idxmin()
+    return chain.loc[index]
+
+
+
+def oi_price_behavior(row, prefix):
+    """Classify price/OI interaction using the current option snapshot.
+
+    The labels are context only. Because prev_oi/close_price are session-reference
+    fields, they are not treated as proof of intraday institutional activity.
+    """
+    ltp = safe_float(row.get(f"{prefix} LTP"))
+    prev_close = safe_float(row.get(f"{prefix} Prev Close"))
+    chg_oi = safe_float(row.get(f"{prefix} Chg OI"), 0)
+    if not np.isfinite(ltp) or not np.isfinite(prev_close) or prev_close <= 0:
+        return "UNKNOWN"
+    price_up = ltp > prev_close * 1.002
+    price_down = ltp < prev_close * 0.998
+    if price_up and chg_oi > 0: return "LONG BUILDUP"
+    if price_down and chg_oi > 0: return "SHORT BUILDUP"
+    if price_up and chg_oi < 0: return "SHORT COVERING"
+    if price_down and chg_oi < 0: return "LONG UNWINDING"
+    return "NEUTRAL"
+
+def score_option(row, side, spot, pcr, tf5, tf30, daily, chain,
+                 support=None, resistance=None, oi_wall_info=None, regime="MIXED"):
+    """Confluence score. It is a quality score, never a claimed win rate."""
+    prefix = "CE" if side == "CE" else "PE"
+    premium = safe_float(row[f"{prefix} LTP"])
+    delta = safe_float(row[f"{prefix} Delta"])
+    iv = safe_float(row[f"{prefix} IV"])
+    gamma = safe_float(row[f"{prefix} Gamma"])
+    theta = safe_float(row[f"{prefix} Theta"])
+    vega = safe_float(row[f"{prefix} Vega"])
+    pop = safe_float(row[f"{prefix} PoP"])
+    chg_oi = safe_float(row[f"{prefix} Chg OI"], 0)
+    oi_behavior = oi_price_behavior(row, prefix)
+    volume = safe_float(row[f"{prefix} Volume"], 0)
+    oi = safe_float(row[f"{prefix} OI"], 0)
+    bid = safe_float(row[f"{prefix} Bid"])
+    ask = safe_float(row[f"{prefix} Ask"])
+    bid_qty = safe_float(row[f"{prefix} Bid Qty"], 0)
+    ask_qty = safe_float(row[f"{prefix} Ask Qty"], 0)
+
+    desired = "Bullish" if side == "CE" else "Bearish"
+    opposite = "Bearish" if side == "CE" else "Bullish"
+    tf_points, alignment = timeframe_score(side, tf5, tf30, daily)
+
+    # 10 momentum points.
+    momentum = safe_float(tf5.get("momentum"), 0)
+    rsi = safe_float(tf5.get("rsi"), 50)
+    momentum_points = 0
+    if tf5.get("trend") == desired:
+        momentum_points += 3
+    if side == "CE":
+        if 52 <= rsi <= 68: momentum_points += 3
+        if momentum > 0: momentum_points += 2
+    else:
+        if 32 <= rsi <= 48: momentum_points += 3
+        if momentum < 0: momentum_points += 2
+    if safe_float(tf5.get("adx"), 0) >= 25: momentum_points += 2
+    momentum_points = min(momentum_points, 10)
+
+    # 10 VWAP points.
+    vwap = safe_float(tf5.get("vwap"), spot)
+    vwap_gap_pct = (spot - vwap) / max(spot, 1) * 100 if np.isfinite(vwap) else 0
+    vwap_points = 0
+    if side == "CE":
+        if spot > vwap and momentum > 0: vwap_points = 10
+        elif spot > vwap: vwap_points = 6
+        elif spot >= vwap * 0.998: vwap_points = 2
+    else:
+        if spot < vwap and momentum < 0: vwap_points = 10
+        elif spot < vwap: vwap_points = 6
+        elif spot <= vwap * 1.002: vwap_points = 2
+
+    # 10 market-regime points.
+    regime_points = 0
+    if side == "CE" and regime in {"TRENDING UP", "BREAKOUT"}: regime_points = 10
+    elif side == "PE" and regime in {"TRENDING DOWN", "BREAKDOWN"}: regime_points = 10
+    elif regime == "HIGH VOLATILITY": regime_points = 5
+    elif regime == "RANGE": regime_points = 2
+
+    # 15 OI structure points: wall strength + change in OI + direction.
+    oi_points = 0
+    wall_room = np.nan
+    if oi_wall_info:
+        if side == "CE":
+            wall_room = (resistance - spot) / max(spot, 1) * 100
+            wall_strength = safe_float(oi_wall_info.get("resistance_strength"), 0)
+            wall_chg = safe_float(oi_wall_info.get("resistance_chg_oi"), 0)
+            if wall_strength >= 70: oi_points += 5
+            elif wall_strength >= 40: oi_points += 3
+            if wall_chg > 0: oi_points += 5
+            elif wall_chg < 0: oi_points += 2
+        else:
+            wall_room = (spot - support) / max(spot, 1) * 100
+            wall_strength = safe_float(oi_wall_info.get("support_strength"), 0)
+            wall_chg = safe_float(oi_wall_info.get("support_chg_oi"), 0)
+            if wall_strength >= 70: oi_points += 5
+            elif wall_strength >= 40: oi_points += 3
+            if wall_chg > 0: oi_points += 5
+            elif wall_chg < 0: oi_points += 2
+    if chg_oi < 0:
+        oi_points = max(0, oi_points - 2)
+    if oi_behavior in {"LONG BUILDUP", "SHORT BUILDUP"}:
+        oi_points = min(15, oi_points + 2)
+    elif oi_behavior in {"SHORT COVERING", "LONG UNWINDING"}:
+        oi_points = max(0, oi_points - 1)
+    oi_points = min(oi_points, 15)
+
+    # 15 option quality/liquidity points.
+    abs_delta = abs(delta) if np.isfinite(delta) else np.nan
+    quality = 0
+    if np.isfinite(abs_delta):
+        if 0.45 <= abs_delta <= 0.65: quality += 5
+        elif 0.35 <= abs_delta <= 0.75: quality += 3
+        elif 0.30 <= abs_delta <= 0.80: quality += 1
+    spread_pct = (
+        max(ask - bid, 0) / max((ask + bid) / 2, 0.01) * 100
+        if np.isfinite(ask) and np.isfinite(bid) and ask > 0 and bid > 0 else 999
+    )
+    if spread_pct <= 1: quality += 3
+    elif spread_pct <= 2: quality += 2
+    elif spread_pct <= 3: quality += 1
+    if volume >= 10000: quality += 3
+    elif volume >= 3000: quality += 2
+    elif volume >= 1000: quality += 1
+    if oi >= 10000: quality += 2
+    elif oi >= 3000: quality += 1
+    depth_ratio = min(bid_qty, ask_qty) / max(max(bid_qty, ask_qty), 1)
+    if depth_ratio >= 0.50: quality += 2
+    elif depth_ratio >= 0.25: quality += 1
+    quality = min(quality, 15)
+
+    # 10 room/strike points.
+    distance_pct = abs(float(row["Strike"]) - spot) / max(spot, 1) * 100
+    strike_points = 5 if distance_pct <= 1 else 4 if distance_pct <= 2 else 2 if distance_pct <= 3 else 0
+    room_points = 0
+    if np.isfinite(wall_room):
+        if wall_room >= 2: room_points = 5
+        elif wall_room >= 1: room_points = 3
+        elif wall_room >= 0.5: room_points = 1
+    room_quality = strike_points + room_points
+
+    # 5 PoP points only: PoP informs selection but cannot dominate the signal.
+    pop_points = float(np.clip((pop - 55) / 3.0, 0, 5)) if np.isfinite(pop) else 0
+
+    # Greek context: theta/IV penalty for buys when decay/volatility is extreme.
+    greek_adjust = 0.0
+    if np.isfinite(iv):
+        if iv >= 80: greek_adjust -= 3
+        elif iv >= 60: greek_adjust -= 1
+    if np.isfinite(theta) and np.isfinite(premium) and premium > 0:
+        theta_pct = abs(theta) / premium
+        if theta_pct > 0.15: greek_adjust -= 2
+        elif theta_pct > 0.08: greek_adjust -= 1
+    if np.isfinite(gamma) and gamma > 0: greek_adjust += 0.5
+    if np.isfinite(vega) and vega > 0 and np.isfinite(iv) and iv < 40: greek_adjust += 0.5
+
+    conflict_penalty = 0
+    if tf5.get("trend") == opposite: conflict_penalty += 8
+    if tf30.get("trend") == opposite and daily.get("trend") == opposite: conflict_penalty += 5
+    if side == "CE" and spot < vwap * 0.997: conflict_penalty += 4
+    if side == "PE" and spot > vwap * 1.003: conflict_penalty += 4
+
+    raw = tf_points + momentum_points + vwap_points + regime_points + oi_points + quality + room_quality + pop_points + greek_adjust - conflict_penalty
+    score = float(np.clip(raw, 0, 100))
+
+    return {
+        "score": score, "premium": premium, "delta": delta, "iv": iv,
+        "gamma": gamma, "theta": theta, "vega": vega, "pop": pop,
+        "chg_oi": chg_oi, "oi_behavior": oi_behavior, "volume": volume, "oi": oi,
+        "bid_qty": bid_qty, "ask_qty": ask_qty, "depth_ratio": depth_ratio,
+        "spread_pct": spread_pct, "alignment": alignment, "distance_pct": distance_pct,
+        "quality": quality, "vwap": vwap, "vwap_gap_pct": vwap_gap_pct,
+        "room_pct": wall_room, "regime_points": regime_points,
+        "greek_adjust": greek_adjust, "conflict_penalty": conflict_penalty,
+    }
+
+
+def adaptive_buy_levels(entry, side, spot, support, resistance, tf5, delta, iv, risk_profile):
+    """Derive option levels from underlying ATR + Delta instead of fixed premium multiples."""
+    atr = max(safe_float(tf5.get("atr"), spot * 0.01), spot * 0.001)
+    abs_delta = max(abs(safe_float(delta, 0.50)), 0.25)
+    risk_mult = {"Conservative": 0.55, "Balanced": 0.70, "Aggressive": 0.85}.get(risk_profile, 0.70)
+    underlying_risk = atr * risk_mult
+    # First-order premium sensitivity. Add a modest volatility cushion when IV is high.
+    iv_factor = 1.0 + max(min((safe_float(iv, 20) - 25) / 200, 0.25), -0.05)
+    premium_risk = max(entry * 0.12, underlying_risk * abs_delta * iv_factor)
+    sl = max(entry - premium_risk, entry * 0.55)
+
+    t1_risk = premium_risk * {"Conservative": 1.15, "Balanced": 1.30, "Aggressive": 1.45}.get(risk_profile, 1.30)
+    t2_risk = premium_risk * {"Conservative": 1.70, "Balanced": 2.00, "Aggressive": 2.30}.get(risk_profile, 2.00)
+    target1 = entry + t1_risk
+    target2 = entry + t2_risk
+
+    # Do not advertise an impossible target if the underlying barrier is extremely close.
+    barrier = resistance if side == "CE" else support
+    room = max((barrier - spot) if side == "CE" else (spot - barrier), 0)
+    if room > 0 and room < atr * 0.80:
+        target2 = min(target2, entry + premium_risk * 1.55)
+    if target2 <= target1:
+        target2 = target1 + max(entry * 0.08, premium_risk * 0.35)
+
+    return round(sl, 2), round(target1, 2), round(target2, 2)
+
+
 def build_plan(row, side, spot, support, resistance, pcr, tf5, tf30, daily,
-               risk_profile, chain, oi_wall_info=None):
+               risk_profile, chain, oi_wall_info=None, regime="MIXED"):
     if row is None:
         return None
-
-    scored = score_option(
-        row, side, spot, pcr, tf5, tf30, daily, chain,
-        support=support, resistance=resistance, oi_wall_info=oi_wall_info,
-    )
-
+    scored = score_option(row, side, spot, pcr, tf5, tf30, daily, chain,
+                          support=support, resistance=resistance,
+                          oi_wall_info=oi_wall_info, regime=regime)
     ask = safe_float(row[f"{side} Ask"])
     ltp = safe_float(row[f"{side} LTP"])
     entry = ask if np.isfinite(ask) and ask > 0 else ltp
     if not np.isfinite(entry) or entry <= 0:
         return None
 
-    # Keep the same risk-profile labels and UI, but make the underlying ATR and
-    # OI barrier part of the validation rather than relying only on premium %.
-    risk_settings = {
-        "Conservative": (0.72, 1.25, 1.55),
-        "Balanced": (0.70, 1.35, 1.75),
-        "Aggressive": (0.65, 1.50, 2.00),
-    }
-    sl_factor, target1_factor, target2_factor = risk_settings[risk_profile]
-    sl = round(entry * sl_factor, 2)
-    target1 = round(entry * target1_factor, 2)
-    target2 = round(entry * target2_factor, 2)
+    sl, target1, target2 = adaptive_buy_levels(entry, side, spot, support, resistance,
+                                                tf5, scored["delta"], scored["iv"], risk_profile)
     rr1 = (target1 - entry) / max(entry - sl, 0.01)
     rr2 = (target2 - entry) / max(entry - sl, 0.01)
 
     atr = max(tf5.get("atr", spot * 0.01), spot * 0.001)
-    trigger_buffer = max(atr * 0.15, spot * 0.0015)
+    trigger_buffer = max(atr * 0.12, spot * 0.001)
+    recent_high = safe_float(tf5.get("recent_high"), resistance)
+    recent_low = safe_float(tf5.get("recent_low"), support)
+    body_strength = safe_float(tf5.get("body_strength"), 0)
+    close_location = safe_float(tf5.get("close_location"), 0.5)
+    volume_ratio = safe_float(tf5.get("volume_ratio"), 1.0)
 
-    # Breakout confirmation is deliberately stricter than a simple spot touch.
-    # A BUY requires a live break plus candle/volume confirmation; otherwise WAIT.
-    candle_confirmed = False
-    volume_confirmed = False
-    body_strength = 0.0
     if side == "CE":
-        trigger_level = resistance + trigger_buffer
+        trigger_level = max(resistance, recent_high) + trigger_buffer
         trigger_hit = spot >= trigger_level
-        if trigger_hit and isinstance(tf5, dict):
-            candle_confirmed = (
-                tf5.get("trend") == "Bullish" and
-                tf5.get("momentum", 0) > 0 and
-                tf5.get("rsi", 50) >= 52
-            )
-            volume_confirmed = tf5.get("volume_ratio", 1.0) >= 1.10
-        body_strength = max(tf5.get("momentum", 0), 0)
-        trigger = (
-            f"Enter only after spot breaks and sustains above {fmt_price(trigger_level)} "
-            "with 5m bullish confirmation and preferably above-average volume."
+        candle_confirmed = (
+            tf5.get("trend") == "Bullish" and momentum_positive(tf5) and
+            rsi_ok_for_breakout(tf5, "CE") and close_location >= 0.60 and body_strength >= 0.35
         )
-        exit_rule = (
-            f"Exit if spot loses support {fmt_price(support)} or premium hits "
-            f"{fmt_price(sl)}. After Target 1, book partial profit and trail."
-        )
+        volume_confirmed = volume_ratio >= 1.05
+        extension_pct = (spot - vwap_value(tf5, spot)) / max(spot, 1) * 100
+        late_entry = extension_pct > max(1.8, atr / max(spot, 1) * 100 * 1.8)
+        trigger = f"Enter only after spot breaks {fmt_price(trigger_level)} with a strong 5m close and volume confirmation."
+        exit_rule = f"Exit if spot loses support {fmt_price(support)} or premium hits {fmt_price(sl)}. After Target 1, trail below the latest 5m swing low."
     else:
-        trigger_level = support - trigger_buffer
+        trigger_level = min(support, recent_low) - trigger_buffer
         trigger_hit = spot <= trigger_level
-        if trigger_hit and isinstance(tf5, dict):
-            candle_confirmed = (
-                tf5.get("trend") == "Bearish" and
-                tf5.get("momentum", 0) < 0 and
-                tf5.get("rsi", 50) <= 48
-            )
-            volume_confirmed = tf5.get("volume_ratio", 1.0) >= 1.10
-        body_strength = max(-tf5.get("momentum", 0), 0)
-        trigger = (
-            f"Enter only after spot breaks and sustains below {fmt_price(trigger_level)} "
-            "with 5m bearish confirmation and preferably above-average volume."
+        candle_confirmed = (
+            tf5.get("trend") == "Bearish" and momentum_negative(tf5) and
+            rsi_ok_for_breakout(tf5, "PE") and close_location <= 0.40 and body_strength >= 0.35
         )
-        exit_rule = (
-            f"Exit if spot reclaims resistance {fmt_price(resistance)} or premium "
-            f"hits {fmt_price(sl)}. After Target 1, book partial profit and trail."
-        )
+        volume_confirmed = volume_ratio >= 1.05
+        extension_pct = (vwap_value(tf5, spot) - spot) / max(spot, 1) * 100
+        late_entry = extension_pct > max(1.8, atr / max(spot, 1) * 100 * 1.8)
+        trigger = f"Enter only after spot breaks {fmt_price(trigger_level)} with a strong 5m close and volume confirmation."
+        exit_rule = f"Exit if spot reclaims resistance {fmt_price(resistance)} or premium hits {fmt_price(sl)}. After Target 1, trail above the latest 5m swing high."
 
-    desired = "Bullish" if side == "CE" else "Bearish"
-    opposite = "Bearish" if side == "CE" else "Bullish"
-
-    # IMPORTANT: Do not use the setup score, timeframe alignment or Upstox PoP
-    # as binary hard-fails. Doing so made the previous engine reject almost
-    # every developing setup and turned useful information into NO TRADE.
-    # These are now quality gates used by the decision engine below.
     hard_fail = []
-    if tf5.get("trend") == opposite:
+    if tf5.get("trend") in {"Bearish" if side == "CE" else "Bullish"}:
         hard_fail.append("5m trend conflict")
     if scored["spread_pct"] > 3:
         hard_fail.append("wide option spread")
-    if not np.isfinite(scored["delta"]) or not (0.35 <= abs(scored["delta"]) <= 0.80):
+    if not np.isfinite(scored["delta"]) or not (0.30 <= abs(scored["delta"]) <= 0.80):
         hard_fail.append("poor delta")
     if scored["volume"] < 1000:
         hard_fail.append("weak option liquidity")
-    if not np.isfinite(scored["oi"]) or scored["oi"] <= 0:
+    if scored["oi"] <= 0:
         hard_fail.append("no option OI")
+    vwap = vwap_value(tf5, spot)
+    if side == "CE" and spot < vwap * 0.997:
+        hard_fail.append("price below VWAP")
+    if side == "PE" and spot > vwap * 1.003:
+        hard_fail.append("price above VWAP")
+    wall_room = (resistance - spot) / max(spot, 1) * 100 if side == "CE" else (spot - support) / max(spot, 1) * 100
+    if wall_room < 0.50 and not trigger_hit:
+        hard_fail.append("OI wall too close")
+    if late_entry:
+        hard_fail.append("late entry / overextended")
+    if scored["conflict_penalty"] >= 12:
+        hard_fail.append("multi-factor conflict")
 
-    # VWAP is now a real gate: do not buy against the active intraday side.
-    vwap = safe_float(tf5.get("vwap"), spot)
-    if np.isfinite(vwap) and vwap > 0:
-        if side == "CE" and spot < vwap * 0.997:
-            hard_fail.append("price below VWAP")
-        if side == "PE" and spot > vwap * 1.003:
-            hard_fail.append("price above VWAP")
-
-    # Avoid buying directly into a very close OI wall.
-    if side == "CE":
-        wall_room = (resistance - spot) / max(spot, 1) * 100
-        if spot < resistance and wall_room < 0.50:
-            hard_fail.append("resistance too close")
-    else:
-        wall_room = (spot - support) / max(spot, 1) * 100
-        if spot > support and wall_room < 0.50:
-            hard_fail.append("support too close")
-
-    # Readiness is deliberately separated from the final decision. A setup can
-    # be a legitimate developing candidate even when it is not yet actionable.
-    # The old logic converted every quality shortfall directly into NO TRADE.
-    # That was too restrictive for a live scanner/decision assistant.
     if not trigger_hit:
-        trigger_state = "WAIT FOR TRIGGER"
+        readiness = "WAIT FOR TRIGGER"
     elif not candle_confirmed or not volume_confirmed:
-        trigger_state = "WAIT FOR CONFIRMATION"
+        readiness = "WAIT FOR CONFIRMATION"
+    elif late_entry:
+        readiness = "LATE ENTRY"
     else:
-        trigger_state = "READY"
-
-    readiness = trigger_state
-
-    # Descriptive quality flags used by the main decision layer.
-    score_gate = scored["score"] >= 65
-    watch_score_gate = scored["score"] >= 58
-    alignment_gate = scored["alignment"] >= 2
-    pop_ok = np.isfinite(scored["pop"]) and scored["pop"] >= 45
-    strong_pop = np.isfinite(scored["pop"]) and scored["pop"] >= 55
+        readiness = "READY"
 
     return {
-        "side": side,
-        "strike": float(row["Strike"]),
-        "entry": float(entry),
-        "sl": sl,
-        "target1": target1,
-        "target2": target2,
-        "pop": scored["pop"],
-        "delta": scored["delta"],
-        "iv": scored["iv"],
-        "score": scored["score"],
-        "rr1": rr1,
-        "rr2": rr2,
-        "trigger": trigger,
-        "trigger_level": trigger_level,
-        "trigger_hit": trigger_hit,
-        "candle_confirmed": candle_confirmed,
-        "volume_confirmed": volume_confirmed,
-        "readiness": readiness,
-        "fail_reasons": hard_fail,
-        "score_gate": score_gate,
-        "watch_score_gate": watch_score_gate,
-        "alignment_gate": alignment_gate,
-        "pop_ok": pop_ok,
-        "strong_pop": strong_pop,
-        "exit": exit_rule,
-        "oi": row[f"{side} OI"],
-        "chg_oi": scored["chg_oi"],
-        "volume": scored["volume"],
-        "spread_pct": scored["spread_pct"],
-        "alignment": scored["alignment"],
-        "vwap": scored["vwap"],
-        "room_pct": scored["room_pct"],
+        "side": side, "strike": float(row["Strike"]), "entry": float(entry),
+        "sl": sl, "target1": target1, "target2": target2,
+        "pop": scored["pop"], "delta": scored["delta"], "iv": scored["iv"],
+        "score": scored["score"], "rr1": rr1, "rr2": rr2,
+        "trigger": trigger, "trigger_level": trigger_level, "trigger_hit": trigger_hit,
+        "candle_confirmed": candle_confirmed, "volume_confirmed": volume_confirmed,
+        "readiness": readiness, "fail_reasons": hard_fail,
+        "score_gate": scored["score"] >= 65, "watch_score_gate": scored["score"] >= 58,
+        "alignment_gate": scored["alignment"] >= 2,
+        "pop_ok": np.isfinite(scored["pop"]) and scored["pop"] >= 45,
+        "strong_pop": np.isfinite(scored["pop"]) and scored["pop"] >= 55,
+        "exit": exit_rule, "oi": scored["oi"], "chg_oi": scored["chg_oi"], "oi_behavior": scored["oi_behavior"],
+        "volume": scored["volume"], "spread_pct": scored["spread_pct"],
+        "alignment": scored["alignment"], "vwap": scored["vwap"],
+        "room_pct": scored["room_pct"], "gamma": scored["gamma"],
+        "theta": scored["theta"], "vega": scored["vega"],
+        "regime": regime, "late_entry": late_entry,
     }
 
 
-# ============================================================
-# SIMPLE 5-WAY DECISION ENGINE
-# CALL BUY / CALL SELL / PUT BUY / PUT SELL / NO TRADE
-# ============================================================
+def vwap_value(tf, spot):
+    return safe_float(tf.get("vwap"), spot)
 
-# The existing Upstox option-chain PoP is used directly for option BUYs.
-# For option SELLs, the strategy PoP is the complement of the option BUY PoP.
-# This is appropriate when the underlying PoP represents the probability that
-# the option buyer makes a profit at expiry; transaction costs are not included.
+
+def momentum_positive(tf):
+    return safe_float(tf.get("momentum"), 0) > 0
+
+
+def momentum_negative(tf):
+    return safe_float(tf.get("momentum"), 0) < 0
+
+
+def rsi_ok_for_breakout(tf, side):
+    r = safe_float(tf.get("rsi"), 50)
+    return 52 <= r <= 72 if side == "CE" else 28 <= r <= 48
+
+
 def build_sell_plan(row, side, spot, support, resistance, pcr, tf5, tf30, daily,
-                    risk_profile, chain, oi_wall_info=None):
+                    risk_profile, chain, oi_wall_info=None, regime="MIXED"):
     if row is None:
         return None
-
     prefix = "CE" if side == "CE" else "PE"
     ltp = safe_float(row[f"{prefix} LTP"])
     bid = safe_float(row[f"{prefix} Bid"])
     ask = safe_float(row[f"{prefix} Ask"])
     oi = safe_float(row[f"{prefix} OI"], 0)
     chg_oi = safe_float(row[f"{prefix} Chg OI"], 0)
+    oi_behavior = oi_price_behavior(row, prefix)
     volume = safe_float(row[f"{prefix} Volume"], 0)
     delta = safe_float(row[f"{prefix} Delta"])
     iv = safe_float(row[f"{prefix} IV"])
+    gamma = safe_float(row[f"{prefix} Gamma"])
+    theta = safe_float(row[f"{prefix} Theta"])
+    vega = safe_float(row[f"{prefix} Vega"])
     long_pop = safe_float(row[f"{prefix} PoP"])
-
+    bid_qty = safe_float(row[f"{prefix} Bid Qty"], 0)
+    ask_qty = safe_float(row[f"{prefix} Ask Qty"], 0)
     entry = bid if np.isfinite(bid) and bid > 0 else ltp
     if not np.isfinite(entry) or entry <= 0:
         return None
 
+    # Do NOT equate 100-PoP with strategy win probability; it is only an option-level complement.
     short_pop = 100.0 - long_pop if np.isfinite(long_pop) else np.nan
-
-    spread_pct = (
-        max(ask - bid, 0) / max((ask + bid) / 2, 0.01) * 100
-        if np.isfinite(ask) and np.isfinite(bid) and ask > 0 and bid > 0
-        else 999
-    )
-
+    spread_pct = max(ask - bid, 0) / max((ask + bid) / 2, 0.01) * 100 if np.isfinite(ask) and np.isfinite(bid) and ask > 0 and bid > 0 else 999
     desired = "Bearish" if side == "CE" else "Bullish"
-    tf_trends = [tf5.get("trend"), tf30.get("trend"), daily.get("trend")]
-    alignment = tf_trends.count(desired)
     opposite = "Bullish" if side == "CE" else "Bearish"
-    opposite_count = tf_trends.count(opposite)
+    trends = [tf5.get("trend"), tf30.get("trend"), daily.get("trend")]
+    alignment = trends.count(desired)
+    opposite_count = trends.count(opposite)
+    score = alignment * 9 + max(0, 5 - opposite_count * 4)
 
-    score = 0.0
-    reasons = []
-
-    # Direction / trend: 30 points.
-    score += alignment * 10
-    if opposite_count == 0:
-        score += 5
-    else:
-        score -= opposite_count * 5
-
-    # Intraday momentum: 20 points.
     momentum = safe_float(tf5.get("momentum"), 0)
     rsi = safe_float(tf5.get("rsi"), 50)
     if side == "CE":
-        if tf5.get("trend") == "Bearish": score += 8
-        if momentum < 0: score += 6
-        if 32 <= rsi <= 48: score += 6
-        elif rsi <= 50: score += 3
+        score += 12 if tf5.get("trend") == "Bearish" else 0
+        score += 7 if momentum < 0 else 0
+        score += 6 if 30 <= rsi <= 48 else 3 if rsi <= 50 else 0
     else:
-        if tf5.get("trend") == "Bullish": score += 8
-        if momentum > 0: score += 6
-        if 52 <= rsi <= 68: score += 6
-        elif rsi >= 50: score += 3
+        score += 12 if tf5.get("trend") == "Bullish" else 0
+        score += 7 if momentum > 0 else 0
+        score += 6 if 52 <= rsi <= 70 else 3 if rsi >= 50 else 0
 
-    # VWAP: 15 points.
-    vwap = safe_float(tf5.get("vwap"), spot)
-    if np.isfinite(vwap) and vwap > 0:
-        if side == "CE":
-            if spot < vwap: score += 15
-            elif spot <= vwap * 1.003: score += 5
-        else:
-            if spot > vwap: score += 15
-            elif spot >= vwap * 0.997: score += 5
+    vwap = vwap_value(tf5, spot)
+    if side == "CE": score += 12 if spot < vwap else 4 if spot <= vwap * 1.003 else 0
+    else: score += 12 if spot > vwap else 4 if spot >= vwap * 0.997 else 0
 
-    # OI behaviour: 15 points. Rising OI on the sold side is supportive.
-    if chg_oi > 0:
-        score += 10
-    elif chg_oi == 0:
-        score += 4
-    if oi >= 3000:
-        score += 5
-    elif oi > 0:
-        score += 2
+    # Seller wants increasing OI at the sold strike plus adequate room to the wall.
+    if chg_oi > 0: score += 10
+    elif chg_oi == 0: score += 4
+    if oi_behavior == "SHORT BUILDUP": score += 4
+    elif oi_behavior == "LONG BUILDUP": score -= 2
+    if oi >= 5000: score += 4
+    elif oi >= 2000: score += 2
 
-    # Option quality / liquidity: 20 points.
     abs_delta = abs(delta) if np.isfinite(delta) else np.nan
-    if np.isfinite(abs_delta):
-        if 0.20 <= abs_delta <= 0.40: score += 7
-        elif 0.15 <= abs_delta < 0.20 or 0.40 < abs_delta <= 0.50: score += 4
-    if spread_pct <= 1.0: score += 5
-    elif spread_pct <= 2.0: score += 3
-    if volume >= 10000: score += 5
-    elif volume >= 3000: score += 3
-    elif volume >= 500: score += 1
-    if np.isfinite(iv) and iv >= 15: score += 3
+    if 0.20 <= abs_delta <= 0.40: score += 8
+    elif 0.15 <= abs_delta <= 0.50: score += 4
+    if spread_pct <= 1: score += 4
+    elif spread_pct <= 2: score += 2
+    if volume >= 10000: score += 4
+    elif volume >= 3000: score += 2
+    depth_ratio = min(bid_qty, ask_qty) / max(max(bid_qty, ask_qty), 1)
+    if depth_ratio >= 0.50: score += 2
 
-    # Penalize a short position when the underlying is too close to the
-    # relevant OI wall in the direction that would hurt the seller.
-    wall_room = np.nan
-    if side == "CE":
-        wall_room = (resistance - spot) / max(spot, 1) * 100
-        if wall_room >= 2.0: score += 5
-        elif wall_room >= 1.0: score += 2
-        elif wall_room < 0.5: score -= 10
-    else:
-        wall_room = (spot - support) / max(spot, 1) * 100
-        if wall_room >= 2.0: score += 5
-        elif wall_room >= 1.0: score += 2
-        elif wall_room < 0.5: score -= 10
+    wall_room = (resistance - spot) / max(spot, 1) * 100 if side == "CE" else (spot - support) / max(spot, 1) * 100
+    if wall_room >= 2: score += 7
+    elif wall_room >= 1: score += 3
+    elif wall_room < 0.5: score -= 12
 
+    # IV/Theta are supportive context for sellers, but never a standalone trigger.
+    if np.isfinite(iv):
+        if iv >= 60: score += 4
+        elif iv >= 40: score += 2
+    if np.isfinite(theta) and theta < 0: score += 2
+    if np.isfinite(vega) and vega > 0: score += 1
+    if regime == "RANGE": score += 5
+    elif (side == "CE" and regime in {"TRENDING DOWN", "BREAKDOWN"}) or (side == "PE" and regime in {"TRENDING UP", "BREAKOUT"}): score += 5
+    elif regime in {"BREAKOUT", "BREAKDOWN"}: score -= 6
+
+    # Conflict and risk penalties.
+    if opposite_count >= 2: score -= 10
+    if side == "CE" and spot > resistance: score -= 20
+    if side == "PE" and spot < support: score -= 20
+    if spread_pct > 3: score -= 8
     score = float(np.clip(score, 0, 100))
 
     hard_fail = []
-    if tf5.get("trend") == opposite:
-        hard_fail.append("5m trend conflict")
-    if spread_pct > 4:
-        hard_fail.append("wide option spread")
-    if not np.isfinite(abs_delta) or not (0.15 <= abs_delta <= 0.55):
-        hard_fail.append("delta unsuitable for selling")
-    if volume < 500:
-        hard_fail.append("weak option liquidity")
-    if oi <= 0:
-        hard_fail.append("no option OI")
-    if not np.isfinite(short_pop) or short_pop < 50:
-        hard_fail.append("low strategy PoP")
-    if side == "CE" and spot > resistance:
-        hard_fail.append("price above resistance")
-    if side == "PE" and spot < support:
-        hard_fail.append("price below support")
+    if tf5.get("trend") == opposite: hard_fail.append("5m trend conflict")
+    if spread_pct > 4: hard_fail.append("wide option spread")
+    if not np.isfinite(abs_delta) or not (0.15 <= abs_delta <= 0.55): hard_fail.append("delta unsuitable for selling")
+    if volume < 500: hard_fail.append("weak option liquidity")
+    if oi <= 0: hard_fail.append("no option OI")
+    if not np.isfinite(short_pop) or short_pop < 50: hard_fail.append("low strategy PoP")
+    if side == "CE" and spot >= resistance: hard_fail.append("resistance breached")
+    if side == "PE" and spot <= support: hard_fail.append("support breached")
+    if wall_room < 0.75: hard_fail.append("insufficient room to wall")
+    if regime in {"BREAKOUT", "BREAKDOWN"}: hard_fail.append("breakout regime unsuitable for short premium")
 
-    # For a short option the simple reference risk levels are premium-based.
-    # The SL is deliberately tighter than the profit target because option
-    # selling has asymmetric risk. This is a reference plan, not an order.
-    sl = round(entry * 1.35, 2)
-    target1 = round(entry * 0.60, 2)
-    target2 = round(entry * 0.35, 2)
+    # Adaptive seller risk: use ATR and delta rather than one fixed 35% SL.
+    atr = max(safe_float(tf5.get("atr"), spot * 0.01), spot * 0.001)
+    underlying_risk = atr * {"Conservative": 0.50, "Balanced": 0.65, "Aggressive": 0.80}.get(risk_profile, 0.65)
+    premium_risk = max(entry * 0.18, underlying_risk * max(abs_delta, 0.20) * (1 + max((safe_float(iv, 20) - 30) / 200, 0)))
+    sl = round(entry + premium_risk, 2)
+    target1 = round(max(entry - premium_risk * 0.90, entry * 0.45), 2)
+    target2 = round(max(entry - premium_risk * 1.35, entry * 0.25), 2)
+    if target2 >= target1: target2 = round(max(entry * 0.30, target1 - entry * 0.10), 2)
 
     if side == "CE":
-        trigger_level = max(vwap, spot) if np.isfinite(vwap) else spot
-        trigger_hit = spot <= resistance and spot < trigger_level * 1.005
-        exit_rule = (
-            f"Exit if spot sustains above resistance {fmt_price(resistance)} "
-            f"or option premium reaches {fmt_price(sl)}. Book profit progressively."
-        )
+        trigger = f"Sell only while spot remains below {fmt_price(resistance)} and 5m shows rejection/weakness; avoid fresh shorts after a breakout."
+        exit_rule = f"Exit if spot sustains above resistance {fmt_price(resistance)} or premium reaches {fmt_price(sl)}. Book profit progressively."
     else:
-        trigger_level = min(vwap, spot) if np.isfinite(vwap) else spot
-        trigger_hit = spot >= support and spot > trigger_level * 0.995
-        exit_rule = (
-            f"Exit if spot sustains below support {fmt_price(support)} "
-            f"or option premium reaches {fmt_price(sl)}. Book profit progressively."
-        )
+        trigger = f"Sell only while spot remains above {fmt_price(support)} and 5m shows rejection/strength; avoid fresh shorts after a breakdown."
+        exit_rule = f"Exit if spot sustains below support {fmt_price(support)} or premium reaches {fmt_price(sl)}. Book profit progressively."
 
+    readiness = "READY" if not hard_fail and score >= 62 and np.isfinite(short_pop) and short_pop >= 55 else "NO TRADE"
     return {
-        "side": side,
-        "strike": float(row["Strike"]),
+        "side": side, "strike": float(row["Strike"]),
         "action": "CALL SELL" if side == "CE" else "PUT SELL",
-        "entry": entry,
-        "sl": sl,
-        "target1": target1,
-        "target2": target2,
-        "pop": short_pop,
-        "long_pop": long_pop,
-        "delta": delta,
-        "iv": iv,
-        "score": score,
+        "entry": entry, "sl": sl, "target1": target1, "target2": target2,
+        "pop": short_pop, "long_pop": long_pop, "delta": delta, "iv": iv, "oi_behavior": oi_behavior,
+        "gamma": gamma, "theta": theta, "vega": vega, "score": score,
         "rr1": (entry - target1) / max(sl - entry, 0.01),
         "rr2": (entry - target2) / max(sl - entry, 0.01),
-        "trigger": "Sell only while price remains on the safe side of the OI/VWAP structure.",
-        "trigger_level": trigger_level,
-        "trigger_hit": trigger_hit,
-        "fail_reasons": hard_fail,
-        "oi": oi,
-        "chg_oi": chg_oi,
-        "volume": volume,
-        "spread_pct": spread_pct,
-        "alignment": alignment,
-        "vwap": vwap,
-        "room_pct": wall_room,
-        "readiness": "READY" if not hard_fail and score >= 60 and short_pop >= 55 else "NO TRADE",
-        "exit": exit_rule,
+        "trigger": trigger, "trigger_level": resistance if side == "CE" else support,
+        "trigger_hit": not hard_fail, "fail_reasons": hard_fail,
+        "oi": oi, "chg_oi": chg_oi, "volume": volume, "spread_pct": spread_pct,
+        "alignment": alignment, "vwap": vwap, "room_pct": wall_room,
+        "readiness": readiness, "exit": exit_rule, "regime": regime,
+        "depth_ratio": depth_ratio,
     }
 
+
+# ============================================================
+# BACKEND QUALITY / LOGGING HELPERS — NO UI CHANGES
+# ============================================================
+def _signal_log_path():
+    return "/tmp/fo_pro_trader_signal_log.csv"
+
+
+def log_signal(symbol, expiry, decision, plan, spot, pcr, support, resistance, tf5, tf30, daily, regime):
+    """Append selected signals for objective forward testing. No UI is changed."""
+    if not plan or decision == "NO TRADE":
+        return
+    try:
+        row = {
+            "timestamp": datetime.now(ZoneInfo("Asia/Kolkata")).isoformat(),
+            "symbol": symbol, "expiry": expiry, "decision": decision,
+            "spot": spot, "strike": plan.get("strike"), "pop": plan.get("pop"),
+            "score": plan.get("score"), "entry": plan.get("entry"), "sl": plan.get("sl"),
+            "target1": plan.get("target1"), "target2": plan.get("target2"),
+            "delta": plan.get("delta"), "iv": plan.get("iv"),
+            "gamma": plan.get("gamma"), "theta": plan.get("theta"), "vega": plan.get("vega"),
+            "pcr": pcr, "support": support, "resistance": resistance,
+            "vwap": tf5.get("vwap"), "trend5": tf5.get("trend"),
+            "trend30": tf30.get("trend"), "trend_daily": daily.get("trend"),
+            "regime": regime,
+        }
+        df = pd.DataFrame([row])
+        path = _signal_log_path()
+        if __import__("os").path.exists(path):
+            df.to_csv(path, mode="a", header=False, index=False)
+        else:
+            df.to_csv(path, index=False)
+    except Exception:
+        pass
 
 # ============================================================
 # LIVE ANALYSIS
@@ -1304,6 +1358,7 @@ except Exception as exc:
     st.stop()
 
 support, resistance, pcr, oi_wall_info = oi_levels(chain, spot)
+regime = market_regime(tf5, tf30, daily_tech, spot)
 atm_index = (chain["Strike"] - spot).abs().idxmin()
 
 # For each strategy we select a strike that is close enough to the underlying
@@ -1315,7 +1370,7 @@ def buy_candidate(side):
     candidates = []
     for _, row in band.iterrows():
         scored = score_option(row, side, spot, pcr, tf5, tf30, daily_tech, chain,
-                              support=support, resistance=resistance, oi_wall_info=oi_wall_info)
+                              support=support, resistance=resistance, oi_wall_info=oi_wall_info, regime=regime)
         prefix = "CE" if side == "CE" else "PE"
         pop = safe_float(row[f"{prefix} PoP"])
         volume = safe_float(row[f"{prefix} Volume"], 0)
@@ -1327,7 +1382,7 @@ def buy_candidate(side):
         return None
     row = max(candidates, key=lambda x: x[:-1])[-1]
     return build_plan(row, side, spot, support, resistance, pcr, tf5, tf30, daily_tech,
-                      risk_profile, chain, oi_wall_info)
+                      risk_profile, chain, oi_wall_info, regime)
 
 
 def sell_candidate(side):
@@ -1343,7 +1398,7 @@ def sell_candidate(side):
         if side == "PE" and strike > spot * 0.995:
             continue
         plan = build_sell_plan(row, side, spot, support, resistance, pcr, tf5, tf30,
-                               daily_tech, risk_profile, chain, oi_wall_info)
+                               daily_tech, risk_profile, chain, oi_wall_info, regime)
         if plan is None:
             continue
         candidates.append((plan["score"], plan["pop"], plan["volume"], -plan["spread_pct"], -abs(abs(plan["delta"]) - .30), plan))
@@ -1360,8 +1415,9 @@ put_sell = sell_candidate("PE")
 # ============================================================
 # FINAL 5-WAY DECISION
 # ============================================================
-MIN_SCORE = 60
+MIN_SCORE = 63
 MIN_POP = 55
+MIN_ALIGNMENT = 2
 
 strategy_plans = {
     "CALL BUY": call_buy,
@@ -1377,15 +1433,23 @@ for action, plan in strategy_plans.items():
     hard_fail = plan.get("fail_reasons") or []
     pop = safe_float(plan.get("pop"))
     score = safe_float(plan.get("score"), 0)
+    alignment = int(plan.get("alignment", 0) or 0)
     if action in {"CALL BUY", "PUT BUY"}:
+        # BUYs need actual trigger + confirmation, alignment and enough quality.
         ready = (
-            score >= MIN_SCORE and pop >= MIN_POP and
-            not hard_fail and plan.get("readiness") == "READY"
+            score >= MIN_SCORE and pop >= MIN_POP and alignment >= MIN_ALIGNMENT and
+            not hard_fail and plan.get("readiness") == "READY" and
+            plan.get("candle_confirmed") and plan.get("volume_confirmed")
         )
     else:
-        ready = score >= MIN_SCORE and pop >= MIN_POP and not hard_fail
+        # SELLs need stronger structure and are never selected during a breakout regime.
+        ready = (
+            score >= MIN_SCORE and pop >= MIN_POP and alignment >= 2 and
+            not hard_fail and plan.get("readiness") == "READY"
+        )
     if ready:
-        eligible.append((score + pop * 0.25, action, plan))
+        # Small tie-breaker for score, then PoP, then option liquidity.
+        eligible.append((score + pop * 0.20 + min(safe_float(plan.get("volume"), 0) / 100000, 3), action, plan))
 
 if eligible:
     _, decision, best_plan = max(eligible, key=lambda x: x[0])
@@ -1398,6 +1462,10 @@ else:
 
 # The decision is intentionally binary at the action level: one of four trades
 # or NO TRADE. There are no WAIT/WATCHLIST states in the primary UI.
+
+# Forward-test logging is intentionally backend-only. It does not change the UI.
+if decision != "NO TRADE" and best_plan:
+    log_signal(symbol, selected_expiry, decision, best_plan, spot, pcr, support, resistance, tf5, tf30, daily_tech, regime)
 
 # ============================================================
 # VISUAL DASHBOARD
