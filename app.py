@@ -916,9 +916,9 @@ def build_plan(row, side, spot, support, resistance, pcr, tf5, tf30, daily,
             candle_confirmed = (
                 tf5.get("trend") == "Bullish" and
                 tf5.get("momentum", 0) > 0 and
-                tf5.get("rsi", 50) >= 52
+                tf5.get("rsi", 50) >= 50
             )
-            volume_confirmed = tf5.get("volume_ratio", 1.0) >= 1.10
+            volume_confirmed = tf5.get("volume_ratio", 1.0) >= 1.05
         body_strength = max(tf5.get("momentum", 0), 0)
         trigger = (
             f"Enter only after spot breaks and sustains above {fmt_price(trigger_level)} "
@@ -935,9 +935,9 @@ def build_plan(row, side, spot, support, resistance, pcr, tf5, tf30, daily,
             candle_confirmed = (
                 tf5.get("trend") == "Bearish" and
                 tf5.get("momentum", 0) < 0 and
-                tf5.get("rsi", 50) <= 48
+                tf5.get("rsi", 50) <= 50
             )
-            volume_confirmed = tf5.get("volume_ratio", 1.0) >= 1.10
+            volume_confirmed = tf5.get("volume_ratio", 1.0) >= 1.05
         body_strength = max(-tf5.get("momentum", 0), 0)
         trigger = (
             f"Enter only after spot breaks and sustains below {fmt_price(trigger_level)} "
@@ -958,11 +958,11 @@ def build_plan(row, side, spot, support, resistance, pcr, tf5, tf30, daily,
     hard_fail = []
     if tf5.get("trend") == opposite:
         hard_fail.append("5m trend conflict")
-    if scored["spread_pct"] > 3:
+    if scored["spread_pct"] > 4:
         hard_fail.append("wide option spread")
-    if not np.isfinite(scored["delta"]) or not (0.35 <= abs(scored["delta"]) <= 0.80):
+    if not np.isfinite(scored["delta"]) or not (0.30 <= abs(scored["delta"]) <= 0.80):
         hard_fail.append("poor delta")
-    if scored["volume"] < 1000:
+    if scored["volume"] < 500:
         hard_fail.append("weak option liquidity")
     if not np.isfinite(scored["oi"]) or scored["oi"] <= 0:
         hard_fail.append("no option OI")
@@ -978,11 +978,11 @@ def build_plan(row, side, spot, support, resistance, pcr, tf5, tf30, daily,
     # Avoid buying directly into a very close OI wall.
     if side == "CE":
         wall_room = (resistance - spot) / max(spot, 1) * 100
-        if spot < resistance and wall_room < 0.50:
+        if spot < resistance and wall_room < 0.40:
             hard_fail.append("resistance too close")
     else:
         wall_room = (spot - support) / max(spot, 1) * 100
-        if spot > support and wall_room < 0.50:
+        if spot > support and wall_room < 0.40:
             hard_fail.append("support too close")
 
     # Readiness is deliberately separated from the final decision. A setup can
@@ -999,10 +999,10 @@ def build_plan(row, side, spot, support, resistance, pcr, tf5, tf30, daily,
     readiness = trigger_state
 
     # Descriptive quality flags used by the main decision layer.
-    score_gate = scored["score"] >= 65
-    watch_score_gate = scored["score"] >= 58
-    alignment_gate = scored["alignment"] >= 2
-    pop_ok = np.isfinite(scored["pop"]) and scored["pop"] >= 45
+    score_gate = scored["score"] >= 60
+    watch_score_gate = scored["score"] >= 55
+    alignment_gate = scored["alignment"] >= 1
+    pop_ok = np.isfinite(scored["pop"]) and scored["pop"] >= 50
     strong_pop = np.isfinite(scored["pop"]) and scored["pop"] >= 55
 
     return {
@@ -1508,8 +1508,8 @@ def _actionable(plan, score, side):
         return False
     desired_direction = "Bullish" if side == "CE" else "Bearish"
     return (
-        score >= 65
-        and plan.get("alignment", 0) >= 2
+        score >= 60
+        and plan.get("alignment", 0) >= 1
         and overall_direction == desired_direction
         and not _severe_reasons(plan)
         and plan.get("pop_ok", False)
@@ -1517,7 +1517,7 @@ def _actionable(plan, score, side):
     )
 
 def _wait_candidate(plan, score, side):
-    if not plan or score < 58 or _severe_reasons(plan):
+    if not plan or score < 55 or _severe_reasons(plan):
         return False
     desired_direction = "Bullish" if side == "CE" else "Bearish"
     # At least one timeframe must support the direction; the 5m timeframe
