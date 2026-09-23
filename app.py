@@ -916,9 +916,9 @@ def build_plan(row, side, spot, support, resistance, pcr, tf5, tf30, daily,
             candle_confirmed = (
                 tf5.get("trend") == "Bullish" and
                 tf5.get("momentum", 0) > 0 and
-                tf5.get("rsi", 50) >= 50
+                tf5.get("rsi", 50) >= 52
             )
-            volume_confirmed = tf5.get("volume_ratio", 1.0) >= 1.05
+            volume_confirmed = tf5.get("volume_ratio", 1.0) >= 1.10
         body_strength = max(tf5.get("momentum", 0), 0)
         trigger = (
             f"Enter only after spot breaks and sustains above {fmt_price(trigger_level)} "
@@ -935,9 +935,9 @@ def build_plan(row, side, spot, support, resistance, pcr, tf5, tf30, daily,
             candle_confirmed = (
                 tf5.get("trend") == "Bearish" and
                 tf5.get("momentum", 0) < 0 and
-                tf5.get("rsi", 50) <= 50
+                tf5.get("rsi", 50) <= 48
             )
-            volume_confirmed = tf5.get("volume_ratio", 1.0) >= 1.05
+            volume_confirmed = tf5.get("volume_ratio", 1.0) >= 1.10
         body_strength = max(-tf5.get("momentum", 0), 0)
         trigger = (
             f"Enter only after spot breaks and sustains below {fmt_price(trigger_level)} "
@@ -958,11 +958,11 @@ def build_plan(row, side, spot, support, resistance, pcr, tf5, tf30, daily,
     hard_fail = []
     if tf5.get("trend") == opposite:
         hard_fail.append("5m trend conflict")
-    if scored["spread_pct"] > 4:
+    if scored["spread_pct"] > 3:
         hard_fail.append("wide option spread")
-    if not np.isfinite(scored["delta"]) or not (0.30 <= abs(scored["delta"]) <= 0.80):
+    if not np.isfinite(scored["delta"]) or not (0.35 <= abs(scored["delta"]) <= 0.80):
         hard_fail.append("poor delta")
-    if scored["volume"] < 500:
+    if scored["volume"] < 1000:
         hard_fail.append("weak option liquidity")
     if not np.isfinite(scored["oi"]) or scored["oi"] <= 0:
         hard_fail.append("no option OI")
@@ -978,11 +978,11 @@ def build_plan(row, side, spot, support, resistance, pcr, tf5, tf30, daily,
     # Avoid buying directly into a very close OI wall.
     if side == "CE":
         wall_room = (resistance - spot) / max(spot, 1) * 100
-        if spot < resistance and wall_room < 0.40:
+        if spot < resistance and wall_room < 0.50:
             hard_fail.append("resistance too close")
     else:
         wall_room = (spot - support) / max(spot, 1) * 100
-        if spot > support and wall_room < 0.40:
+        if spot > support and wall_room < 0.50:
             hard_fail.append("support too close")
 
     # Readiness is deliberately separated from the final decision. A setup can
@@ -999,10 +999,10 @@ def build_plan(row, side, spot, support, resistance, pcr, tf5, tf30, daily,
     readiness = trigger_state
 
     # Descriptive quality flags used by the main decision layer.
-    score_gate = scored["score"] >= 60
-    watch_score_gate = scored["score"] >= 55
-    alignment_gate = scored["alignment"] >= 1
-    pop_ok = np.isfinite(scored["pop"]) and scored["pop"] >= 50
+    score_gate = scored["score"] >= 65
+    watch_score_gate = scored["score"] >= 58
+    alignment_gate = scored["alignment"] >= 2
+    pop_ok = np.isfinite(scored["pop"]) and scored["pop"] >= 45
     strong_pop = np.isfinite(scored["pop"]) and scored["pop"] >= 55
 
     return {
@@ -1042,383 +1042,245 @@ def build_plan(row, side, spot, support, resistance, pcr, tf5, tf30, daily,
 
 
 # ============================================================
-# FULL F&O MARKET PoP SCANNER — SIDEBAR ONLY
+# SIMPLE 5-WAY DECISION ENGINE
+# CALL BUY / CALL SELL / PUT BUY / PUT SELL / NO TRADE
 # ============================================================
 
-FNO_MASTER_URL = "https://assets.upstox.com/market-quote/instruments/exchange/NSE.json.gz"
+# The existing Upstox option-chain PoP is used directly for option BUYs.
+# For option SELLs, the strategy PoP is the complement of the option BUY PoP.
+# This is appropriate when the underlying PoP represents the probability that
+# the option buyer makes a profit at expiry; transaction costs are not included.
+def build_sell_plan(row, side, spot, support, resistance, pcr, tf5, tf30, daily,
+                    risk_profile, chain, oi_wall_info=None):
+    if row is None:
+        return None
 
+    prefix = "CE" if side == "CE" else "PE"
+    ltp = safe_float(row[f"{prefix} LTP"])
+    bid = safe_float(row[f"{prefix} Bid"])
+    ask = safe_float(row[f"{prefix} Ask"])
+    oi = safe_float(row[f"{prefix} OI"], 0)
+    chg_oi = safe_float(row[f"{prefix} Chg OI"], 0)
+    volume = safe_float(row[f"{prefix} Volume"], 0)
+    delta = safe_float(row[f"{prefix} Delta"])
+    iv = safe_float(row[f"{prefix} IV"])
+    long_pop = safe_float(row[f"{prefix} PoP"])
 
-@st.cache_data(ttl=3600, show_spinner=False)
-def get_fno_underlyings():
-    """Build the current NSE equity F&O universe from Upstox's BOD master."""
-    try:
-        response = requests.get(FNO_MASTER_URL, timeout=30)
-        response.raise_for_status()
-        raw = gzip.decompress(response.content)
-        payload = json.loads(raw.decode("utf-8"))
-    except Exception as exc:
-        raise UpstoxError(f"Unable to load the Upstox NSE F&O instrument list: {exc}") from exc
+    entry = bid if np.isfinite(bid) and bid > 0 else ltp
+    if not np.isfinite(entry) or entry <= 0:
+        return None
 
-    if isinstance(payload, dict):
-        records = payload.get("data", payload.get("instruments", []))
-    else:
-        records = payload
+    short_pop = 100.0 - long_pop if np.isfinite(long_pop) else np.nan
 
-    today = date.today().isoformat()
-    universe = {}
-
-    for item in records:
-        if not isinstance(item, dict):
-            continue
-        if item.get("segment") != "NSE_FO":
-            continue
-        if item.get("instrument_type") not in {"CE", "PE", "FUT"}:
-            continue
-        if item.get("underlying_type") != "EQUITY":
-            continue
-
-        expiry = str(item.get("expiry", ""))
-        if not expiry:
-            continue
-
-        # Upstox BOD JSON normally supplies expiry as an epoch-millisecond value
-        # for NSE_FO. Handle both epoch and YYYY-MM-DD formats safely.
-        if expiry.isdigit():
-            try:
-                expiry_date = datetime.fromtimestamp(
-                    int(expiry) / 1000, tz=ZoneInfo("Asia/Kolkata")
-                ).date().isoformat()
-            except Exception:
-                continue
-        else:
-            expiry_date = expiry[:10]
-
-        if expiry_date < today:
-            continue
-
-        underlying_key = item.get("underlying_key")
-        symbol = str(item.get("underlying_symbol") or "").strip().upper()
-        if not underlying_key or not symbol:
-            continue
-
-        current = universe.get(underlying_key)
-        if current is None or expiry_date < current["expiry"]:
-            universe[underlying_key] = {
-                "symbol": symbol,
-                "underlying_key": underlying_key,
-                "expiry": expiry_date,
-            }
-
-    return sorted(universe.values(), key=lambda x: x["symbol"])
-
-
-def scan_full_fno_pop_market(min_pop=75.0):
-    """Scan the nearest expiry of every NSE equity F&O underlying and return top 5 unique stocks."""
-    universe = get_fno_underlyings()
-    candidates = []
-    scanned = 0
-    failed = 0
-
-    progress = st.progress(0, text="Starting full F&O market scan...")
-
-    for idx, item in enumerate(universe, start=1):
-        try:
-            if idx > 1:
-                time.sleep(0.80)
-            rows = get_option_chain(item["underlying_key"], item["expiry"])
-            if not rows:
-                failed += 1
-                continue
-
-            # The option-chain response carries the underlying spot in its rows.
-            spot_values = [
-                safe_float(row.get("underlying_spot_price"))
-                for row in rows
-                if np.isfinite(safe_float(row.get("underlying_spot_price")))
-            ]
-            spot_value = spot_values[0] if spot_values else np.nan
-
-            best_for_stock = None
-
-            for raw in rows:
-                strike = safe_float(raw.get("strike_price"))
-                if not np.isfinite(strike):
-                    continue
-
-                for side, action in (("CE", "CALL BUY"), ("PE", "PUT BUY")):
-                    option = raw.get("call_options" if side == "CE" else "put_options") or {}
-                    market = option.get("market_data") or {}
-                    greeks = option.get("option_greeks") or {}
-
-                    pop = safe_float(greeks.get("pop"))
-                    if not np.isfinite(pop) or pop <= min_pop:
-                        continue
-
-                    ltp = safe_float(market.get("ltp"))
-                    ask = safe_float(market.get("ask_price"))
-                    bid = safe_float(market.get("bid_price"))
-                    volume = safe_float(market.get("volume"), 0)
-                    oi = safe_float(market.get("oi"), 0)
-                    delta = safe_float(greeks.get("delta"))
-                    iv = safe_float(greeks.get("iv"))
-
-                    entry = ask if np.isfinite(ask) and ask > 0 else ltp
-                    if not np.isfinite(entry) or entry <= 0:
-                        continue
-
-                    distance = (
-                        abs(strike - spot_value) / max(spot_value, 1)
-                        if np.isfinite(spot_value)
-                        else 999
-                    )
-
-                    # Use the same Balanced risk levels as the main analyzer
-                    # so the scanner's SL/targets are consistent with the app.
-                    sl = round(entry * 0.70, 2)
-                    target1 = round(entry * 1.40, 2)
-                    target2 = round(entry * 1.80, 2)
-                    exit_rule = "Exit at SL or Target 2; trail after Target 1"
-
-                    candidate = {
-                        "Stock": item["symbol"],
-                        "Trade": action,
-                        "Strike": strike,
-                        "Expiry": item["expiry"],
-                        "PoP": pop,
-                        "Entry": entry,
-                        "SL": sl,
-                        "Target1": target1,
-                        "Target2": target2,
-                        "Exit": exit_rule,
-                        "LTP": ltp,
-                        "Bid": bid,
-                        "Ask": ask,
-                        "Delta": delta,
-                        "IV": iv,
-                        "Volume": volume,
-                        "OI": oi,
-                        "distance": distance,
-                    }
-
-                    # One highest-PoP opportunity per stock keeps the Top 5 diversified.
-                    if best_for_stock is None or (
-                        candidate["PoP"], candidate["Volume"], -candidate["distance"]
-                    ) > (
-                        best_for_stock["PoP"], best_for_stock["Volume"], -best_for_stock["distance"]
-                    ):
-                        best_for_stock = candidate
-
-            if best_for_stock is not None:
-                candidates.append(best_for_stock)
-            scanned += 1
-
-        except UpstoxRateLimitError:
-            progress.empty()
-            raise
-        except Exception:
-            failed += 1
-
-        progress.progress(
-            idx / max(len(universe), 1),
-            text=f"Scanning F&O market: {idx}/{len(universe)} stocks",
-        )
-
-    progress.empty()
-
-    candidates.sort(
-        key=lambda x: (-x["PoP"], -x["Volume"], x["distance"])
+    spread_pct = (
+        max(ask - bid, 0) / max((ask + bid) / 2, 0.01) * 100
+        if np.isfinite(ask) and np.isfinite(bid) and ask > 0 and bid > 0
+        else 999
     )
 
-    return candidates[:5], len(universe), scanned, failed
+    desired = "Bearish" if side == "CE" else "Bullish"
+    tf_trends = [tf5.get("trend"), tf30.get("trend"), daily.get("trend")]
+    alignment = tf_trends.count(desired)
+    opposite = "Bullish" if side == "CE" else "Bearish"
+    opposite_count = tf_trends.count(opposite)
 
+    score = 0.0
+    reasons = []
+
+    # Direction / trend: 30 points.
+    score += alignment * 10
+    if opposite_count == 0:
+        score += 5
+    else:
+        score -= opposite_count * 5
+
+    # Intraday momentum: 20 points.
+    momentum = safe_float(tf5.get("momentum"), 0)
+    rsi = safe_float(tf5.get("rsi"), 50)
+    if side == "CE":
+        if tf5.get("trend") == "Bearish": score += 8
+        if momentum < 0: score += 6
+        if 32 <= rsi <= 48: score += 6
+        elif rsi <= 50: score += 3
+    else:
+        if tf5.get("trend") == "Bullish": score += 8
+        if momentum > 0: score += 6
+        if 52 <= rsi <= 68: score += 6
+        elif rsi >= 50: score += 3
+
+    # VWAP: 15 points.
+    vwap = safe_float(tf5.get("vwap"), spot)
+    if np.isfinite(vwap) and vwap > 0:
+        if side == "CE":
+            if spot < vwap: score += 15
+            elif spot <= vwap * 1.003: score += 5
+        else:
+            if spot > vwap: score += 15
+            elif spot >= vwap * 0.997: score += 5
+
+    # OI behaviour: 15 points. Rising OI on the sold side is supportive.
+    if chg_oi > 0:
+        score += 10
+    elif chg_oi == 0:
+        score += 4
+    if oi >= 3000:
+        score += 5
+    elif oi > 0:
+        score += 2
+
+    # Option quality / liquidity: 20 points.
+    abs_delta = abs(delta) if np.isfinite(delta) else np.nan
+    if np.isfinite(abs_delta):
+        if 0.20 <= abs_delta <= 0.40: score += 7
+        elif 0.15 <= abs_delta < 0.20 or 0.40 < abs_delta <= 0.50: score += 4
+    if spread_pct <= 1.0: score += 5
+    elif spread_pct <= 2.0: score += 3
+    if volume >= 10000: score += 5
+    elif volume >= 3000: score += 3
+    elif volume >= 500: score += 1
+    if np.isfinite(iv) and iv >= 15: score += 3
+
+    # Penalize a short position when the underlying is too close to the
+    # relevant OI wall in the direction that would hurt the seller.
+    wall_room = np.nan
+    if side == "CE":
+        wall_room = (resistance - spot) / max(spot, 1) * 100
+        if wall_room >= 2.0: score += 5
+        elif wall_room >= 1.0: score += 2
+        elif wall_room < 0.5: score -= 10
+    else:
+        wall_room = (spot - support) / max(spot, 1) * 100
+        if wall_room >= 2.0: score += 5
+        elif wall_room >= 1.0: score += 2
+        elif wall_room < 0.5: score -= 10
+
+    score = float(np.clip(score, 0, 100))
+
+    hard_fail = []
+    if tf5.get("trend") == opposite:
+        hard_fail.append("5m trend conflict")
+    if spread_pct > 4:
+        hard_fail.append("wide option spread")
+    if not np.isfinite(abs_delta) or not (0.15 <= abs_delta <= 0.55):
+        hard_fail.append("delta unsuitable for selling")
+    if volume < 500:
+        hard_fail.append("weak option liquidity")
+    if oi <= 0:
+        hard_fail.append("no option OI")
+    if not np.isfinite(short_pop) or short_pop < 50:
+        hard_fail.append("low strategy PoP")
+    if side == "CE" and spot > resistance:
+        hard_fail.append("price above resistance")
+    if side == "PE" and spot < support:
+        hard_fail.append("price below support")
+
+    # For a short option the simple reference risk levels are premium-based.
+    # The SL is deliberately tighter than the profit target because option
+    # selling has asymmetric risk. This is a reference plan, not an order.
+    sl = round(entry * 1.35, 2)
+    target1 = round(entry * 0.60, 2)
+    target2 = round(entry * 0.35, 2)
+
+    if side == "CE":
+        trigger_level = max(vwap, spot) if np.isfinite(vwap) else spot
+        trigger_hit = spot <= resistance and spot < trigger_level * 1.005
+        exit_rule = (
+            f"Exit if spot sustains above resistance {fmt_price(resistance)} "
+            f"or option premium reaches {fmt_price(sl)}. Book profit progressively."
+        )
+    else:
+        trigger_level = min(vwap, spot) if np.isfinite(vwap) else spot
+        trigger_hit = spot >= support and spot > trigger_level * 0.995
+        exit_rule = (
+            f"Exit if spot sustains below support {fmt_price(support)} "
+            f"or option premium reaches {fmt_price(sl)}. Book profit progressively."
+        )
+
+    return {
+        "side": side,
+        "strike": float(row["Strike"]),
+        "action": "CALL SELL" if side == "CE" else "PUT SELL",
+        "entry": entry,
+        "sl": sl,
+        "target1": target1,
+        "target2": target2,
+        "pop": short_pop,
+        "long_pop": long_pop,
+        "delta": delta,
+        "iv": iv,
+        "score": score,
+        "rr1": (entry - target1) / max(sl - entry, 0.01),
+        "rr2": (entry - target2) / max(sl - entry, 0.01),
+        "trigger": "Sell only while price remains on the safe side of the OI/VWAP structure.",
+        "trigger_level": trigger_level,
+        "trigger_hit": trigger_hit,
+        "fail_reasons": hard_fail,
+        "oi": oi,
+        "chg_oi": chg_oi,
+        "volume": volume,
+        "spread_pct": spread_pct,
+        "alignment": alignment,
+        "vwap": vwap,
+        "room_pct": wall_room,
+        "readiness": "READY" if not hard_fail and score >= 60 and short_pop >= 55 else "NO TRADE",
+        "exit": exit_rule,
+    }
 
 
 # ============================================================
-# SIDEBAR
+# LIVE ANALYSIS
 # ============================================================
 
 with st.sidebar:
-    st.markdown("### 🔥 Top 5 F&O PoP Scanner")
-    st.caption("Scans the full NSE equity F&O market for trades with PoP > 75%.")
-
-    scan_market = st.button(
-        "🔎 Scan Full F&O Market",
-        use_container_width=True,
-        type="primary",
-    )
-
-    if scan_market:
-        try:
-            with st.spinner("Scanning the full F&O market..."):
-                results, total, scanned, failed = scan_full_fno_pop_market(75.0)
-            st.session_state["fno_pop_results"] = results
-            st.session_state["fno_pop_scan_info"] = (total, scanned, failed)
-            st.session_state["fno_pop_scan_time"] = datetime.now(ZoneInfo("Asia/Kolkata")).strftime("%H:%M:%S")
-        except UpstoxRateLimitError as exc:
-            st.session_state["fno_pop_results"] = []
-            st.error(
-                f"⏳ Upstox rate limit reached. Wait about {exc.retry_after} seconds, "
-                "then scan again. The scanner stopped immediately to avoid making the block worse."
-            )
-        except UpstoxError as exc:
-            st.session_state["fno_pop_results"] = []
-            st.error(str(exc))
-        except Exception as exc:
-            st.session_state["fno_pop_results"] = []
-            st.error(f"F&O scan failed: {exc}")
-
-    pop_results = st.session_state.get("fno_pop_results", [])
-    scan_info = st.session_state.get("fno_pop_scan_info")
-    scan_time = st.session_state.get("fno_pop_scan_time")
-
-    if pop_results:
-        st.success(f"Top {len(pop_results)} trades with PoP > 75%")
-        if scan_info:
-            total, scanned, failed = scan_info
-            st.caption(f"Scanned {scanned}/{total} F&O stocks • {failed} unavailable")
-        if scan_time:
-            st.caption(f"Last scan: {scan_time} IST")
-
-        scanner_display = pd.DataFrame([
-            {
-                "Stock": row["Stock"],
-                "Trade": row["Trade"],
-                "Strike": int(row["Strike"]),
-                "PoP": f"{row['PoP']:.1f}%",
-                "Entry": fmt_price(row["Entry"]),
-                "SL": fmt_price(row["SL"]),
-                "Target1": fmt_price(row["Target1"]),
-                "Target2": fmt_price(row["Target2"]),
-                "Exit": row["Exit"],
-            }
-            for row in pop_results
-        ])
-        st.dataframe(
-            scanner_display,
-            use_container_width=True,
-            hide_index=True,
-            height=min(360, 58 + len(scanner_display) * 52),
-        )
-    elif "fno_pop_results" in st.session_state:
-        st.info("No F&O stock currently has an option trade with PoP > 75%.")
-
-    st.divider()
-    st.markdown("### 🔎 Analyze Instrument")
-
-    symbol_label = "Stock / Index"
-    symbol_default = st.session_state.get("symbol", "KOTAKBANK")
-    symbol_placeholder = "e.g. KOTAKBANK, HDFCBANK, NIFTY"
-
+    st.markdown("## 🔎 Analyze Instrument")
     symbol_input = st.text_input(
-        symbol_label,
-        value=symbol_default,
-        placeholder=symbol_placeholder,
-        label_visibility="collapsed",
+        "NSE Stock / Index",
+        value=st.session_state.get("symbol", "KOTAKBANK"),
+        placeholder="NIFTY / BANKNIFTY / HDFCBANK",
     )
-
-    risk_profile = st.selectbox(
-        "Risk Profile",
-        ["Conservative", "Balanced", "Aggressive"],
-        index=1,
-    )
-
-    analyze = st.button(
-        "🔍 Analyze",
-        type="primary",
-        use_container_width=True,
-    )
-
-    refresh = st.button(
-        "↻ Refresh Live Data",
-        use_container_width=True,
-    )
-
-    if st_autorefresh is not None:
-        auto_refresh = st.checkbox(
-            "Auto refresh every 60 seconds",
-            value=False,
-        )
-        if auto_refresh:
-            st_autorefresh(interval=60_000, key="upstox_live_refresh")
-
+    risk_profile = st.selectbox("Risk Profile", ["Conservative", "Balanced", "Aggressive"], index=1)
+    analyze = st.button("Analyze Live Market", type="primary", use_container_width=True)
+    refresh = st.button("↻ Refresh Live Data", use_container_width=True)
+    auto_refresh = st.checkbox("Auto refresh every 60 seconds", value=False)
+    if auto_refresh and st_autorefresh is not None:
+        st_autorefresh(interval=60_000, key="simple_live_refresh")
     st.divider()
     st.caption("LIVE DATA • Powered by Upstox")
-    st.caption("No simulated market values are used.")
+    st.caption("No simulated prices are used.")
 
 if analyze:
     st.session_state["symbol"] = alias_symbol(symbol_input)
     st.rerun()
-
 if refresh:
     st.cache_data.clear()
     st.rerun()
 
-symbol = alias_symbol(
-    st.session_state.get("symbol", symbol_input or "KOTAKBANK")
-)
-
-# ============================================================
-# LIVE DATA
-# ============================================================
+symbol = alias_symbol(st.session_state.get("symbol", symbol_input or "KOTAKBANK"))
 
 try:
-    with st.spinner(f"Fetching live Upstox data for {symbol}..."):
+    with st.spinner(f"Analyzing live {symbol} data..."):
         underlying = search_underlying(symbol)
         underlying_key = underlying["instrument_key"]
-
         contracts = get_contracts(underlying_key)
         expiries = available_expiries(contracts)
-
         if not expiries:
-            raise UpstoxError(
-                "Upstox did not return an upcoming F&O expiry for this instrument."
-            )
-
+            raise UpstoxError("No upcoming F&O expiry was returned by Upstox.")
         selected_expiry = expiries[0]
-
-        raw_chain = get_option_chain(
-            underlying_key,
-            selected_expiry,
-        )
-
+        raw_chain = get_option_chain(underlying_key, selected_expiry)
         chain = normalize_chain(raw_chain)
-
         quote_data = get_quote(underlying_key)
-
         spot = safe_float(quote_data.get("last_price"))
-        previous_close = safe_float(
-            quote_data.get("prev_close_price"),
-            spot,
-        )
-
-        net_change = safe_float(
-            quote_data.get("net_change"),
-            spot - previous_close,
-        )
-
-        change_pct = (
-            net_change / previous_close * 100
-            if previous_close
-            else 0
-        )
-
+        previous_close = safe_float(quote_data.get("prev_close_price"), spot)
+        net_change = safe_float(quote_data.get("net_change"), spot - previous_close)
+        change_pct = net_change / previous_close * 100 if previous_close else 0
         candles = get_daily_candles(underlying_key)
         candles_30m = get_30m_candles(underlying_key)
         candles_5m = get_intraday_candles(underlying_key, 5)
-
         daily_tech = technicals(candles, spot)
         tf30 = technicals(candles_30m, spot)
         tf5 = technicals(candles_5m, spot)
-
-        # Keep the existing UI terminology while using the stronger daily trend
-        # as the headline bias.
-        tech = daily_tech
-
 except UpstoxRateLimitError as exc:
-    st.error(
-        f"⏳ Upstox rate limit reached. Please wait about {exc.retry_after} seconds "
-        "before refreshing. The app has stopped sending requests while the limit is active."
-    )
+    st.error(f"⏳ Upstox rate limit reached. Please wait about {exc.retry_after} seconds before refreshing.")
     st.stop()
 except UpstoxError as exc:
     st.error(str(exc))
@@ -1428,604 +1290,238 @@ except Exception as exc:
     st.stop()
 
 support, resistance, pcr, oi_wall_info = oi_levels(chain, spot)
-
 atm_index = (chain["Strike"] - spot).abs().idxmin()
-atm_strike = float(chain.loc[atm_index, "Strike"])
 
-# Evaluate a wider ATM band, then select the strike using the full quality engine.
-candidate_rows = chain.iloc[
-    max(0, atm_index - 5): min(len(chain), atm_index + 6)
-]
+# For each strategy we select a strike that is close enough to the underlying
+# to remain liquid, then score the strategy itself rather than a generic BUY score.
+band = chain.iloc[max(0, atm_index - 8):min(len(chain), atm_index + 9)].copy()
 
-ce_candidates = []
-pe_candidates = []
 
-for _, row in candidate_rows.iterrows():
-    ce_scored = score_option(
-        row, "CE", spot, pcr, tf5, tf30, daily_tech, chain,
-        support=support, resistance=resistance, oi_wall_info=oi_wall_info,
-    )
-    pe_scored = score_option(
-        row, "PE", spot, pcr, tf5, tf30, daily_tech, chain,
-        support=support, resistance=resistance, oi_wall_info=oi_wall_info,
-    )
-    ce_candidates.append((ce_scored, row))
-    pe_candidates.append((pe_scored, row))
+def buy_candidate(side):
+    candidates = []
+    for _, row in band.iterrows():
+        scored = score_option(row, side, spot, pcr, tf5, tf30, daily_tech, chain,
+                              support=support, resistance=resistance, oi_wall_info=oi_wall_info)
+        prefix = "CE" if side == "CE" else "PE"
+        pop = safe_float(row[f"{prefix} PoP"])
+        volume = safe_float(row[f"{prefix} Volume"], 0)
+        spread = scored.get("spread_pct", 999)
+        delta = abs(safe_float(row[f"{prefix} Delta"]))
+        if np.isfinite(pop) and np.isfinite(row[f"{prefix} LTP"]) and row[f"{prefix} LTP"] > 0:
+            candidates.append((scored["score"], pop, volume, -spread, -abs(delta - .55), row))
+    if not candidates:
+        return None
+    row = max(candidates, key=lambda x: x[:-1])[-1]
+    return build_plan(row, side, spot, support, resistance, pcr, tf5, tf30, daily_tech,
+                      risk_profile, chain, oi_wall_info)
 
-def _candidate_key(item):
-    scored, row = item
-    # Score first; then prefer Delta, lower spread, higher volume and closer ATM.
-    abs_delta = abs(safe_float(scored.get("delta"), 0))
-    spread = safe_float(scored.get("spread_pct"), 999)
-    volume = safe_float(scored.get("volume"), 0)
-    distance = safe_float(scored.get("distance_pct"), 999)
-    delta_fit = -abs(abs_delta - 0.55)
-    return (scored["score"], delta_fit, -spread, np.log1p(max(volume, 0)), -distance)
 
-best_ce_scored, best_ce_row = max(ce_candidates, key=_candidate_key, default=({"score": 0}, None))
-best_pe_scored, best_pe_row = max(pe_candidates, key=_candidate_key, default=({"score": 0}, None))
+def sell_candidate(side):
+    candidates = []
+    for _, row in chain.iterrows():
+        prefix = "CE" if side == "CE" else "PE"
+        strike = safe_float(row["Strike"])
+        if not np.isfinite(strike):
+            continue
+        # Prefer slightly OTM options for selling rather than ATM options.
+        if side == "CE" and strike < spot * 1.005:
+            continue
+        if side == "PE" and strike > spot * 0.995:
+            continue
+        plan = build_sell_plan(row, side, spot, support, resistance, pcr, tf5, tf30,
+                               daily_tech, risk_profile, chain, oi_wall_info)
+        if plan is None:
+            continue
+        candidates.append((plan["score"], plan["pop"], plan["volume"], -plan["spread_pct"], -abs(abs(plan["delta"]) - .30), plan))
+    if not candidates:
+        return None
+    return max(candidates, key=lambda x: x[:-1])[-1]
 
-ce_plan = build_plan(
-    best_ce_row, "CE", spot, support, resistance, pcr,
-    tf5, tf30, daily_tech, risk_profile, chain, oi_wall_info
-)
-pe_plan = build_plan(
-    best_pe_row, "PE", spot, support, resistance, pcr,
-    tf5, tf30, daily_tech, risk_profile, chain, oi_wall_info
-)
 
-ce_score = ce_plan["score"] if ce_plan else 0
-pe_score = pe_plan["score"] if pe_plan else 0
+call_buy = buy_candidate("CE")
+put_buy = buy_candidate("PE")
+call_sell = sell_candidate("CE")
+put_sell = sell_candidate("PE")
 
 # ============================================================
-# DECISION ENGINE — ACTIONABLE / WAIT / WATCH / NO TRADE
+# FINAL 5-WAY DECISION
 # ============================================================
-# The previous version required score >=72, 2/3 timeframe alignment and
-# PoP >=55 as hard conditions simultaneously. That is appropriate for an
-# extremely selective filter, but it can suppress too many legitimate
-# developing setups.
-#
-# New hierarchy:
-#   1. CALL BUY / PUT BUY  = strong, aligned and confirmed
-#   2. WAIT FOR TRIGGER     = quality candidate, trigger not reached
-#   3. WAIT FOR CONFIRMATION= trigger reached, candle/volume still missing
-#   4. WATCHLIST             = promising but not strong enough to wait for entry
-#   5. NO TRADE              = conflicting/poor-quality setup
-#
-# No signal is created merely to increase trade frequency.
-overall_direction, overall_alignment = overall_trend(tf5, tf30, daily_tech)
+MIN_SCORE = 60
+MIN_POP = 55
 
-def _direction_for_plan(plan):
-    return "Bullish" if plan and plan.get("side") == "CE" else "Bearish" if plan else "Mixed"
+strategy_plans = {
+    "CALL BUY": call_buy,
+    "CALL SELL": call_sell,
+    "PUT BUY": put_buy,
+    "PUT SELL": put_sell,
+}
 
-def _severe_reasons(plan):
+eligible = []
+for action, plan in strategy_plans.items():
     if not plan:
-        return ["no valid option plan"]
-    return list(plan.get("fail_reasons") or [])
-
-def _actionable(plan, score, side):
-    if not plan:
-        return False
-    desired_direction = "Bullish" if side == "CE" else "Bearish"
-    return (
-        score >= 60
-        and plan.get("alignment", 0) >= 1
-        and overall_direction == desired_direction
-        and not _severe_reasons(plan)
-        and plan.get("pop_ok", False)
-        and plan.get("readiness") == "READY"
-    )
-
-def _wait_candidate(plan, score, side):
-    if not plan or score < 55 or _severe_reasons(plan):
-        return False
-    desired_direction = "Bullish" if side == "CE" else "Bearish"
-    # At least one timeframe must support the direction; the 5m timeframe
-    # must not be directly opposite. This prevents random WAIT signals.
-    return (
-        plan.get("alignment", 0) >= 1
-        and tf5.get("trend") != ("Bearish" if side == "CE" else "Bullish")
-        and (overall_direction in {desired_direction, "Mixed"} or plan.get("alignment", 0) >= 2)
-        and plan.get("pop_ok", False)
-    )
-
-ce_actionable = _actionable(ce_plan, ce_score, "CE")
-pe_actionable = _actionable(pe_plan, pe_score, "PE")
-
-# Prefer the stronger side when both qualify. A minimum score separation of
-# 5 points avoids flipping the direction on tiny scoring differences.
-if ce_actionable and (not pe_actionable or ce_score >= pe_score + 5):
-    decision = "CALL BUY"
-    decision_class = "trade-call"
-    best_plan = ce_plan
-elif pe_actionable and (not ce_actionable or pe_score >= ce_score + 5):
-    decision = "PUT BUY"
-    decision_class = "trade-put"
-    best_plan = pe_plan
-else:
-    # Developing candidates are shown as WAIT rather than being falsely
-    # presented as executable trades.
-    ce_wait = _wait_candidate(ce_plan, ce_score, "CE")
-    pe_wait = _wait_candidate(pe_plan, pe_score, "PE")
-
-    if ce_wait or pe_wait:
-        if ce_wait and (not pe_wait or ce_score >= pe_score):
-            best_plan = ce_plan
-        else:
-            best_plan = pe_plan
-
-        if best_plan.get("readiness") == "READY":
-            # READY but blocked by a non-actionable quality condition: monitor
-            # it rather than converting it into a BUY.
-            decision = "WATCHLIST"
-        else:
-            decision = best_plan.get("readiness", "WAIT FOR TRIGGER")
-        decision_class = "trade-neutral"
+        continue
+    hard_fail = plan.get("fail_reasons") or []
+    pop = safe_float(plan.get("pop"))
+    score = safe_float(plan.get("score"), 0)
+    if action in {"CALL BUY", "PUT BUY"}:
+        ready = (
+            score >= MIN_SCORE and pop >= MIN_POP and
+            not hard_fail and plan.get("readiness") == "READY"
+        )
     else:
-        decision = "NO TRADE"
-        decision_class = "trade-neutral"
-        best_plan = ce_plan if ce_score >= pe_score else pe_plan
+        ready = score >= MIN_SCORE and pop >= MIN_POP and not hard_fail
+    if ready:
+        eligible.append((score + pop * 0.25, action, plan))
 
-# Confidence is intentionally a separate descriptive measure.
-best_score = best_plan["score"] if best_plan else 0
-best_alignment = best_plan["alignment"] if best_plan else 0
-confidence = int(np.clip(
-    best_score * 0.70 + (best_alignment / 3) * 20 +
-    (5 if overall_direction in {"Bullish", "Bearish"} else 0), 0, 100
-))
+if eligible:
+    _, decision, best_plan = max(eligible, key=lambda x: x[0])
+else:
+    decision = "NO TRADE"
+    # Show the best reference candidate internally for diagnostics, but do not
+    # label it as a recommendation.
+    available = [(safe_float(p.get("score"), 0), action, p) for action, p in strategy_plans.items() if p]
+    best_plan = max(available, key=lambda x: x[0])[2] if available else None
 
-updated = quote_data.get(
-    "timestamp",
-    datetime.now().astimezone().isoformat(),
-)
+# The decision is intentionally binary at the action level: one of four trades
+# or NO TRADE. There are no WAIT/WATCHLIST states in the primary UI.
 
 # ============================================================
-# DASHBOARD UI — REDESIGNED VISUAL HIERARCHY ONLY
-# The analysis engine above is intentionally unchanged.
+# VISUAL DASHBOARD
 # ============================================================
 
-market_now = datetime.now(ZoneInfo("Asia/Kolkata"))
-market_open = (
-    market_now.weekday() < 5
-    and (market_now.hour, market_now.minute) >= (9, 15)
-    and (market_now.hour, market_now.minute) < (15, 30)
-)
+now_ist = datetime.now(ZoneInfo("Asia/Kolkata"))
+market_open = now_ist.weekday() < 5 and (now_ist.hour, now_ist.minute) >= (9, 15) and (now_ist.hour, now_ist.minute) <= (15, 30)
+status_text = "● LIVE DATA" if market_open else "● MARKET CLOSED"
+status_class = "live-block" if market_open else "closed-block"
 
-# ---------- UI helpers ----------
-def _num_or_dash(v, decimals=2):
-    try:
-        x = float(v)
-        if not np.isfinite(x):
-            return "—"
-        return f"{x:.{decimals}f}"
-    except Exception:
-        return "—"
-
-
-def _status_class(value):
-    v = str(value).upper()
-    if "READY" in v or "PASS" in v or "BUY" in v:
-        return "status-green"
-    if "WAIT" in v or "CAUTION" in v:
-        return "status-yellow"
-    if "NO TRADE" in v or "FAIL" in v:
-        return "status-red"
-    return "status-grey"
-
-
-
-def _check_row(label, state, detail):
-    icon = "🟢" if state == "PASS" else "🟡" if state == "WAIT" else "🔴"
-    css = "check-pass" if state == "PASS" else "check-wait" if state == "WAIT" else "check-fail"
-    return f"<div class='check-row'><span>{label}</span><strong class='{css}'>{icon} {state}</strong><small>{detail}</small></div>"
-
-
-# ---------- Header ----------
 st.markdown(
     f"""
-<div class=\"topbar topbar-dashboard\">
-    <div>
-        <div class=\"topbar-title\">📊 FO PRO Trader Assistant</div>
-        <div class=\"topbar-sub\">Options Analysis • Powered by Upstox • Live market data</div>
-    </div>
-    <div class=\"header-live\">{'● LIVE DATA' if market_open else '● MARKET CLOSED'}</div>
+<div class="topbar topbar-dashboard">
+  <div><div class="topbar-title">📊 FO PRO Trader Assistant</div>
+  <div class="topbar-sub">Simple 5-way F&O decision engine • Live Upstox market data</div></div>
+  <div class="{status_class}">{status_text}</div>
 </div>
 """,
     unsafe_allow_html=True,
 )
 
-h1, h2, h3 = st.columns([2.3, 1.15, 1.05])
-with h1:
-    st.markdown(f"## {symbol} — F&O Options Analysis")
-    st.caption("Live underlying • Option-chain analysis • Multi-timeframe confirmation")
-with h2:
-    st.markdown("**Last Traded**")
-    st.markdown(f"<div class='hero-price'>{fmt_price(spot)}</div>", unsafe_allow_html=True)
-    st.caption(f"{net_change:+.2f} ({change_pct:+.2f}%)")
-with h3:
-    st.markdown("**Data Status**")
-    status_text = "● LIVE DATA" if market_open else "● MARKET CLOSED"
-    status_css = "live-block" if market_open else "closed-block"
-    st.markdown(f"<div class='{status_css}'>{status_text}</div>", unsafe_allow_html=True)
-    st.caption(f"Expiry: {selected_expiry}")
+# Instrument snapshot
+st.markdown("<div class='section-heading'>MARKET SNAPSHOT</div>", unsafe_allow_html=True)
+cols = st.columns(6)
+snapshot = [
+    ("SPOT", fmt_price(spot), f"{net_change:+.2f} ({change_pct:+.2f}%)"),
+    ("EXPIRY", selected_expiry, "Nearest F&O expiry"),
+    ("PCR", f"{pcr:.2f}" if np.isfinite(pcr) else "—", "Put / Call OI"),
+    ("SUPPORT", fmt_price(support), "Put OI zone"),
+    ("RESISTANCE", fmt_price(resistance), "Call OI zone"),
+    ("VWAP", fmt_price(tf5.get("vwap")), "5m VWAP"),
+]
+for col, (title, value, note) in zip(cols, snapshot):
+    with col:
+        st.markdown(f"<div class='metric-card'><span>{title}</span><b>{value}</b><small>{note}</small></div>", unsafe_allow_html=True)
 
-# ---------- Market snapshot ----------
-st.markdown("<div class='section-heading'>📊 MARKET SNAPSHOT</div>", unsafe_allow_html=True)
-m1, m2, m3, m4, m5, m6 = st.columns(6)
-with m1:
-    st.markdown(f"<div class='metric-card'><span>LAST PRICE</span><b>{fmt_price(spot)}</b><small>LIVE PRICE</small></div>", unsafe_allow_html=True)
-with m2:
-    bias_cls = "metric-positive" if tech["trend"] == "Bullish" else "metric-negative" if tech["trend"] == "Bearish" else "metric-neutral"
-    st.markdown(f"<div class='metric-card {bias_cls}'><span>MARKET BIAS</span><b>{tech['trend']}</b><small>HEADLINE TREND</small></div>", unsafe_allow_html=True)
-with m3:
-    pcr_display = f"{pcr:.2f}" if np.isfinite(pcr) else "—"
-    st.markdown(
-        f"<div class='metric-card'><span>PCR</span><b>{pcr_display}</b><small>PUT / CALL OI</small></div>",
-        unsafe_allow_html=True,
-    )
-with m4:
-    st.markdown(f"<div class='metric-card metric-support'><span>SUPPORT</span><b>{fmt_price(support)}</b><small>PUT OI WALL</small></div>", unsafe_allow_html=True)
-with m5:
-    st.markdown(f"<div class='metric-card metric-resistance'><span>RESISTANCE</span><b>{fmt_price(resistance)}</b><small>CALL OI WALL</small></div>", unsafe_allow_html=True)
-with m6:
-    st.markdown(f"<div class='metric-card'><span>RSI</span><b>{tech['rsi']:.1f}</b><small>DAILY RSI</small></div>", unsafe_allow_html=True)
-
-# ---------- Trade decision ----------
-decision_icon = "🟢" if decision == "CALL BUY" else "🔴" if decision == "PUT BUY" else "🟡" if "WAIT" in decision else "⚪"
-decision_sub = {
-    "CALL BUY": "Bullish conditions aligned — entry confirmation required by the engine.",
-    "PUT BUY": "Bearish conditions aligned — entry confirmation required by the engine.",
-    "WAIT FOR TRIGGER": "Setup is developing. Do not enter until the trigger is reached.",
-    "WAIT FOR CONFIRMATION": "Trigger reached, but confirmation conditions are not complete.",
-    "WATCHLIST": "Promising setup, but quality is not strong enough for an entry yet.",
-    "NO TRADE": "Conditions are not sufficiently aligned for a valid setup.",
-}.get(decision, "Review the live conditions before taking action.")
-
+# Main decision card — this is the answer the user should look at first.
 st.markdown("<div class='section-heading'>🎯 TRADE DECISION</div>", unsafe_allow_html=True)
+decision_meta = {
+    "CALL BUY": ("🟢", "decision-call", "Buy a Call option when the displayed entry conditions are satisfied."),
+    "CALL SELL": ("🔵", "decision-call", "Sell a Call option; understand the higher risk of option selling before entering."),
+    "PUT BUY": ("🔴", "decision-put", "Buy a Put option when the displayed entry conditions are satisfied."),
+    "PUT SELL": ("🟣", "decision-put", "Sell a Put option; understand the higher risk of option selling before entering."),
+    "NO TRADE": ("⚪", "decision-neutral", "No strategy currently meets all minimum quality and PoP conditions."),
+}
+icon, card_class, subtitle = decision_meta[decision]
 
-# Use native Streamlit layout for this section instead of nested HTML.
-# This prevents Streamlit from ever displaying HTML tags as literal text.
-with st.container(border=True):
-    st.markdown(f"### {decision_icon} {decision}")
-    st.caption(decision_sub)
+if decision != "NO TRADE" and best_plan:
+    action_pop = safe_float(best_plan.get("pop"))
+    action_score = safe_float(best_plan.get("score"), 0)
+    contract = f"{best_plan['strike']:.0f} {'CE' if best_plan['side'] == 'CE' else 'PE'}"
+    action_label = decision
+else:
+    action_pop = np.nan
+    action_score = max([safe_float(p.get("score"), 0) for p in strategy_plans.values() if p] or [0])
+    contract = "—"
+    action_label = "NO TRADE"
 
-    d1, d2, d3, d4 = st.columns(4)
-    with d1:
-        st.metric("BULL SCORE", f"{ce_score:.0f}/100")
-    with d2:
-        st.metric("BEAR SCORE", f"{pe_score:.0f}/100")
-    with d3:
-        st.metric("TREND", overall_direction.upper())
-    with d4:
-        st.metric("CONFIDENCE", f"{confidence}/100")
-
-# ---------- Trade status ----------
-st.markdown("<div class='section-heading'>🚦 TRADE STATUS</div>", unsafe_allow_html=True)
-status_plan = best_plan
-if status_plan:
-    # IMPORTANT: best_plan can be the strongest *candidate* even when the
-    # quality gate rejects it.  Never present that candidate as an active trade.
-    actionable_decision = decision in {"CALL BUY", "PUT BUY"}
-    status = decision if actionable_decision else "NO TRADE"
-    if decision in {"WAIT FOR TRIGGER", "WAIT FOR CONFIRMATION", "WATCHLIST"}:
-        status = decision
-
-    status_title = {
-        "CALL BUY": "🟢 CALL BUY — ACTIONABLE",
-        "PUT BUY": "🔴 PUT BUY — ACTIONABLE",
-        "WAIT FOR TRIGGER": "🟡 WAIT FOR TRIGGER — DO NOT ENTER",
-        "WAIT FOR CONFIRMATION": "🟡 WAIT FOR CONFIRMATION — DO NOT ENTER",
-        "WATCHLIST": "🟠 WATCHLIST — DO NOT ENTER",
-        "NO TRADE": "🔴 NO TRADE — DO NOT ENTER",
-    }.get(status, "🔴 NO TRADE — DO NOT ENTER")
-    trigger_distance = abs(spot - status_plan["trigger_level"])
-
-    if status == "NO TRADE":
-        status_note = (
-            f"Do not enter this setup. The {'CALL' if status_plan['side'] == 'CE' else 'PUT'} side is currently too weak or conflicting. "
-            f"Wait for a materially better setup."
-        )
-    elif status == "WATCHLIST":
-        status_note = (
-            f"Do not enter. Monitor the {'CALL' if status_plan['side'] == 'CE' else 'PUT'} candidate. "
-            f"It needs stronger alignment/quality before becoming actionable."
-        )
-    else:
-        status_note = status_plan["trigger"]
-
-    st.markdown(
-        f"""
-<div class='status-panel {_status_class(status)}'>
-    <div class='status-title'>{status_title}</div>
-    <div class='status-grid'>
-        <div><span>CURRENT PRICE</span><b>{fmt_price(spot)}</b></div>
-        <div><span>TRIGGER</span><b>{fmt_price(status_plan['trigger_level'])}</b></div>
-        <div><span>DISTANCE</span><b>{fmt_price(trigger_distance)}</b></div>
-    </div>
-    <div class='status-note'>{status_note}</div>
+st.markdown(
+    f"""
+<div class="decision-card {card_class}">
+  <div class="decision-main">{icon} {action_label}</div>
+  <div class="decision-sub">{subtitle}</div>
+  <div class="decision-stats">
+    <div><span>OPTION</span><div class="decision-value">{contract}</div></div>
+    <div><span>PoP</span><div class="decision-value">{f'{action_pop:.1f}%' if np.isfinite(action_pop) else '—'}</div></div>
+    <div><span>QUALITY</span><div class="decision-value">{action_score:.0f}<span>/100</span></div></div>
+    <div><span>MARKET</span><div class="decision-value">{overall_trend(tf5, tf30, daily_tech)[0].upper()}</div></div>
+  </div>
 </div>
 """,
-        unsafe_allow_html=True,
-    )
-else:
-    st.markdown("<div class='status-panel status-grey'><div class='status-title'>⚪ NO VALID PLAN</div><div class='status-note'>No usable option contract was returned by the live chain. No trade should be considered.</div></div>", unsafe_allow_html=True)
-
-# ---------- Checklist ----------
-direction_pass = overall_direction in {"Bullish", "Bearish"}
-mtf_pass = overall_alignment >= 2
-oi_pass = np.isfinite(support) and np.isfinite(resistance) and support < spot < resistance
-vwap_value = safe_float(tf5.get("vwap"), spot)
-if best_plan:
-    if best_plan["side"] == "CE":
-        vwap_pass = spot >= vwap_value * 0.997
-    else:
-        vwap_pass = spot <= vwap_value * 1.003
-else:
-    vwap_pass = False
-breakout_state = "PASS" if best_plan and best_plan.get("trigger_hit") and best_plan.get("candle_confirmed") and best_plan.get("volume_confirmed") else "WAIT"
-
-st.markdown("<div class='section-heading'>🧠 TRADE CHECKLIST</div>", unsafe_allow_html=True)
-check_html = (
-    _check_row("Market Direction", "PASS" if direction_pass else "FAIL", f"{overall_direction} market bias") +
-    _check_row("Multi-Timeframe", "PASS" if mtf_pass else "FAIL", f"{overall_alignment}/3 timeframes aligned") +
-    _check_row("OI Structure", "PASS" if oi_pass else "FAIL", f"Support {fmt_price(support)} • Resistance {fmt_price(resistance)}") +
-    _check_row("VWAP", "PASS" if vwap_pass else "FAIL", f"5m VWAP {fmt_price(vwap_value)}") +
-    _check_row("Breakout Confirmation", breakout_state, "Trigger + 5m momentum + volume confirmation")
-)
-check_overall = sum([direction_pass, mtf_pass, oi_pass, vwap_pass, breakout_state == "PASS"])
-st.markdown(
-    f"<div class='check-card'>{check_html}<div class='check-total'><span>OVERALL</span><b>{check_overall}/5</b></div></div>",
     unsafe_allow_html=True,
 )
 
-# ---------- Trade plan ----------
-st.markdown("<div class='section-heading'>🎯 TRADE PLAN</div>", unsafe_allow_html=True)
+# Compact strategy comparison: one row per possible action. This is useful when
+# NO TRADE is returned because it shows that the engine actually evaluated all four sides.
+st.markdown("<div class='section-heading'>ENGINE RESULT</div>", unsafe_allow_html=True)
+engine_rows = []
+for action in ["CALL BUY", "CALL SELL", "PUT BUY", "PUT SELL"]:
+    plan = strategy_plans[action]
+    if plan:
+        fails = ", ".join(plan.get("fail_reasons") or []) or "All minimum checks passed"
+        engine_rows.append({
+            "Strategy": action,
+            "Strike": int(round(plan["strike"])),
+            "PoP": f"{safe_float(plan.get('pop')):.1f}%" if np.isfinite(safe_float(plan.get("pop"))) else "—",
+            "Quality": f"{safe_float(plan.get('score'), 0):.0f}/100",
+            "Status": "SELECTED" if action == decision else ("ELIGIBLE" if not plan.get("fail_reasons") and safe_float(plan.get("score"), 0) >= MIN_SCORE and safe_float(plan.get("pop"), 0) >= MIN_POP else "REJECTED"),
+            "Reason": fails,
+        })
+if engine_rows:
+    st.dataframe(pd.DataFrame(engine_rows), use_container_width=True, hide_index=True)
 
-# A plan is only an active trade when the decision is CALL BUY or PUT BUY.
-# For WAIT/NO TRADE states, the highest-scoring plan is shown only as a
-# reference candidate so the user can see what must improve before entry.
-active_side = "CE" if decision == "CALL BUY" else "PE" if decision == "PUT BUY" else None
-candidate_side = best_plan["side"] if best_plan else None
-
-def render_plan_native(plan, label, active=False, candidate=False):
-    """Render the trade plan with native Streamlit components.
-
-    This intentionally avoids nested HTML divs because Streamlit's Markdown/HTML
-    sanitizer can render portions of complex nested cards as literal code.
-    """
-    if not plan:
-        st.info(f"{label} BUY — No valid option plan returned.")
-        return
-
-    side = plan["side"]
-    icon = "🟢" if side == "CE" else "🔴"
-    contract = "CE" if side == "CE" else "PE"
-    status = str(plan.get("readiness", "NO TRADE"))
-    status_icon = "🟢" if status == "READY" else "🟡" if "WAIT" in status else "🔴"
-
-    with st.container(border=True):
-        header_left, header_right = st.columns([3, 1])
-        with header_left:
-            st.markdown(f"### {icon} {label} BUY")
-        with header_right:
-            if active:
-                st.markdown("**★ ACTIVE TRADE**")
-            elif candidate:
-                st.markdown("**◉ CANDIDATE ONLY**")
-
-        st.markdown(f"## {plan['strike']:.0f} {contract}")
-        if active:
-            st.success("ACTIONABLE: follow the entry trigger and risk levels below.")
-        elif candidate:
-            st.info("REFERENCE ONLY: this is the strongest current candidate, but the engine says NO TRADE. Do not enter.")
-
-        values = [
-            ("Entry", fmt_price(plan.get("entry"))),
-            ("Stop Loss", fmt_price(plan.get("sl"))),
-            ("Target 1", fmt_price(plan.get("target1"))),
-            ("Target 2", fmt_price(plan.get("target2"))),
-            ("PoP", f"{_num_or_dash(plan.get('pop'), 1)}%"),
-            ("Delta", _num_or_dash(plan.get("delta"), 2)),
-            ("IV", f"{_num_or_dash(plan.get('iv'), 1)}%"),
-            ("R:R T2", f"1:{_num_or_dash(plan.get('rr2'), 2)}"),
-        ]
-        cols = st.columns(4)
-        for col, (title, value) in zip(cols, values[:4]):
-            with col:
-                st.metric(title, value)
-        cols = st.columns(4)
-        for col, (title, value) in zip(cols, values[4:]):
-            with col:
-                st.metric(title, value)
-
-        if status == "READY":
-            st.success(f"{status_icon} {status}")
-        elif "WAIT" in status:
-            st.warning(f"{status_icon} {status}")
-        else:
-            st.error(f"{status_icon} {status}")
-
-p1, p2 = st.columns(2)
-with p1:
-    render_plan_native(ce_plan, "CALL", active_side == "CE", candidate_side == "CE" and active_side is None)
-with p2:
-    render_plan_native(pe_plan, "PUT", active_side == "PE", candidate_side == "PE" and active_side is None)
-
-# ---------- Entry / Exit ----------
-st.markdown("<div class='section-heading'>📍 ENTRY / EXIT</div>", unsafe_allow_html=True)
-if best_plan and decision in {"CALL BUY", "PUT BUY"}:
-    entry_distance = abs(spot - best_plan["trigger_level"])
-    e1, e2, e3, e4, e5 = st.columns(5)
-    values = [
-        ("CURRENT PRICE", fmt_price(spot), "Underlying"),
-        ("ENTRY TRIGGER", fmt_price(best_plan["trigger_level"]), f"Distance {fmt_price(entry_distance)}"),
-        ("STOP LOSS", fmt_price(best_plan["sl"]), "Option premium"),
-        ("TARGET 1", fmt_price(best_plan["target1"]), "Partial exit"),
-        ("TARGET 2", fmt_price(best_plan["target2"]), "Final target"),
+# Trade levels only for the selected action.
+if decision != "NO TRADE" and best_plan:
+    st.markdown("<div class='section-heading'>TRADE LEVELS</div>", unsafe_allow_html=True)
+    levels = st.columns(5)
+    level_items = [
+        ("ENTRY", fmt_price(best_plan.get("entry")), "Option premium"),
+        ("STOP LOSS", fmt_price(best_plan.get("sl")), "Option premium"),
+        ("TARGET 1", fmt_price(best_plan.get("target1")), "First profit level"),
+        ("TARGET 2", fmt_price(best_plan.get("target2")), "Second profit level"),
+        ("DELTA / IV", f"{safe_float(best_plan.get('delta')):.2f} / {safe_float(best_plan.get('iv')):.1f}%", "Option quality"),
     ]
-    for col, (title, value, note) in zip([e1,e2,e3,e4,e5], values):
+    for col, (title, value, note) in zip(levels, level_items):
         with col:
             st.markdown(f"<div class='entry-card'><span>{title}</span><b>{value}</b><small>{note}</small></div>", unsafe_allow_html=True)
-    st.markdown(f"<div class='exit-rule'><span>EXIT RULE</span><b>{best_plan['exit']}</b></div>", unsafe_allow_html=True)
+    st.markdown(f"<div class='exit-rule'><span>EXIT RULE</span><b>{best_plan.get('exit','Follow stop-loss and targets.')}</b></div>", unsafe_allow_html=True)
 else:
-    if best_plan:
-        st.warning("DO NOT ENTER: entry, stop-loss and target levels are reference levels only. Wait for CALL BUY or PUT BUY before taking the trade.")
-    else:
-        st.info("No valid trade plan is available from the current option chain.")
+    st.info("NO TRADE means none of CALL BUY, CALL SELL, PUT BUY or PUT SELL passed the backend quality + PoP gates.")
 
-# ---------- Why this trade ----------
-section_title = "💡 WHY THIS TRADE?" if decision in {"CALL BUY", "PUT BUY"} else "💡 WHY NO TRADE?"
-st.markdown(f"<div class='section-heading'>{section_title}</div>", unsafe_allow_html=True)
-why_items = []
-if best_plan:
-    side_name = "CALL" if best_plan["side"] == "CE" else "PUT"
-    if decision in {"CALL BUY", "PUT BUY"}:
-        why_items += [
-            f"{tf5['trend']} 5m trend supports the {side_name} direction.",
-            f"{tf30['trend']} 30m trend and {daily_tech['trend']} daily trend are part of the multi-timeframe check.",
-            f"Price is {'above' if spot >= vwap_value else 'below'} the 5m VWAP at {fmt_price(vwap_value)}.",
-            f"OI structure shows support at {fmt_price(support)} and resistance at {fmt_price(resistance)}.",
-            f"Active option PoP is {_num_or_dash(best_plan['pop'], 1)}% with Delta {_num_or_dash(best_plan['delta'], 2)}.",
-            f"Option spread is {_num_or_dash(best_plan['spread_pct'], 1)}% with volume {fmt_num(best_plan['volume'])}.",
-        ]
+# Minimal supporting information — no checklist, wait states, watchlist or score dashboard.
+with st.expander("Why this decision?", expanded=False):
+    if decision != "NO TRADE" and best_plan:
+        st.write(
+            f"Selected {decision} on {best_plan['strike']:.0f} {'CE' if best_plan['side']=='CE' else 'PE'} "
+            f"with strategy PoP {best_plan['pop']:.1f}% and quality score {best_plan['score']:.0f}/100."
+        )
+        st.write(f"Trend: {overall_trend(tf5, tf30, daily_tech)[0]}. 5m: {tf5['trend']} • 30m: {tf30['trend']} • Daily: {daily_tech['trend']}.")
+        st.write(f"Support: {fmt_price(support)} • Resistance: {fmt_price(resistance)} • VWAP: {fmt_price(tf5.get('vwap'))}.")
     else:
-        why_items += [
-            f"The {side_name} is only the strongest current candidate; it is NOT an approved entry.",
-            f"Market direction is {overall_direction} and only {overall_alignment}/3 timeframes align with the candidate.",
-            f"5m trend is {tf5['trend']}; 30m is {tf30['trend']}; daily is {daily_tech['trend']}.",
-            f"Price is {'above' if spot >= vwap_value else 'below'} the 5m VWAP at {fmt_price(vwap_value)}.",
-            f"OI structure shows support at {fmt_price(support)} and resistance at {fmt_price(resistance)}.",
-            f"Candidate option PoP is {_num_or_dash(best_plan['pop'], 1)}% with Delta {_num_or_dash(best_plan['delta'], 2)}.",
-        ]
-    if best_plan["fail_reasons"]:
-        why_items.append("⚠ " + "; ".join(best_plan["fail_reasons"]))
-else:
-    why_items = ["No valid option plan is currently available."]
+        for action in ["CALL BUY", "CALL SELL", "PUT BUY", "PUT SELL"]:
+            plan = strategy_plans[action]
+            if plan:
+                reason = ", ".join(plan.get("fail_reasons") or []) or "quality/confirmation gate not met"
+                st.write(f"**{action}:** {reason} • PoP {safe_float(plan.get('pop')):.1f}% • Score {safe_float(plan.get('score'),0):.0f}/100")
 
-why_html_parts = []
-for item in why_items:
-    warning_class = "why-warning" if item.startswith("⚠") else ""
-    icon = "⚠" if item.startswith("⚠") else "✓"
-    clean_item = item.lstrip("⚠ ")
-    why_html_parts.append(
-        f"<div class='why-item {warning_class}'>{icon} {clean_item}</div>"
+st.markdown("<div class='section-heading'>OPTION DETAILS</div>", unsafe_allow_html=True)
+if decision != "NO TRADE" and best_plan:
+    st.write(
+        f"**{decision}** • {best_plan['strike']:.0f} {'CE' if best_plan['side']=='CE' else 'PE'} • "
+        f"PoP {best_plan['pop']:.1f}% • Delta {safe_float(best_plan['delta']):.2f} • "
+        f"IV {safe_float(best_plan['iv']):.1f}% • OI {fmt_num(best_plan['oi'])} • Volume {fmt_num(best_plan['volume'])}"
     )
-why_html = "".join(why_html_parts)
-st.markdown(f"<div class='why-card'>{why_html}</div>", unsafe_allow_html=True)
-
-# ---------- OI map ----------
-st.markdown("<div class='section-heading'>📍 SUPPORT / RESISTANCE + OI MAP</div>", unsafe_allow_html=True)
-put_row = nearest_row(chain, support)
-call_row = nearest_row(chain, resistance)
-put_oi = put_row["PE OI"] if put_row is not None else np.nan
-call_oi = call_row["CE OI"] if call_row is not None else np.nan
-support_room = max((spot - support) / max(spot,1) * 100, 0) if np.isfinite(support) else np.nan
-resistance_room = max((resistance - spot) / max(spot,1) * 100, 0) if np.isfinite(resistance) else np.nan
-
-st.markdown(
-    f"""
-<div class='sr-map'>
-    <div class='sr-side sr-resistance'>
-        <span>🔴 CALL OI WALL</span><b>{fmt_price(resistance)}</b><small>OI {fmt_num(call_oi)}</small>
-    </div>
-    <div class='sr-line'>
-        <div class='room-label'>+{_num_or_dash(resistance_room,2)}%</div>
-        <div class='current-marker'>● {fmt_price(spot)} <span>CURRENT</span></div>
-        <div class='room-label'>-{_num_or_dash(support_room,2)}%</div>
-    </div>
-    <div class='sr-side sr-support'>
-        <span>🟢 PUT OI WALL</span><b>{fmt_price(support)}</b><small>OI {fmt_num(put_oi)}</small>
-    </div>
-</div>
-""",
-    unsafe_allow_html=True,
-)
-
-# ---------- Tabs ----------
-tab1, tab2, tab3 = st.tabs([
-    "🏆 Best Trade", "🔎 Live Option Chain", "📊 Market Analysis"
-])
-
-with tab1:
-    if decision == "NO TRADE":
-        st.markdown("<div class='tab-alert tab-danger'><b>🔴 NO TRADE</b><br>Conditions are currently too weak or conflicting. Do not enter.</div>", unsafe_allow_html=True)
-    elif decision == "WATCHLIST":
-        st.markdown("<div class='tab-alert tab-danger'><b>🟠 WATCHLIST</b><br>Promising candidate, but do not enter until the engine changes to CALL BUY or PUT BUY.</div>", unsafe_allow_html=True)
-    elif best_plan:
-        tab_icon = "🟢" if best_plan["side"] == "CE" else "🔴"
-        st.markdown(f"<div class='tab-alert tab-positive'><b>{tab_icon} {decision}</b><br>Strike {best_plan['strike']:.0f} • Entry {fmt_price(best_plan['entry'])} • SL {fmt_price(best_plan['sl'])} • T1 {fmt_price(best_plan['target1'])} • T2 {fmt_price(best_plan['target2'])}</div>", unsafe_allow_html=True)
-
-with tab2:
-    st.markdown(f"### Live Option Chain — {selected_expiry}")
-    view = chain.copy()
-    display = pd.DataFrame({
-        "Strike": view["Strike"].round(0).astype(int),
-        "CE LTP": view["CE LTP"].round(2),
-        "CE OI": view["CE OI"].round(0).astype("int64"),
-        "CE Chg OI": view["CE Chg OI"].round(0).astype("int64"),
-        "CE IV": view["CE IV"].round(1),
-        "CE Delta": view["CE Delta"].round(3),
-        "CE PoP": view["CE PoP"].round(1),
-        "PE LTP": view["PE LTP"].round(2),
-        "PE OI": view["PE OI"].round(0).astype("int64"),
-        "PE Chg OI": view["PE Chg OI"].round(0).astype("int64"),
-        "PE IV": view["PE IV"].round(1),
-        "PE Delta": view["PE Delta"].round(3),
-        "PE PoP": view["PE PoP"].round(1),
-    })
-    display["_distance"] = (display["Strike"] - spot).abs()
-    display = display.sort_values("_distance").drop(columns="_distance").head(15)
-
-    def style_chain(row):
-        styles = ["" for _ in row.index]
-        strike = row["Strike"]
-        if strike == int(round(atm_strike)):
-            styles = ["font-weight:700;" for _ in row.index]
-        if best_plan and strike == int(round(best_plan["strike"])):
-            styles = ["font-weight:800;" for _ in row.index]
-        return styles
-
-    styled_chain = display.style.apply(style_chain, axis=1)
-    st.dataframe(styled_chain, use_container_width=True, hide_index=True, height=520)
-    st.caption("ATM and selected strikes are emphasized. All original CE/PE LTP, OI, Change OI, IV, Delta and PoP fields remain available.")
-
-with tab3:
-    a1, a2, a3, a4 = st.columns(4)
-    a1.metric("EMA 20", fmt_price(daily_tech["ema20"]))
-    a2.metric("EMA 50", fmt_price(daily_tech["ema50"]))
-    a3.metric("ATR 14", fmt_price(daily_tech["atr"]))
-    a4.metric("5m VWAP", fmt_price(tf5["vwap"]))
-
-    st.markdown("### Multi-Timeframe Confirmation")
-    mtf = pd.DataFrame([
-        {"Timeframe": "5 Minute", "Trend": tf5["trend"], "RSI": round(tf5["rsi"], 1), "ADX": round(tf5["adx"], 1), "Momentum %": round(tf5["momentum"], 2), "VWAP": fmt_price(tf5["vwap"])},
-        {"Timeframe": "30 Minute", "Trend": tf30["trend"], "RSI": round(tf30["rsi"], 1), "ADX": round(tf30["adx"], 1), "Momentum %": round(tf30["momentum"], 2), "VWAP": fmt_price(tf30["vwap"])},
-        {"Timeframe": "Daily", "Trend": daily_tech["trend"], "RSI": round(daily_tech["rsi"], 1), "ADX": round(daily_tech["adx"], 1), "Momentum %": round(daily_tech["momentum"], 2), "VWAP": fmt_price(daily_tech["vwap"])},
-    ])
-    st.dataframe(mtf, use_container_width=True, hide_index=True)
-
-    left, right = st.columns(2)
-    with left:
-        st.markdown("### 🟢 Support / Put OI")
-        st.write(f"Major support from Put OI: **{fmt_price(support)}**")
-        if put_row is not None:
-            st.write(f"Put OI: **{fmt_num(put_row['PE OI'])}**")
-            st.write(f"Put Chg OI: **{fmt_num(put_row['PE Chg OI'])}**")
-    with right:
-        st.markdown("### 🔴 Resistance / Call OI")
-        st.write(f"Major resistance from Call OI: **{fmt_price(resistance)}**")
-        if call_row is not None:
-            st.write(f"Call OI: **{fmt_num(call_row['CE OI'])}**")
-            st.write(f"Call Chg OI: **{fmt_num(call_row['CE Chg OI'])}**")
-
-    if not candles.empty:
-        chart = candles.set_index("timestamp")[["close"]].tail(80)
-        st.line_chart(chart, use_container_width=True)
-
-st.divider()
+else:
+    st.write("No option is currently selected for execution.")
 
 st.caption(
-    f"Live Upstox snapshot • {symbol} • Expiry {selected_expiry} • "
-    f"Updated {updated}. "
-    "For educational/decision-support use; review live market conditions before trading."
+    f"Live Upstox snapshot • {symbol} • Expiry {selected_expiry} • Updated {now_ist.strftime('%d-%b-%Y %H:%M:%S IST')}. "
+    "PoP is a model input from the Upstox option chain; it is not a guaranteed win probability. Option selling can carry substantial risk."
 )
