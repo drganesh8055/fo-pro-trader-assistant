@@ -1261,6 +1261,7 @@ try:
     with st.spinner(f"Analyzing live {symbol} data..."):
         underlying = search_underlying(symbol)
         underlying_key = underlying["instrument_key"]
+        analyzed_name = str(underlying.get("trading_symbol") or underlying.get("name") or symbol).strip()
         contracts = get_contracts(underlying_key)
         expiries = available_expiries(contracts)
         if not expiries:
@@ -1398,7 +1399,7 @@ st.markdown(
     f"""
 <div class="topbar topbar-dashboard">
   <div><div class="topbar-title">📊 FO PRO Trader Assistant</div>
-  <div class="topbar-sub">Simple 5-way F&O decision engine • Live Upstox market data</div></div>
+  <div class="topbar-sub">ANALYZING: <strong>{analyzed_name}</strong> • Simple 5-way F&O decision engine • Live Upstox market data</div></div>
   <div class="{status_class}">{status_text}</div>
 </div>
 """,
@@ -1477,9 +1478,27 @@ for action in ["CALL BUY", "CALL SELL", "PUT BUY", "PUT SELL"]:
 if engine_rows:
     st.dataframe(pd.DataFrame(engine_rows), use_container_width=True, hide_index=True)
 
-# Trade levels only for the selected action.
+# Selected trade plan — shown prominently only when one of the four
+# strategies is actually selected. NO TRADE never displays executable levels.
 if decision != "NO TRADE" and best_plan:
-    st.markdown("<div class='section-heading'>TRADE LEVELS</div>", unsafe_allow_html=True)
+    st.markdown("<div class='section-heading'>📌 SELECTED TRADE PLAN</div>", unsafe_allow_html=True)
+
+    selected_contract = f"{best_plan['strike']:.0f} {'CE' if best_plan['side'] == 'CE' else 'PE'}"
+    st.markdown(
+        f"""
+        <div class="card" style="padding:18px 20px; margin-bottom:14px;">
+          <div style="display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap;">
+            <div>
+              <div style="font-size:11px;font-weight:800;color:#667085;letter-spacing:.6px;">SELECTED STRATEGY</div>
+              <div style="font-size:25px;font-weight:900;color:#182230;margin-top:5px;">{decision} • {selected_contract}</div>
+            </div>
+            <div style="font-size:20px;font-weight:900;color:#147a3d;">PoP {safe_float(best_plan.get('pop')):.1f}%</div>
+          </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
     levels = st.columns(5)
     level_items = [
         ("ENTRY", fmt_price(best_plan.get("entry")), "Option premium"),
@@ -1490,8 +1509,15 @@ if decision != "NO TRADE" and best_plan:
     ]
     for col, (title, value, note) in zip(levels, level_items):
         with col:
-            st.markdown(f"<div class='entry-card'><span>{title}</span><b>{value}</b><small>{note}</small></div>", unsafe_allow_html=True)
-    st.markdown(f"<div class='exit-rule'><span>EXIT RULE</span><b>{best_plan.get('exit','Follow stop-loss and targets.')}</b></div>", unsafe_allow_html=True)
+            st.markdown(
+                f"<div class='entry-card'><span>{title}</span><b>{value}</b><small>{note}</small></div>",
+                unsafe_allow_html=True,
+            )
+
+    st.markdown(
+        f"<div class='exit-rule'><span>🚪 EXIT RULE</span><b>{best_plan.get('exit','Follow stop-loss and targets.')}</b></div>",
+        unsafe_allow_html=True,
+    )
 else:
     st.info("NO TRADE means none of CALL BUY, CALL SELL, PUT BUY or PUT SELL passed the backend quality + PoP gates.")
 
