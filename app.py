@@ -1601,6 +1601,14 @@ else:
 if decision != "NO TRADE" and best_plan:
     log_signal(symbol, selected_expiry, decision, best_plan, spot, pcr, support, resistance, tf5, tf30, daily_tech, regime)
 
+
+# ENGINE RESULT: 4 strategy cards in a fixed 2x2 grid.
+st.markdown("""<style>
+.fo-engine-grid{display:grid!important;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px;width:100%;align-items:stretch;}
+.fo-engine-grid .fo-engine-card{min-width:0!important;margin:0!important;height:100%;box-sizing:border-box;}
+@media (max-width:760px){.fo-engine-grid{grid-template-columns:1fr;}}
+</style>""",unsafe_allow_html=True)
+
 # ============================================================
 # VISUAL DASHBOARD — UI ONLY
 # ============================================================
@@ -1723,7 +1731,7 @@ st.markdown(f"""
 """, unsafe_allow_html=True)
 
 st.markdown("<div class='fo-section'>ENGINE RESULT · ALL 4 STRATEGIES</div>", unsafe_allow_html=True)
-engine_html = "<div class='fo-engine'>"
+engine_html = "<div class='fo-engine fo-engine-grid'>"
 for action in ["CALL BUY","CALL SELL","PUT BUY","PUT SELL"]:
     plan = strategy_plans[action]
     if not plan:
