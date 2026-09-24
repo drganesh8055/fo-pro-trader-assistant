@@ -1954,15 +1954,35 @@ def _render_fno_scanner_panel():
         if scanner_market_open:
             scanner_manager.start_if_needed(risk_for_scanner)
 
-        (
-            alert_results,
-            alert_info,
-            alert_time,
-            alert_error,
-            alert_running,
-            started_at,
-            finished_at,
-        ) = scanner_manager.snapshot()
+        # Be tolerant of an older cached scanner-manager instance during
+        # Streamlit hot reloads. Older versions returned 5 values; newer
+        # versions return 7. This prevents a tuple-unpacking ValueError after
+        # deploying a new app.py without requiring a manual process reset.
+        snapshot = scanner_manager.snapshot()
+        if isinstance(snapshot, (tuple, list)) and len(snapshot) >= 7:
+            (
+                alert_results,
+                alert_info,
+                alert_time,
+                alert_error,
+                alert_running,
+                started_at,
+                finished_at,
+            ) = snapshot[:7]
+        elif isinstance(snapshot, (tuple, list)) and len(snapshot) == 5:
+            (
+                alert_results,
+                alert_info,
+                alert_time,
+                alert_error,
+                alert_running,
+            ) = snapshot
+            started_at = 0.0
+            finished_at = 0.0
+        else:
+            raise ValueError(
+                f"Unexpected scanner manager snapshot format: {type(snapshot).__name__}"
+            )
         alert_results = alert_results[:5]
 
         st.markdown("### 🔔 F&O TRADE ALERTS")
@@ -2061,21 +2081,25 @@ def _render_fno_scanner_panel():
                 st.caption("No live scan is required while the market is closed.")
 
 
-# Streamlit fragments are preferable to the external autorefresh component because
-# they refresh only this small sidebar panel and do not rerun the heavy dashboard.
-# The fallback keeps compatibility with older Streamlit versions.
-if hasattr(st, "fragment"):
-    @st.fragment(run_every="5s")
-    def _fno_scanner_fragment():
-        _render_fno_scanner_panel()
+# IMPORTANT: do not render st.sidebar from inside st.fragment().
+# Streamlit raises ValueError for sidebar usage from a fragment on some deployed
+# Streamlit versions. The scanner itself is already a background thread, so a
+# lightweight whole-script rerun is safe: the cached scanner manager prevents
+# duplicate scans, while the rerun picks up the worker's completed result.
+_render_fno_scanner_panel()
 
-    _fno_scanner_fragment()
-else:
-    with st.sidebar:
-        _render_fno_scanner_panel()
-        if st_autorefresh is not None:
-            st_autorefresh(interval=5_000, key="fno_backend_scanner_status_refresh")
+# Poll quickly only while the background scan is running. As soon as it finishes,
+# the next rerun switches to a 60-second cadence. This is intentionally kept
+# separate from the user's optional 60-second live-data refresh below.
+_scanner_manager_for_poll = get_fno_scanner_manager()
+_scanner_running_for_poll = _scanner_manager_for_poll.snapshot()[4]
+if st_autorefresh is not None:
+    st_autorefresh(
+        interval=(5_000 if _scanner_running_for_poll else 60_000),
+        key="fno_backend_scanner_status_refresh",
+    )
 
+with st.sidebar:
     st.divider()
     st.markdown("## 🔎 Analyze Instrument")
 
