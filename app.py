@@ -322,18 +322,6 @@ def safe_float(value, default=np.nan):
         return default
 
 
-def pct_change_from_entry(price, entry):
-    """Return raw percentage change of a trade-plan level versus entry."""
-    p = safe_float(price)
-    e = safe_float(entry)
-    if not np.isfinite(p) or not np.isfinite(e) or e == 0:
-        return "—"
-    pct = (p - e) / e * 100
-    if abs(pct) < 0.005:
-        pct = 0.0
-    return f"{pct:+.2f}% from Entry" if pct != 0 else "0.00% from Entry"
-
-
 def alias_symbol(symbol):
     s = symbol.strip().upper().replace(" ", "")
     aliases = {
@@ -2093,21 +2081,13 @@ def _render_fno_scanner_panel():
                 st.caption("No live scan is required while the market is closed.")
 
 
-# Streamlit fragments are preferable to the external autorefresh component because
-# they refresh only this small sidebar panel and do not rerun the heavy dashboard.
-# The fallback keeps compatibility with older Streamlit versions.
-if hasattr(st, "fragment"):
-    @st.fragment(run_every="5s")
-    def _fno_scanner_fragment():
-        _render_fno_scanner_panel()
+# F&O background-alert panel intentionally removed.
+# The main analyzer below remains unchanged and continues to use live Upstox data.
 
-    _fno_scanner_fragment()
-else:
-    with st.sidebar:
-        _render_fno_scanner_panel()
-        if st_autorefresh is not None:
-            st_autorefresh(interval=5_000, key="fno_backend_scanner_status_refresh")
+analyze = False
+refresh = False
 
+with st.sidebar:
     st.divider()
     st.markdown("## 🔎 Analyze Instrument")
 
@@ -2359,7 +2339,7 @@ st.markdown("""
 .fo-decision-note{font-size:14px;color:#667085;margin-top:6px;}.fo-score-ring{min-width:100px;text-align:center;border-radius:15px;background:rgba(255,255,255,.72);border:1px solid rgba(0,0,0,.06);padding:11px 13px;}.fo-score-ring b{display:block;font-size:28px;color:#182230;line-height:1;}.fo-score-ring span{font-size:12px;color:#98a2b3;font-weight:800;letter-spacing:.6px;}
 .fo-decision-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:9px;margin-top:17px;}.fo-decision-cell{background:rgba(255,255,255,.72);border:1px solid rgba(16,42,67,.07);border-radius:11px;padding:11px;text-align:center;}.fo-decision-cell span{display:block;font-size:12px;font-weight:900;color:#98a2b3;letter-spacing:.7px;}.fo-decision-cell b{display:block;font-size:18px;color:#182230;margin-top:5px;}
 .fo-engine{display:grid;grid-template-columns:repeat(4,1fr);gap:10px;}.fo-engine-card{background:#fff;border:1px solid #e7ebf0;border-radius:14px;padding:14px;box-shadow:0 3px 12px rgba(16,42,67,.03);position:relative;overflow:hidden;}.fo-engine-card.selected{border-color:#8fcfa1;box-shadow:0 5px 18px rgba(20,122,61,.09);}.fo-engine-card.rejected{opacity:.82;}.fo-engine-top{display:flex;justify-content:space-between;gap:8px;align-items:center;}.fo-engine-action{font-size:15px;font-weight:900;color:#182230;}.fo-engine-status{font-size:11px;font-weight:900;padding:5px 7px;border-radius:10px;letter-spacing:.5px;background:#f2f4f7;color:#667085;}.fo-engine-card.selected{background:#eaf8ef;border-color:#8fcfa1;box-shadow:0 5px 18px rgba(20,122,61,.12);}.fo-engine-card.selected .fo-engine-status{background:#16a34a;color:#fff;}.fo-engine-card.rejected{background:#fff0f1;border-color:#f2c5c8;opacity:1;}.fo-engine-card.rejected .fo-engine-status{background:#dc2626;color:#fff;}.fo-engine-contract{font-size:25px;font-weight:900;margin:10px 0 12px;color:#182230;}.fo-engine-stats{display:grid;grid-template-columns:1fr 1fr;gap:7px;}.fo-engine-stats div{background:#f8fafc;border-radius:9px;padding:8px;}.fo-engine-stats span{display:block;font-size:11px;color:#98a2b3;font-weight:900;}.fo-engine-stats b{display:block;font-size:16px;margin-top:3px;color:#182230;}.fo-engine-reason{font-size:12px;color:#98a2b3;line-height:1.45;margin-top:10px;min-height:26px;}
-.fo-plan-head{display:flex;align-items:center;justify-content:space-between;gap:14px;background:#fff;border:1px solid #e7ebf0;border-radius:16px 16px 0 0;padding:17px 19px;}.fo-plan-action{font-size:13px;font-weight:900;color:#98a2b3;letter-spacing:.8px;}.fo-plan-contract{font-size:25px;font-weight:900;color:#182230;margin-top:3px;}.fo-plan-pop{font-size:24px;font-weight:900;color:#147a3d;white-space:nowrap;}.fo-levels{display:grid;grid-template-columns:repeat(5,1fr);gap:9px;margin-top:9px;}.fo-level{background:#fff;border:1px solid #e7ebf0;border-radius:13px;padding:14px;min-height:86px;}.fo-level span{display:block;font-size:12px;color:#98a2b3;font-weight:900;letter-spacing:.6px;}.fo-level b{display:block;font-size:21px;color:#182230;margin-top:7px;}.fo-level small{display:block;font-size:12px;color:#98a2b3;margin-top:4px;}.fo-level.entry{border-top:3px solid #3b82f6;}.fo-level.sl{border-top:3px solid #dc2626;}.fo-level.t1{border-top:3px solid #16a34a;}.fo-level.t2{border-top:3px solid #0f766e;}.fo-level.greeks{border-top:3px solid #7c3aed;}
+.fo-plan-head{display:flex;align-items:center;justify-content:space-between;gap:14px;background:#fff;border:1px solid #e7ebf0;border-radius:16px 16px 0 0;padding:17px 19px;}.fo-plan-action{font-size:13px;font-weight:900;color:#98a2b3;letter-spacing:.8px;}.fo-plan-contract{font-size:25px;font-weight:900;color:#182230;margin-top:3px;}.fo-plan-pop{font-size:24px;font-weight:900;color:#147a3d;white-space:nowrap;}.fo-levels{display:grid;grid-template-columns:repeat(5,1fr);gap:9px;margin-top:9px;}.fo-level{background:#fff;border:1px solid #e7ebf0;border-radius:13px;padding:14px;min-height:86px;}.fo-level span{display:block;font-size:12px;color:#98a2b3;font-weight:900;letter-spacing:.6px;}.fo-level b{display:block;font-size:21px;color:#182230;margin-top:7px;}.fo-level small{display:block;font-size:12px;color:#98a2b3;margin-top:4px;}.fo-level.entry{border-top:3px solid #3b82f6;}.fo-level.sl{border-top:3px solid #dc2626;}.fo-level.t1{border-top:3px solid #16a34a;}.fo-level.t2{border-top:3px solid #0f766e;}.fo-level.greeks{border-top:3px solid #7c3aed;}.fo-level-pct{font-weight:800!important;}.fo-level.entry .fo-level-pct{color:#475467;}.fo-level.sl .fo-level-pct{color:#b4232f;}.fo-level.t1 .fo-level-pct,.fo-level.t2 .fo-level-pct{color:#147a3d;}
 .fo-exit{background:#fff;border:1px solid #e7ebf0;border-radius:13px;padding:13px 16px;margin-top:9px;display:flex;gap:12px;align-items:flex-start;}.fo-exit-icon{font-size:21px;}.fo-exit span{display:block;font-size:12px;color:#98a2b3;font-weight:900;letter-spacing:.6px;}.fo-exit b{display:block;font-size:14px;color:#344054;line-height:1.5;margin-top:3px;}
 .fo-sr{display:grid;grid-template-columns:1fr 1.2fr 1fr;border:1px solid #e7ebf0;border-radius:16px;overflow:hidden;background:#fff;box-shadow:0 3px 12px rgba(16,42,67,.03);}.fo-sr-side{padding:20px;text-align:center;display:flex;flex-direction:column;justify-content:center;}.fo-sr-side.support{background:#f4fbf6;}.fo-sr-side.resistance{background:#fff6f6;}.fo-sr-side span{font-size:12px;font-weight:900;letter-spacing:.7px;}.fo-sr-side.support span{color:#147a3d;}.fo-sr-side.resistance span{color:#b4232f;}.fo-sr-side b{font-size:28px;margin-top:7px;color:#182230;}.fo-sr-side small{font-size:13px;color:#98a2b3;margin-top:4px;}.fo-sr-mid{display:flex;align-items:center;justify-content:center;flex-direction:column;gap:8px;border-left:1px dashed #dfe3e8;border-right:1px dashed #dfe3e8;padding:15px;}.fo-sr-mid span{font-size:12px;color:#98a2b3;font-weight:800;}.fo-current{font-size:21px;font-weight:900;background:#f5f7f9;border:1px solid #e5e7eb;border-radius:22px;padding:8px 15px;color:#182230;}
 .fo-why{background:#fff;border:1px solid #e7ebf0;border-radius:15px;padding:6px 17px;box-shadow:0 3px 12px rgba(16,42,67,.03);}.fo-why-line{padding:10px 2px;border-bottom:1px solid #eef0f2;font-size:14px;color:#344054;line-height:1.5;}.fo-why-line:last-child{border-bottom:0;}
@@ -2496,17 +2476,25 @@ if decision != "NO TRADE" and best_plan:
       <div class="fo-plan-pop">PoP {safe_float(best_plan.get('pop')):.1f}%</div>
     </div>
     """, unsafe_allow_html=True)
-    entry_price = safe_float(best_plan.get("entry"))
+    entry_value = safe_float(best_plan.get("entry"))
+
+    def pct_from_entry(level_value):
+        level_value = safe_float(level_value)
+        if not np.isfinite(entry_value) or entry_value == 0 or not np.isfinite(level_value):
+            return "—"
+        return f"{((level_value - entry_value) / abs(entry_value)) * 100:+.2f}% from entry"
+
     level_items = [
-        ("ENTRY", fmt_price(entry_price), pct_change_from_entry(entry_price, entry_price), "entry"),
-        ("STOP LOSS", fmt_price(best_plan.get("sl")), pct_change_from_entry(best_plan.get("sl"), entry_price), "sl"),
-        ("TARGET 1", fmt_price(best_plan.get("target1")), pct_change_from_entry(best_plan.get("target1"), entry_price), "t1"),
-        ("TARGET 2", fmt_price(best_plan.get("target2")), pct_change_from_entry(best_plan.get("target2"), entry_price), "t2"),
-        ("DELTA / IV", f"{safe_float(best_plan.get('delta')):.2f} / {safe_float(best_plan.get('iv')):.1f}%", "Option characteristics", "greeks"),
+        ("ENTRY", fmt_price(best_plan.get("entry")), "Option premium", "entry", pct_from_entry(best_plan.get("entry"))),
+        ("STOP LOSS", fmt_price(best_plan.get("sl")), "Defined risk level", "sl", pct_from_entry(best_plan.get("sl"))),
+        ("TARGET 1", fmt_price(best_plan.get("target1")), "First profit level", "t1", pct_from_entry(best_plan.get("target1"))),
+        ("TARGET 2", fmt_price(best_plan.get("target2")), "Second profit level", "t2", pct_from_entry(best_plan.get("target2"))),
+        ("DELTA / IV", f"{safe_float(best_plan.get('delta')):.2f} / {safe_float(best_plan.get('iv')):.1f}%", "Option characteristics", "greeks", ""),
     ]
     level_html = "<div class='fo-levels'>"
-    for title, value, note, cls in level_items:
-        level_html += f"<div class='fo-level {cls}'><span>{title}</span><b>{value}</b><small>{note}</small></div>"
+    for title, value, note, cls, pct_note in level_items:
+        pct_html = f"<small class='fo-level-pct'>{pct_note}</small>" if pct_note else ""
+        level_html += f"<div class='fo-level {cls}'><span>{title}</span><b>{value}</b><small>{note}</small>{pct_html}</div>"
     level_html += "</div>"
     st.markdown(level_html, unsafe_allow_html=True)
     st.markdown(f"<div class='fo-exit'><div class='fo-exit-icon'>🚪</div><div><span>EXIT RULE</span><b>{best_plan.get('exit','Follow stop-loss and targets.')}</b></div></div>", unsafe_allow_html=True)
