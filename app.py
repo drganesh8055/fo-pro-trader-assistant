@@ -322,6 +322,18 @@ def safe_float(value, default=np.nan):
         return default
 
 
+def pct_change_from_entry(price, entry):
+    """Return raw percentage change of a trade-plan level versus entry."""
+    p = safe_float(price)
+    e = safe_float(entry)
+    if not np.isfinite(p) or not np.isfinite(e) or e == 0:
+        return "—"
+    pct = (p - e) / e * 100
+    if abs(pct) < 0.005:
+        pct = 0.0
+    return f"{pct:+.2f}% from Entry" if pct != 0 else "0.00% from Entry"
+
+
 def alias_symbol(symbol):
     s = symbol.strip().upper().replace(" ", "")
     aliases = {
@@ -1954,35 +1966,15 @@ def _render_fno_scanner_panel():
         if scanner_market_open:
             scanner_manager.start_if_needed(risk_for_scanner)
 
-        # Be tolerant of an older cached scanner-manager instance during
-        # Streamlit hot reloads. Older versions returned 5 values; newer
-        # versions return 7. This prevents a tuple-unpacking ValueError after
-        # deploying a new app.py without requiring a manual process reset.
-        snapshot = scanner_manager.snapshot()
-        if isinstance(snapshot, (tuple, list)) and len(snapshot) >= 7:
-            (
-                alert_results,
-                alert_info,
-                alert_time,
-                alert_error,
-                alert_running,
-                started_at,
-                finished_at,
-            ) = snapshot[:7]
-        elif isinstance(snapshot, (tuple, list)) and len(snapshot) == 5:
-            (
-                alert_results,
-                alert_info,
-                alert_time,
-                alert_error,
-                alert_running,
-            ) = snapshot
-            started_at = 0.0
-            finished_at = 0.0
-        else:
-            raise ValueError(
-                f"Unexpected scanner manager snapshot format: {type(snapshot).__name__}"
-            )
+        (
+            alert_results,
+            alert_info,
+            alert_time,
+            alert_error,
+            alert_running,
+            started_at,
+            finished_at,
+        ) = scanner_manager.snapshot()
         alert_results = alert_results[:5]
 
         st.markdown("### 🔔 F&O TRADE ALERTS")
@@ -2081,10 +2073,21 @@ def _render_fno_scanner_panel():
                 st.caption("No live scan is required while the market is closed.")
 
 
-# F&O background-alert panel intentionally removed.
-# The main analyzer below remains unchanged and continues to use live Upstox data.
+# Streamlit fragments are preferable to the external autorefresh component because
+# they refresh only this small sidebar panel and do not rerun the heavy dashboard.
+# The fallback keeps compatibility with older Streamlit versions.
+if hasattr(st, "fragment"):
+    @st.fragment(run_every="5s")
+    def _fno_scanner_fragment():
+        _render_fno_scanner_panel()
 
-with st.sidebar:
+    _fno_scanner_fragment()
+else:
+    with st.sidebar:
+        _render_fno_scanner_panel()
+        if st_autorefresh is not None:
+            st_autorefresh(interval=5_000, key="fno_backend_scanner_status_refresh")
+
     st.divider()
     st.markdown("## 🔎 Analyze Instrument")
 
@@ -2473,11 +2476,12 @@ if decision != "NO TRADE" and best_plan:
       <div class="fo-plan-pop">PoP {safe_float(best_plan.get('pop')):.1f}%</div>
     </div>
     """, unsafe_allow_html=True)
+    entry_price = safe_float(best_plan.get("entry"))
     level_items = [
-        ("ENTRY", fmt_price(best_plan.get("entry")), "Option premium", "entry"),
-        ("STOP LOSS", fmt_price(best_plan.get("sl")), "Defined risk level", "sl"),
-        ("TARGET 1", fmt_price(best_plan.get("target1")), "First profit level", "t1"),
-        ("TARGET 2", fmt_price(best_plan.get("target2")), "Second profit level", "t2"),
+        ("ENTRY", fmt_price(entry_price), pct_change_from_entry(entry_price, entry_price), "entry"),
+        ("STOP LOSS", fmt_price(best_plan.get("sl")), pct_change_from_entry(best_plan.get("sl"), entry_price), "sl"),
+        ("TARGET 1", fmt_price(best_plan.get("target1")), pct_change_from_entry(best_plan.get("target1"), entry_price), "t1"),
+        ("TARGET 2", fmt_price(best_plan.get("target2")), pct_change_from_entry(best_plan.get("target2"), entry_price), "t2"),
         ("DELTA / IV", f"{safe_float(best_plan.get('delta')):.2f} / {safe_float(best_plan.get('iv')):.1f}%", "Option characteristics", "greeks"),
     ]
     level_html = "<div class='fo-levels'>"
