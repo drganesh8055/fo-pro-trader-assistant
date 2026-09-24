@@ -2081,23 +2081,8 @@ def _render_fno_scanner_panel():
                 st.caption("No live scan is required while the market is closed.")
 
 
-# IMPORTANT: do not render st.sidebar from inside st.fragment().
-# Streamlit raises ValueError for sidebar usage from a fragment on some deployed
-# Streamlit versions. The scanner itself is already a background thread, so a
-# lightweight whole-script rerun is safe: the cached scanner manager prevents
-# duplicate scans, while the rerun picks up the worker's completed result.
-_render_fno_scanner_panel()
-
-# Poll quickly only while the background scan is running. As soon as it finishes,
-# the next rerun switches to a 60-second cadence. This is intentionally kept
-# separate from the user's optional 60-second live-data refresh below.
-_scanner_manager_for_poll = get_fno_scanner_manager()
-_scanner_running_for_poll = _scanner_manager_for_poll.snapshot()[4]
-if st_autorefresh is not None:
-    st_autorefresh(
-        interval=(5_000 if _scanner_running_for_poll else 60_000),
-        key="fno_backend_scanner_status_refresh",
-    )
+# F&O background-alert panel intentionally removed.
+# The main analyzer below remains unchanged and continues to use live Upstox data.
 
 with st.sidebar:
     st.divider()
