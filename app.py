@@ -1916,6 +1916,14 @@ st.markdown("""
 .scanner-stat b{display:block;font-size:12px;color:#182230;margin-top:2px;}
 .scanner-note{font-size:10px;color:#667085;line-height:1.35;margin-top:7px;}
 .scanner-off{background:#f8fafc;border:1px solid #e2e8f0;border-radius:10px;padding:10px;color:#667085;font-size:12px;}
+.scanner-status{display:flex;align-items:center;justify-content:space-between;gap:8px;padding:9px 10px;border-radius:10px;margin:5px 0 10px;font-size:11px;font-weight:800;}
+.scanner-status-active{background:#ecfdf3;border:1px solid #b7ebca;color:#087f3e;}
+.scanner-status-running{background:#eff8ff;border:1px solid #b9ddf7;color:#175cd3;}
+.scanner-status-closed{background:#f8fafc;border:1px solid #e2e8f0;color:#667085;}
+.scanner-status-error{background:#fff7ed;border:1px solid #fed7aa;color:#c2410c;}
+.scanner-status-main{display:flex;align-items:center;gap:6px;}
+.scanner-dot{font-size:13px;line-height:1;}
+.scanner-updated{font-weight:700;opacity:.8;}
 </style>
 """, unsafe_allow_html=True)
 
@@ -1926,8 +1934,8 @@ st.markdown("""
 with st.sidebar:
     # --------------------------------------------------------
     # BACKEND-ONLY F&O ALERTS
-    # No scanning controls, progress bars, scan status, or
-    # scan-count information are shown to the user.
+    # The scan itself remains invisible; only its health/freshness
+    # and final opportunities are shown to the user.
     # --------------------------------------------------------
     risk_for_scanner = st.session_state.get("risk_profile", "Balanced")
     scanner_manager = get_fno_scanner_manager()
@@ -1935,8 +1943,45 @@ with st.sidebar:
     alert_results, alert_info, alert_time, alert_error, alert_running = scanner_manager.snapshot()
     alert_results = alert_results[:5]
 
+    st.markdown("### 🔔 F&O TRADE ALERTS")
+
+    scanner_now = datetime.now(ZoneInfo("Asia/Kolkata"))
+    scanner_market_open = (
+        scanner_now.weekday() < 5
+        and (scanner_now.hour, scanner_now.minute) >= (9, 15)
+        and (scanner_now.hour, scanner_now.minute) <= (15, 30)
+    )
+
+    if not scanner_market_open:
+        scanner_status_cls = "scanner-status-closed"
+        scanner_status_text = "● MARKET CLOSED"
+        scanner_status_detail = f"Last update: {alert_time + ' IST' if alert_time else 'No completed scan yet'}"
+    elif alert_error:
+        scanner_status_cls = "scanner-status-error"
+        scanner_status_text = "● SCANNER TEMPORARILY PAUSED"
+        scanner_status_detail = "Will retry automatically"
+    elif alert_running:
+        scanner_status_cls = "scanner-status-running"
+        scanner_status_text = "● UPDATING OPPORTUNITIES"
+        scanner_status_detail = "Background scan in progress"
+    elif alert_time:
+        scanner_status_cls = "scanner-status-active"
+        scanner_status_text = "● BACKGROUND SCANNER ACTIVE"
+        scanner_status_detail = f"Updated {alert_time} IST"
+    else:
+        scanner_status_cls = "scanner-status-running"
+        scanner_status_text = "● STARTING BACKGROUND SCANNER"
+        scanner_status_detail = "First result will appear automatically"
+
+    st.markdown(
+        f"""<div class=\"scanner-status {scanner_status_cls}\">
+            <div class=\"scanner-status-main\"><span class=\"scanner-dot\">{scanner_status_text[:1]}</span><span>{scanner_status_text[2:]}</span></div>
+            <span class=\"scanner-updated\">{scanner_status_detail}</span>
+        </div>""",
+        unsafe_allow_html=True,
+    )
+
     if alert_results:
-        st.markdown("### 🔔 F&O TRADE ALERTS")
 
         for rank, alert in enumerate(alert_results, start=1):
             action = alert["Trade"]
@@ -1982,6 +2027,16 @@ with st.sidebar:
             ):
                 st.session_state["symbol"] = alias_symbol(alert["Stock"])
                 st.rerun()
+
+    if alert_error and not alert_results:
+        st.caption(f"Scanner note: {alert_error}")
+    elif not alert_results:
+        if scanner_market_open and not alert_running:
+            st.info("No qualifying F&O opportunities currently.")
+        elif alert_running:
+            st.caption("The scanner is working in the background. Results will appear after the current scan completes.")
+        elif not scanner_market_open:
+            st.caption("No live scan is required while the market is closed.")
 
     st.divider()
     st.markdown("## 🔎 Analyze Instrument")
