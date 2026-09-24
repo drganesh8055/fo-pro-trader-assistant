@@ -1414,23 +1414,610 @@ def log_signal(symbol, expiry, decision, plan, spot, pcr, support, resistance, t
     except Exception:
         pass
 
+
 # ============================================================
-# LIVE ANALYSIS
+# FULL F&O TRADE ALERT SCANNER — USES THIS FILE'S EXISTING ENGINE
 # ============================================================
 
+FNO_MASTER_URL = "https://assets.upstox.com/market-quote/instruments/exchange/NSE.json.gz"
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def get_fno_underlyings():
+    """Build current NSE equity F&O universe from Upstox BOD master."""
+    try:
+        response = requests.get(FNO_MASTER_URL, timeout=30)
+        response.raise_for_status()
+        raw = gzip.decompress(response.content)
+        payload = json.loads(raw.decode("utf-8"))
+    except Exception as exc:
+        raise UpstoxError(
+            f"Unable to load the Upstox NSE F&O instrument list: {exc}"
+        ) from exc
+
+    records = payload.get("data", payload.get("instruments", [])) if isinstance(payload, dict) else payload
+    today = date.today().isoformat()
+    universe = {}
+
+    for item in records:
+        if not isinstance(item, dict):
+            continue
+        if item.get("segment") != "NSE_FO":
+            continue
+        if item.get("instrument_type") not in {"CE", "PE", "FUT"}:
+            continue
+        if item.get("underlying_type") != "EQUITY":
+            continue
+
+        expiry_raw = str(item.get("expiry", "")).strip()
+        underlying_key = item.get("underlying_key")
+        symbol = str(item.get("underlying_symbol") or "").strip().upper()
+        if not expiry_raw or not underlying_key or not symbol:
+            continue
+
+        if expiry_raw.isdigit():
+            try:
+                expiry_date = datetime.fromtimestamp(
+                    int(expiry_raw) / 1000,
+                    tz=ZoneInfo("Asia/Kolkata")
+                ).date().isoformat()
+            except Exception:
+                continue
+        else:
+            expiry_date = expiry_raw[:10]
+
+        if expiry_date < today:
+            continue
+
+        current = universe.get(underlying_key)
+        if current is None or expiry_date < current["expiry"]:
+            universe[underlying_key] = {
+                "symbol": symbol,
+                "underlying_key": underlying_key,
+                "expiry": expiry_date,
+            }
+
+    return sorted(universe.values(), key=lambda x: x["symbol"])
+
+
+@st.cache_data(ttl=45, show_spinner=False)
+def get_scanner_chain(underlying_key, expiry):
+    return get_option_chain(underlying_key, expiry)
+
+
+def _scanner_spot_from_rows(rows):
+    for row in rows:
+        value = safe_float(row.get("underlying_spot_price"))
+        if np.isfinite(value) and value > 0:
+            return value
+    return np.nan
+
+
+def _scanner_spread_pct(market):
+    bid = safe_float(market.get("bid_price"))
+    ask = safe_float(market.get("ask_price"))
+    if np.isfinite(bid) and np.isfinite(ask) and bid > 0 and ask > 0:
+        return max(ask - bid, 0) / max((ask + bid) / 2, 0.01) * 100
+    return 999.0
+
+
+def _scanner_stage1_candidates(rows, spot, max_candidates=8):
+    """
+    Cheap option-chain-only filter. It deliberately does not create a trade
+    signal. Its purpose is to reduce the number of stocks needing 5m/30m/daily
+    technical requests in Stage 2.
+    """
+    candidates = []
+
+    if not np.isfinite(spot) or spot <= 0:
+        return candidates
+
+    for raw in rows:
+        strike = safe_float(raw.get("strike_price"))
+        if not np.isfinite(strike):
+            continue
+
+        # Keep the scan practical and liquid around the underlying.
+        if abs(strike - spot) / spot > 0.05:
+            continue
+
+        for side, action in (
+            ("CE", "CALL BUY"),
+            ("CE", "CALL SELL"),
+            ("PE", "PUT BUY"),
+            ("PE", "PUT SELL"),
+        ):
+            option = raw.get("call_options" if side == "CE" else "put_options") or {}
+            market = option.get("market_data") or {}
+            greeks = option.get("option_greeks") or {}
+
+            ltp = safe_float(market.get("ltp"))
+            oi = safe_float(market.get("oi"), 0)
+            volume = safe_float(market.get("volume"), 0)
+            pop = safe_float(greeks.get("pop"))
+            delta = abs(safe_float(greeks.get("delta")))
+            spread = _scanner_spread_pct(market)
+
+            if not np.isfinite(ltp) or ltp <= 0 or oi <= 0:
+                continue
+            if not np.isfinite(pop) or pop < 55:
+                continue
+
+            # Stage 1 only rejects obviously unusable contracts.
+            if volume < 300 or spread > 5:
+                continue
+            if not np.isfinite(delta) or delta < 0.10 or delta > 0.85:
+                continue
+
+            candidates.append({
+                "raw": raw,
+                "side": side,
+                "action": action,
+                "strike": strike,
+                "pop": pop,
+                "volume": volume,
+                "oi": oi,
+                "spread": spread,
+                "distance": abs(strike - spot) / spot * 100,
+            })
+
+    # Diversify the shortlist across action/strike rather than allowing one
+    # highly liquid underlying to dominate Stage 2.
+    candidates.sort(
+        key=lambda x: (
+            -x["pop"],
+            -x["volume"],
+            x["spread"],
+            x["distance"],
+        )
+    )
+
+    selected = []
+    seen = set()
+    for item in candidates:
+        key = (item["action"], round(item["strike"], 4))
+        if key in seen:
+            continue
+        seen.add(key)
+        selected.append(item)
+        if len(selected) >= max_candidates:
+            break
+
+    return selected
+
+
+def _scanner_actionable(plan, action):
+    """Apply the same final action gates used by the main dashboard."""
+    if not plan:
+        return False
+
+    score = safe_float(plan.get("score"), 0)
+    pop = safe_float(plan.get("pop"))
+    alignment = int(plan.get("alignment", 0) or 0)
+    hard_fail = plan.get("fail_reasons") or []
+
+    if score < 65 or not np.isfinite(pop) or pop < 55 or alignment < 2:
+        return False
+    if hard_fail or plan.get("readiness") != "READY":
+        return False
+
+    if action in {"CALL BUY", "PUT BUY"}:
+        return bool(plan.get("candle_confirmed") and plan.get("volume_confirmed"))
+
+    return safe_float(plan.get("rr1"), 0) >= 0.75
+
+
+def _scanner_plan_for_candidate(candidate, symbol, expiry, risk_profile):
+    """Run this file's existing scoring/build-plan logic on one shortlisted option."""
+    rows = [candidate["raw"]]
+    chain = normalize_chain(rows)
+    if chain.empty:
+        return None
+
+    spot = _scanner_spot_from_rows(rows)
+    if not np.isfinite(spot) or spot <= 0:
+        return None
+
+    support, resistance, pcr, oi_wall_info = oi_levels(chain, spot)
+
+    # Technical data is the expensive part, so it is only requested for Stage-2
+    # candidates. Cache decorators on these functions prevent repeated requests
+    # for the same underlying during one scan.
+    underlying_key = candidate["underlying_key"]
+    daily = get_daily_candles(underlying_key)
+    tf30 = get_30m_candles(underlying_key)
+    tf5 = get_intraday_candles(underlying_key, 5)
+
+    daily_tech = technicals(daily, spot)
+    tf30_tech = technicals(tf30, spot)
+    tf5_tech = technicals(tf5, spot)
+    regime = market_regime(tf5_tech, tf30_tech, daily_tech, spot)
+
+    # oi_levels needs the complete option chain for meaningful OI walls.
+    # The full chain is already cached from Stage 1, so this is normally one
+    # additional cached read rather than another network request.
+    full_rows = get_scanner_chain(underlying_key, expiry)
+    full_chain = normalize_chain(full_rows)
+    if full_chain.empty:
+        return None
+    support, resistance, pcr, oi_wall_info = oi_levels(full_chain, spot)
+
+    row = nearest_row(full_chain, candidate["strike"])
+    if row is None:
+        return None
+
+    side = candidate["side"]
+    action = candidate["action"]
+
+    if action in {"CALL BUY", "PUT BUY"}:
+        plan = build_plan(
+            row, side, spot, support, resistance, pcr,
+            tf5_tech, tf30_tech, daily_tech, risk_profile,
+            full_chain, oi_wall_info, regime
+        )
+    else:
+        plan = build_sell_plan(
+            row, side, spot, support, resistance, pcr,
+            tf5_tech, tf30_tech, daily_tech, risk_profile,
+            full_chain, oi_wall_info, regime
+        )
+
+    if not plan or plan.get("action", action) != action and action in {"CALL SELL", "PUT SELL"}:
+        return None
+
+    if not _scanner_actionable(plan, action):
+        return None
+
+    return {
+        "Stock": symbol,
+        "Trade": action,
+        "Strike": float(plan["strike"]),
+        "Expiry": expiry,
+        "PoP": safe_float(plan.get("pop")),
+        "Quality": safe_float(plan.get("score"), 0),
+        "Entry": safe_float(plan.get("entry")),
+        "SL": safe_float(plan.get("sl")),
+        "Target1": safe_float(plan.get("target1")),
+        "Target2": safe_float(plan.get("target2")),
+        "Exit": plan.get("exit", ""),
+        "Delta": safe_float(plan.get("delta")),
+        "IV": safe_float(plan.get("iv")),
+        "Volume": safe_float(plan.get("volume"), 0),
+        "OI": safe_float(plan.get("oi"), 0),
+        "Alignment": int(plan.get("alignment", 0) or 0),
+        "Regime": regime,
+        "reason": (
+            f"{regime} · {plan.get('readiness','')} · "
+            f"{int(plan.get('alignment',0) or 0)}/3 timeframe alignment"
+        ),
+    }
+
+
+def scan_fno_trade_alerts(risk_profile, top_alerts=5):
+    """
+    Full NSE equity F&O scan using the same strategy engine as the main page.
+
+    Stage 1: option-chain filter only.
+    Stage 2: existing technical + OI + quality + readiness gates.
+
+    Only final actionable 4-way strategies are returned.
+    """
+    universe = get_fno_underlyings()
+    stage1 = []
+    scanned = 0
+    failed = 0
+
+    for idx, item in enumerate(universe, start=1):
+        try:
+            rows = get_scanner_chain(item["underlying_key"], item["expiry"])
+            spot = _scanner_spot_from_rows(rows)
+            candidates = _scanner_stage1_candidates(
+                rows, spot, max_candidates=8
+            )
+
+            for candidate in candidates:
+                candidate["symbol"] = item["symbol"]
+                candidate["underlying_key"] = item["underlying_key"]
+                candidate["expiry"] = item["expiry"]
+                stage1.append(candidate)
+
+            scanned += 1
+        except UpstoxRateLimitError:
+            progress.empty()
+            raise
+        except Exception:
+            failed += 1
+
+
+    # Do not run expensive technical analysis on hundreds of candidates.
+    # Keep the strongest chain candidates, with a per-stock cap.
+    stage1.sort(
+        key=lambda x: (
+            -x["pop"],
+            -x["volume"],
+            x["spread"],
+            x["distance"],
+        )
+    )
+
+    shortlist = []
+    per_stock = {}
+    max_stage2 = max(24, top_alerts * 5)
+
+    for item in stage1:
+        count = per_stock.get(item["symbol"], 0)
+        if count >= 2:
+            continue
+        shortlist.append(item)
+        per_stock[item["symbol"]] = count + 1
+        if len(shortlist) >= max_stage2:
+            break
+
+    alerts = []
+    for idx, candidate in enumerate(shortlist, start=1):
+        try:
+            plan = _scanner_plan_for_candidate(
+                candidate,
+                candidate["symbol"],
+                candidate["expiry"],
+                risk_profile,
+            )
+            if plan:
+                alerts.append(plan)
+        except UpstoxRateLimitError:
+            progress.empty()
+            raise
+        except Exception:
+            pass
+
+
+    # One alert per stock/action combination; prefer quality first.
+    unique = {}
+    for alert in alerts:
+        key = (alert["Stock"], alert["Trade"])
+        old = unique.get(key)
+        if old is None or (
+            alert["Quality"],
+            alert["PoP"],
+            alert["Alignment"],
+            alert["Volume"],
+        ) > (
+            old["Quality"],
+            old["PoP"],
+            old["Alignment"],
+            old["Volume"],
+        ):
+            unique[key] = alert
+
+    alerts = list(unique.values())
+    alerts.sort(
+        key=lambda x: (
+            -x["Quality"],
+            -x["PoP"],
+            -x["Alignment"],
+            -x["Volume"],
+        )
+    )
+
+    return alerts[:top_alerts], len(universe), scanned, failed, len(shortlist)
+
+
+# ============================================================
+# BACKGROUND SCANNER MANAGER
+# The F&O scan NEVER runs in the Streamlit request/rerun path.
+# It runs in a persistent background worker and the UI only reads
+# the last completed result. This keeps the main dashboard responsive.
+# ============================================================
+
+SCANNER_REFRESH_SECONDS = 300  # backend refresh: every 5 minutes
+
+
+class _FNOScannerManager:
+    def __init__(self):
+        self.lock = threading.RLock()
+        self.running = False
+        self.results = []
+        self.info = None
+        self.scan_time = None
+        self.error = None
+        self.profile = None
+        self.next_allowed = 0.0
+
+    def start_if_needed(self, risk_profile):
+        now = time.time()
+        with self.lock:
+            if self.running:
+                return
+            if self.profile != risk_profile:
+                # A profile change should trigger a fresh scan, but only after
+                # the current worker has finished. Do not start duplicate workers.
+                self.profile = risk_profile
+                self.next_allowed = 0.0
+            if now < self.next_allowed and self.results:
+                return
+            self.running = True
+            self.error = None
+
+        worker = threading.Thread(
+            target=self._worker,
+            args=(risk_profile,),
+            daemon=True,
+            name="fno-background-scanner",
+        )
+        worker.start()
+
+    def _worker(self, risk_profile):
+        try:
+            results, total, scanned, failed, stage2_count = scan_fno_trade_alerts(
+                risk_profile, top_alerts=5
+            )
+            now = time.time()
+            with self.lock:
+                self.results = results
+                self.info = (total, scanned, failed, stage2_count)
+                self.scan_time = datetime.now(
+                    ZoneInfo("Asia/Kolkata")
+                ).strftime("%H:%M:%S")
+                self.error = None
+                self.running = False
+                self.next_allowed = now + SCANNER_REFRESH_SECONDS
+        except UpstoxRateLimitError as exc:
+            with self.lock:
+                self.error = (
+                    f"Upstox rate limit reached. Background scanner will retry after "
+                    f"about {exc.retry_after} seconds."
+                )
+                self.running = False
+                self.next_allowed = time.time() + max(60, int(exc.retry_after or 60))
+        except Exception as exc:
+            with self.lock:
+                self.error = f"Background F&O scanner unavailable: {exc}"
+                self.running = False
+                self.next_allowed = time.time() + 120
+
+    def snapshot(self):
+        with self.lock:
+            return (
+                list(self.results),
+                self.info,
+                self.scan_time,
+                self.error,
+                self.running,
+            )
+
+
+@st.cache_resource(show_spinner=False)
+def get_fno_scanner_manager():
+    return _FNOScannerManager()
+
+
+# ============================================================
+# SCANNER STYLING — ALERTS ONLY
+# ============================================================
+st.markdown("""
+<style>
+.scanner-wrap{margin:4px 0 14px;}
+.scanner-title{font-size:18px;font-weight:900;color:#182230;margin-bottom:3px;}
+.scanner-sub{font-size:12px;color:#667085;line-height:1.45;margin-bottom:10px;}
+.scanner-alert{border:1px solid #dfe5eb;border-radius:12px;padding:10px 11px;margin:8px 0;background:#fff;box-shadow:0 2px 7px rgba(16,42,67,.04);}
+.scanner-alert-call{border-left:5px solid #16a34a;background:linear-gradient(180deg,#f0fdf4,#fff);}
+.scanner-alert-put{border-left:5px solid #dc2626;background:linear-gradient(180deg,#fff1f2,#fff);}
+.scanner-alert-sell{border-left:5px solid #7c3aed;}
+.scanner-rank{font-size:11px;font-weight:900;color:#98a2b3;letter-spacing:.7px;}
+.scanner-main{display:flex;justify-content:space-between;gap:8px;align-items:center;margin-top:3px;}
+.scanner-main b{font-size:15px;color:#182230;}
+.scanner-action{font-size:11px;font-weight:900;padding:4px 7px;border-radius:9px;}
+.scanner-call-action{background:#dcfce7;color:#087f3e;}
+.scanner-put-action{background:#ffe4e6;color:#c81e3a;}
+.scanner-sell-action{background:#ede9fe;color:#6d28d9;}
+.scanner-stats{display:grid;grid-template-columns:1fr 1fr 1fr;gap:5px;margin-top:8px;}
+.scanner-stat{background:#f8fafc;border-radius:7px;padding:6px;text-align:center;}
+.scanner-stat span{display:block;font-size:9px;color:#98a2b3;font-weight:900;}
+.scanner-stat b{display:block;font-size:12px;color:#182230;margin-top:2px;}
+.scanner-note{font-size:10px;color:#667085;line-height:1.35;margin-top:7px;}
+.scanner-off{background:#f8fafc;border:1px solid #e2e8f0;border-radius:10px;padding:10px;color:#667085;font-size:12px;}
+</style>
+""", unsafe_allow_html=True)
+
+
+# ============================================================
+# SIDEBAR
+# ============================================================
 with st.sidebar:
+    # --------------------------------------------------------
+    # BACKEND-ONLY F&O ALERTS
+    # No scanning controls, progress bars, scan status, or
+    # scan-count information are shown to the user.
+    # --------------------------------------------------------
+    risk_for_scanner = st.session_state.get("risk_profile", "Balanced")
+    scanner_manager = get_fno_scanner_manager()
+    scanner_manager.start_if_needed(risk_for_scanner)
+    alert_results, alert_info, alert_time, alert_error, alert_running = scanner_manager.snapshot()
+    alert_results = alert_results[:5]
+
+    if alert_results:
+        st.markdown("### 🔔 F&O TRADE ALERTS")
+
+        for rank, alert in enumerate(alert_results, start=1):
+            action = alert["Trade"]
+            is_call = "CALL" in action
+            action_class = (
+                "scanner-call-action" if is_call else "scanner-put-action"
+            )
+            if "SELL" in action:
+                action_class = "scanner-sell-action"
+
+            card_class = (
+                "scanner-alert-call" if is_call else "scanner-alert-put"
+            )
+            if "SELL" in action:
+                card_class += " scanner-alert-sell"
+
+            st.markdown(
+                f"""
+                <div class="scanner-alert {card_class}">
+                  <div class="scanner-rank">#{rank} · {alert['Stock']}</div>
+                  <div class="scanner-main">
+                    <b>{alert['Trade']} · {alert['Strike']:.0f}</b>
+                    <span class="scanner-action {action_class}">{action}</span>
+                  </div>
+                  <div class="scanner-stats">
+                    <div class="scanner-stat"><span>PoP</span><b>{alert['PoP']:.1f}%</b></div>
+                    <div class="scanner-stat"><span>QUALITY</span><b>{alert['Quality']:.0f}/100</b></div>
+                    <div class="scanner-stat"><span>ALIGN</span><b>{alert['Alignment']}/3</b></div>
+                  </div>
+                  <div class="scanner-note">
+                    Entry {fmt_price(alert['Entry'])} · SL {fmt_price(alert['SL'])} ·
+                    T1 {fmt_price(alert['Target1'])}
+                  </div>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+
+            if st.button(
+                f"Analyze {alert['Stock']}",
+                key=f"scanner_analyze_{rank}_{alert['Stock']}_{alert['Trade']}",
+                use_container_width=True,
+            ):
+                st.session_state["symbol"] = alias_symbol(alert["Stock"])
+                st.rerun()
+
+    st.divider()
     st.markdown("## 🔎 Analyze Instrument")
+
     symbol_input = st.text_input(
         "NSE Stock / Index",
         value=st.session_state.get("symbol", "KOTAKBANK"),
         placeholder="NIFTY / BANKNIFTY / HDFCBANK",
     )
-    risk_profile = st.selectbox("Risk Profile", ["Conservative", "Balanced", "Aggressive"], index=1)
-    analyze = st.button("Analyze Live Market", type="primary", use_container_width=True)
-    refresh = st.button("↻ Refresh Live Data", use_container_width=True)
-    auto_refresh = st.checkbox("Auto refresh every 60 seconds", value=False)
+
+    risk_profile = st.selectbox(
+        "Risk Profile",
+        ["Conservative", "Balanced", "Aggressive"],
+        index=1,
+        key="risk_profile",
+    )
+
+    analyze = st.button(
+        "Analyze Live Market",
+        type="primary",
+        use_container_width=True,
+    )
+
+    refresh = st.button(
+        "↻ Refresh Live Data",
+        use_container_width=True,
+    )
+
+    auto_refresh = st.checkbox(
+        "Auto refresh every 60 seconds",
+        value=False,
+    )
+
     if auto_refresh and st_autorefresh is not None:
         st_autorefresh(interval=60_000, key="simple_live_refresh")
+
     st.divider()
     st.caption("LIVE DATA • Powered by Upstox")
     st.caption("No simulated prices are used.")
@@ -1438,9 +2025,14 @@ with st.sidebar:
 if analyze:
     st.session_state["symbol"] = alias_symbol(symbol_input)
     st.rerun()
+
 if refresh:
     st.cache_data.clear()
     st.rerun()
+
+# ============================================================
+# LIVE ANALYSIS
+# ============================================================
 
 symbol = alias_symbol(st.session_state.get("symbol", symbol_input or "KOTAKBANK"))
 
