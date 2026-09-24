@@ -1723,7 +1723,6 @@ def scan_fno_trade_alerts(risk_profile, top_alerts=5):
 
             scanned += 1
         except UpstoxRateLimitError:
-            progress.empty()
             raise
         except Exception:
             failed += 1
@@ -1765,7 +1764,6 @@ def scan_fno_trade_alerts(risk_profile, top_alerts=5):
             if plan:
                 alerts.append(plan)
         except UpstoxRateLimitError:
-            progress.empty()
             raise
         except Exception:
             pass
@@ -1939,11 +1937,6 @@ with st.sidebar:
     # --------------------------------------------------------
     risk_for_scanner = st.session_state.get("risk_profile", "Balanced")
     scanner_manager = get_fno_scanner_manager()
-    scanner_manager.start_if_needed(risk_for_scanner)
-    alert_results, alert_info, alert_time, alert_error, alert_running = scanner_manager.snapshot()
-    alert_results = alert_results[:5]
-
-    st.markdown("### 🔔 F&O TRADE ALERTS")
 
     scanner_now = datetime.now(ZoneInfo("Asia/Kolkata"))
     scanner_market_open = (
@@ -1951,6 +1944,24 @@ with st.sidebar:
         and (scanner_now.hour, scanner_now.minute) >= (9, 15)
         and (scanner_now.hour, scanner_now.minute) <= (15, 30)
     )
+
+    # Never launch a full-market scan while the market is closed.
+    if scanner_market_open:
+        scanner_manager.start_if_needed(risk_for_scanner)
+
+    alert_results, alert_info, alert_time, alert_error, alert_running = scanner_manager.snapshot()
+    alert_results = alert_results[:5]
+
+    # Lightweight UI polling only: this picks up the background worker's
+    # completed result and does NOT itself perform a scan. The manager
+    # enforces the 5-minute scan interval.
+    if st_autorefresh is not None and scanner_market_open:
+        st_autorefresh(
+            interval=(5_000 if alert_running else 60_000),
+            key="fno_backend_scanner_status_refresh",
+        )
+
+    st.markdown("### 🔔 F&O TRADE ALERTS")
 
     if not scanner_market_open:
         scanner_status_cls = "scanner-status-closed"
