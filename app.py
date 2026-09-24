@@ -1966,15 +1966,35 @@ def _render_fno_scanner_panel():
         if scanner_market_open:
             scanner_manager.start_if_needed(risk_for_scanner)
 
-        (
-            alert_results,
-            alert_info,
-            alert_time,
-            alert_error,
-            alert_running,
-            started_at,
-            finished_at,
-        ) = scanner_manager.snapshot()
+        # Be tolerant of an older cached scanner-manager instance during
+        # Streamlit hot reloads. Older versions returned 5 values; newer
+        # versions return 7. This prevents a tuple-unpacking ValueError after
+        # deploying a new app.py without requiring a manual process reset.
+        snapshot = scanner_manager.snapshot()
+        if isinstance(snapshot, (tuple, list)) and len(snapshot) >= 7:
+            (
+                alert_results,
+                alert_info,
+                alert_time,
+                alert_error,
+                alert_running,
+                started_at,
+                finished_at,
+            ) = snapshot[:7]
+        elif isinstance(snapshot, (tuple, list)) and len(snapshot) == 5:
+            (
+                alert_results,
+                alert_info,
+                alert_time,
+                alert_error,
+                alert_running,
+            ) = snapshot
+            started_at = 0.0
+            finished_at = 0.0
+        else:
+            raise ValueError(
+                f"Unexpected scanner manager snapshot format: {type(snapshot).__name__}"
+            )
         alert_results = alert_results[:5]
 
         st.markdown("### 🔔 F&O TRADE ALERTS")
