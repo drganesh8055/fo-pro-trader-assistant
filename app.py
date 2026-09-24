@@ -1693,7 +1693,7 @@ def _scanner_plan_for_candidate(candidate, symbol, expiry, risk_profile):
     }
 
 
-def scan_fno_trade_alerts(risk_profile, top_alerts=8):
+def scan_fno_trade_alerts(risk_profile, top_alerts=5):
     """
     Full NSE equity F&O scan using the same strategy engine as the main page.
 
@@ -1853,35 +1853,19 @@ st.markdown("""
 with st.sidebar:
     st.markdown("### 🔥 F&O TRADE ALERTS")
     st.caption(
-        "Full NSE equity F&O scan using this app's existing 4-way engine. "
-        "Only final actionable trades are shown."
+        "Backend scan across the NSE equity F&O universe using this app's existing "
+        "4-way engine. Only the top 5 final actionable trades are shown."
     )
 
-    scanner_enabled = st.toggle(
-        "Scanner ON / OFF",
-        value=st.session_state.get("fno_scanner_enabled", True),
-        key="fno_scanner_enabled",
-    )
-
-    scanner_count = st.selectbox(
-        "Maximum alerts",
-        [5, 8, 12],
-        index=1,
-        key="fno_alert_count",
-    )
-
-    scan_market = st.button(
-        "🔎 Scan Full F&O Market",
-        use_container_width=True,
-        type="primary",
-        disabled=not scanner_enabled,
-        key="scan_fno_market",
-    )
-
-    if scan_market and scanner_enabled:
+    # The scanner runs in the backend automatically. There are deliberately no
+    # scanner ON/OFF, alert-count, or manual-scan controls in the UI.
+    # Keep the result in session state so normal Streamlit reruns do not trigger
+    # another full-market scan and unnecessarily increase Upstox API traffic.
+    if "fno_alert_scan_initialized" not in st.session_state:
+        st.session_state["fno_alert_scan_initialized"] = True
         try:
             risk_for_scanner = st.session_state.get("risk_profile", "Balanced")
-            with st.spinner("Running full F&O trade-alert scan..."):
+            with st.spinner("Scanning F&O market in the backend..."):
                 (
                     results,
                     total,
@@ -1890,7 +1874,7 @@ with st.sidebar:
                     stage2_count,
                 ) = scan_fno_trade_alerts(
                     risk_for_scanner,
-                    top_alerts=int(scanner_count),
+                    top_alerts=5,
                 )
 
             st.session_state["fno_alert_results"] = results
@@ -1902,39 +1886,36 @@ with st.sidebar:
             ).strftime("%H:%M:%S")
         except UpstoxRateLimitError as exc:
             st.session_state["fno_alert_results"] = []
-            st.error(
+            st.session_state["fno_alert_scan_error"] = (
                 f"⏳ Upstox rate limit reached. Wait about {exc.retry_after} seconds "
-                "before scanning again. The scanner stopped immediately."
+                "before the next backend scan."
             )
         except UpstoxError as exc:
             st.session_state["fno_alert_results"] = []
-            st.error(str(exc))
+            st.session_state["fno_alert_scan_error"] = str(exc)
         except Exception as exc:
             st.session_state["fno_alert_results"] = []
-            st.error(f"F&O scanner failed: {exc}")
+            st.session_state["fno_alert_scan_error"] = f"F&O scanner failed: {exc}"
 
-    if not scanner_enabled:
-        st.markdown(
-            "<div class='scanner-off'>Scanner is OFF. Your main analyzer "
-            "continues to work normally.</div>",
-            unsafe_allow_html=True,
-        )
-
-    alert_results = st.session_state.get("fno_alert_results", [])
+    alert_results = st.session_state.get("fno_alert_results", [])[:5]
     alert_info = st.session_state.get("fno_alert_scan_info")
     alert_time = st.session_state.get("fno_alert_scan_time")
+    alert_error = st.session_state.get("fno_alert_scan_error")
 
-    if scanner_enabled and alert_results:
-        st.success(f"{len(alert_results)} actionable trade alert(s) found.")
+    if alert_error:
+        st.warning(alert_error)
+
+    if alert_results:
+        st.success(f"Top {len(alert_results)} actionable trade alert(s)")
 
         if alert_info:
             total, scanned, failed, stage2_count = alert_info
             st.caption(
-                f"Stage 1: {scanned}/{total} stocks • "
-                f"Stage 2: {stage2_count} candidates • {failed} unavailable"
+                f"Backend scan: {scanned}/{total} stocks • "
+                f"validated {stage2_count} candidates • {failed} unavailable"
             )
         if alert_time:
-            st.caption(f"Last scan: {alert_time} IST")
+            st.caption(f"Last backend scan: {alert_time} IST")
 
         for rank, alert in enumerate(alert_results, start=1):
             action = alert["Trade"]
@@ -1981,7 +1962,7 @@ with st.sidebar:
                 st.session_state["symbol"] = alias_symbol(alert["Stock"])
                 st.rerun()
 
-    elif scanner_enabled and "fno_alert_results" in st.session_state:
+    elif not alert_error:
         st.info(
             "No CALL BUY, CALL SELL, PUT BUY or PUT SELL currently passed "
             "the full engine gates."
