@@ -1823,7 +1823,7 @@ class _FNOScannerManager:
         self.started_at = 0.0
         self.finished_at = 0.0
 
-    def start_if_needed(self, risk_profile):
+    def start_if_needed(self, risk_profile, force=False):
         now = time.time()
         with self.lock:
             if self.running:
@@ -1833,7 +1833,7 @@ class _FNOScannerManager:
                 # the current worker has finished. Do not start duplicate workers.
                 self.profile = risk_profile
                 self.next_allowed = 0.0
-            if now < self.next_allowed and self.results:
+            if not force and now < self.next_allowed and self.results:
                 return
             self.running = True
             self.error = None
@@ -1939,25 +1939,34 @@ st.markdown("""
 # ============================================================
 
 def _render_fno_scanner_panel():
-    """Render only the scanner panel; the actual scan runs in the manager thread."""
+    """Render the manual Top-5 trade scanner in the left sidebar.
+
+    The scan is launched only when the user presses Scan Trades. The actual
+    full-market scan runs in the existing background worker, so the Streamlit
+    request thread is not blocked and the right-side analyzer remains untouched.
+    """
     with st.sidebar:
         risk_for_scanner = st.session_state.get("risk_profile", "Balanced")
         scanner_manager = get_fno_scanner_manager()
 
-        scanner_now = datetime.now(ZoneInfo("Asia/Kolkata"))
-        scanner_market_open = (
-            scanner_now.weekday() < 5
-            and (scanner_now.hour, scanner_now.minute) >= (9, 15)
-            and (scanner_now.hour, scanner_now.minute) <= (15, 30)
+        st.markdown("### 🔥 TOP 5 POSSIBLE TRADES")
+        st.caption(
+            "Scans the NSE equity F&O universe using the same trade engine, "
+            "quality gates and risk profile as the main analyzer."
         )
 
-        if scanner_market_open:
-            scanner_manager.start_if_needed(risk_for_scanner)
+        scan_trades = st.button(
+            "🔎 Scan Trades",
+            key="scan_trades_button",
+            use_container_width=True,
+            type="primary",
+        )
 
-        # Be tolerant of an older cached scanner-manager instance during
-        # Streamlit hot reloads. Older versions returned 5 values; newer
-        # versions return 7. This prevents a tuple-unpacking ValueError after
-        # deploying a new app.py without requiring a manual process reset.
+        if scan_trades:
+            scanner_manager.start_if_needed(risk_for_scanner, force=True)
+            st.session_state["scanner_manual_scan_requested"] = True
+            st.rerun()
+
         snapshot = scanner_manager.snapshot()
         if isinstance(snapshot, (tuple, list)) and len(snapshot) >= 7:
             (
@@ -1983,46 +1992,59 @@ def _render_fno_scanner_panel():
             raise ValueError(
                 f"Unexpected scanner manager snapshot format: {type(snapshot).__name__}"
             )
+
         alert_results = alert_results[:5]
 
-        st.markdown("### 🔔 F&O TRADE ALERTS")
+        if alert_running and st_autorefresh is not None:
+            st_autorefresh(interval=1500, key="fno_manual_scan_poll")
 
-        if not scanner_market_open:
-            scanner_status_cls = "scanner-status-closed"
-            scanner_status_text = "● MARKET CLOSED"
-            scanner_status_detail = (
-                f"Last update: {alert_time + ' IST' if alert_time else 'No completed scan yet'}"
-            )
-        elif alert_error:
-            scanner_status_cls = "scanner-status-error"
-            scanner_status_text = "● SCANNER TEMPORARILY PAUSED"
-            scanner_status_detail = "Will retry automatically"
-        elif alert_running:
-            scanner_status_cls = "scanner-status-running"
-            scanner_status_text = "● UPDATING OPPORTUNITIES"
+        if alert_running:
             elapsed = int(max(0, time.time() - started_at)) if started_at else 0
-            scanner_status_detail = (
-                f"Background scan in progress · {elapsed}s"
-                if elapsed else "Background scan in progress"
+            st.markdown(
+                f'''<div class="scanner-status scanner-status-running">
+                    <div class="scanner-status-main">
+                        <span class="scanner-dot">●</span>
+                        <span>SCANNING F&O MARKET</span>
+                    </div>
+                    <span class="scanner-updated">{elapsed}s</span>
+                </div>''',
+                unsafe_allow_html=True,
             )
-        elif alert_time:
-            scanner_status_cls = "scanner-status-active"
-            scanner_status_text = "● BACKGROUND SCANNER ACTIVE"
-            scanner_status_detail = f"Updated {alert_time} IST"
-        else:
-            scanner_status_cls = "scanner-status-running"
-            scanner_status_text = "● STARTING BACKGROUND SCANNER"
-            scanner_status_detail = "First result will appear automatically"
+            st.caption(
+                "Backend scan is running. The Top 5 results will appear here when complete."
+            )
 
-        st.markdown(
-            f"""<div class=\"scanner-status {scanner_status_cls}\">
-                <div class=\"scanner-status-main\"><span class=\"scanner-dot\">{scanner_status_text[:1]}</span><span>{scanner_status_text[2:]}</span></div>
-                <span class=\"scanner-updated\">{scanner_status_detail}</span>
-            </div>""",
-            unsafe_allow_html=True,
-        )
+        elif alert_error:
+            st.markdown(
+                f'''<div class="scanner-status scanner-status-error">
+                    <div class="scanner-status-main">
+                        <span class="scanner-dot">●</span>
+                        <span>SCAN ERROR</span>
+                    </div>
+                </div>''',
+                unsafe_allow_html=True,
+            )
+            st.caption(alert_error)
 
-        if alert_results:
+        elif alert_results:
+            st.markdown(
+                f'''<div class="scanner-status scanner-status-active">
+                    <div class="scanner-status-main">
+                        <span class="scanner-dot">●</span>
+                        <span>TOP {len(alert_results)} TRADES FOUND</span>
+                    </div>
+                    <span class="scanner-updated">{alert_time or ''} IST</span>
+                </div>''',
+                unsafe_allow_html=True,
+            )
+
+            if alert_info:
+                total, scanned, failed, stage2_count = alert_info
+                st.caption(
+                    f"Scanned {scanned}/{total} F&O stocks • "
+                    f"{failed} unavailable • {stage2_count} shortlisted"
+                )
+
             for rank, alert in enumerate(alert_results, start=1):
                 action = alert["Trade"]
                 is_call = "CALL" in action
@@ -2040,18 +2062,18 @@ def _render_fno_scanner_panel():
 
                 st.markdown(
                     f"""
-                    <div class=\"scanner-alert {card_class}\">
-                      <div class=\"scanner-rank\">#{rank} · {alert['Stock']}</div>
-                      <div class=\"scanner-main\">
+                    <div class="scanner-alert {card_class}">
+                      <div class="scanner-rank">#{rank} · {alert['Stock']}</div>
+                      <div class="scanner-main">
                         <b>{alert['Trade']} · {alert['Strike']:.0f}</b>
-                        <span class=\"scanner-action {action_class}\">{action}</span>
+                        <span class="scanner-action {action_class}">{action}</span>
                       </div>
-                      <div class=\"scanner-stats\">
-                        <div class=\"scanner-stat\"><span>PoP</span><b>{alert['PoP']:.1f}%</b></div>
-                        <div class=\"scanner-stat\"><span>QUALITY</span><b>{alert['Quality']:.0f}/100</b></div>
-                        <div class=\"scanner-stat\"><span>ALIGN</span><b>{alert['Alignment']}/3</b></div>
+                      <div class="scanner-stats">
+                        <div class="scanner-stat"><span>PoP</span><b>{alert['PoP']:.1f}%</b></div>
+                        <div class="scanner-stat"><span>QUALITY</span><b>{alert['Quality']:.0f}/100</b></div>
+                        <div class="scanner-stat"><span>ALIGN</span><b>{alert['Alignment']}/3</b></div>
                       </div>
-                      <div class=\"scanner-note\">
+                      <div class="scanner-note">
                         Entry {fmt_price(alert['Entry'])} · SL {fmt_price(alert['SL'])} ·
                         T1 {fmt_price(alert['Target1'])}
                       </div>
@@ -2068,21 +2090,24 @@ def _render_fno_scanner_panel():
                     st.session_state["symbol"] = alias_symbol(alert["Stock"])
                     st.rerun()
 
-        if alert_error and not alert_results:
-            st.caption(f"Scanner note: {alert_error}")
-        elif not alert_results:
-            if scanner_market_open and not alert_running:
-                st.info("No qualifying F&O opportunities currently.")
-            elif alert_running:
-                st.caption(
-                    "The scanner is working in the background. Results will appear after the current scan completes."
-                )
-            elif not scanner_market_open:
-                st.caption("No live scan is required while the market is closed.")
+        else:
+            st.markdown(
+                '''<div class="scanner-status scanner-status-closed">
+                    <div class="scanner-status-main">
+                        <span class="scanner-dot">●</span>
+                        <span>READY TO SCAN</span>
+                    </div>
+                    <span class="scanner-updated">Backend</span>
+                </div>''',
+                unsafe_allow_html=True,
+            )
+            st.caption(
+                "Press Scan Trades to search the full F&O universe. No automatic scan is performed."
+            )
 
-
-# F&O background-alert panel intentionally removed.
+# Manual F&O scanner lives entirely in the left sidebar.
 # The main analyzer below remains unchanged and continues to use live Upstox data.
+_render_fno_scanner_panel()
 
 analyze = False
 refresh = False
