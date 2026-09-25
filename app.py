@@ -231,12 +231,12 @@ def _instrument_rank(item, user_input):
 
 @st.cache_data(ttl=60, show_spinner=False)
 def search_underlying(symbol):
-    """Resolve an NSE F&O underlying from either its trading symbol or company name.
+    """Resolve an NSE F&O underlying from a trading symbol or company name.
 
-    The user does not need to know the exact NSE symbol.  Upstox supports
-    partial matching on symbol/name/short_name, so inputs such as KAYNES,
-    Kaynes Technology, KAYNES TECHNOLOGY INDIA LTD and KAYNESTECHNOLOGIES
-    are resolved to the underlying instrument when available.
+    Upstox Instrument Search supports case-insensitive partial matching on
+    symbol, name and short_name.  We deliberately search both NSE_EQ/NSE_INDEX
+    and NSE_FO so inputs such as KAYNES, KAYNESTECHNOLOGIES and
+    KAYNES TECHNOLOGY INDIA LTD can resolve to the underlying KAYNES.
     """
     original_input = str(symbol or "").strip()
     normalized = alias_symbol(original_input)
@@ -247,34 +247,61 @@ def search_underlying(symbol):
         )
 
     queries = _search_queries_for_symbol(normalized)
-    all_results = []
-    seen = set()
+    all_equity = []
+    fno_items = []
 
-    def add_results(items):
-        for item in items or []:
-            key = item.get("instrument_key")
-            if key and key not in seen:
-                seen.add(key)
-                all_results.append(item)
+    def compact(value):
+        return "".join(ch for ch in str(value or "").upper() if ch.isalnum())
 
-    def exact_underlying(items):
+    target = compact(normalized)
+
+    def item_fields(item):
+        return [
+            compact(item.get("trading_symbol")),
+            compact(item.get("short_name")),
+            compact(item.get("name")),
+            compact(item.get("underlying_symbol")),
+        ]
+
+    def rank_item(item, query):
+        """Rank a result against the actual search query used for that result."""
+        q = compact(query)
+        fields = item_fields(item)
+        score = 0
+
+        if not q:
+            return -1
+
+        for field in fields:
+            if not field:
+                continue
+            if field == q:
+                score = max(score, 1000)
+            elif field.startswith(q):
+                score = max(score, 800)
+            elif q in field:
+                score = max(score, 650)
+            elif field in q and len(field) >= 4:
+                score = max(score, 550)
+
+        segment = str(item.get("segment") or "")
+        if segment in {"NSE_EQ", "NSE_INDEX"}:
+            score += 100
+        elif segment == "NSE_FO":
+            score += 25
+        return score
+
+    def exact_target_match(items):
         matches = []
-        target = "".join(ch for ch in normalized.upper() if ch.isalnum())
         for item in items:
-            values = [
-                item.get("trading_symbol"),
-                item.get("short_name"),
-                item.get("name"),
-                item.get("underlying_symbol"),
-            ]
-            for value in values:
-                compact = "".join(ch for ch in str(value or "").upper() if ch.isalnum())
-                if compact == target:
-                    matches.append(item)
-                    break
+            fields = item_fields(item)
+            if target and target in fields:
+                matches.append(item)
         return matches
 
-    # 1) Search the underlying equity/index directly.
+    # ------------------------------------------------------------
+    # 1. Search the actual NSE equity/index underlying first.
+    # ------------------------------------------------------------
     for query in queries:
         for segment in ("EQ", "INDEX"):
             try:
@@ -291,17 +318,43 @@ def search_underlying(symbol):
             except UpstoxError:
                 continue
 
-            items = payload.get("data", [])
-            add_results(items)
-            exact = exact_underlying(items)
-            if exact:
-                return sorted(exact, key=lambda x: -_instrument_rank(x, original_input))[0]
+            items = payload.get("data", []) or []
+            all_equity.extend(items)
 
-    # 2) Search NSE F&O directly as a fallback AND as a company-name resolver.
-    # F&O results contain underlying_key/underlying_symbol, which lets us map
-    # a long company name to the exact equity/index instrument required by the
-    # option-contract and option-chain APIs.
-    fno_underlyings = {}
+            # Exact symbol/name match always wins.
+            exact = exact_target_match(items)
+            if exact:
+                return sorted(
+                    exact,
+                    key=lambda x: rank_item(x, normalized),
+                    reverse=True,
+                )[0]
+
+    # If no exact match was found, rank the equity/index results using the
+    # search variants.  This handles company-name input without requiring the
+    # user to know the NSE trading symbol.
+    ranked_equity = []
+    seen = set()
+    for item in all_equity:
+        key = item.get("instrument_key")
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        best_score = max((rank_item(item, q) for q in queries), default=-1)
+        if best_score > 100:
+            ranked_equity.append((best_score, item))
+
+    if ranked_equity:
+        ranked_equity.sort(key=lambda x: x[0], reverse=True)
+        return ranked_equity[0][1]
+
+    # ------------------------------------------------------------
+    # 2. Search NSE F&O as a second resolver.
+    # ------------------------------------------------------------
+    # F&O results contain underlying_key and underlying_symbol.  We map the
+    # best matching F&O result back to the NSE equity/index underlying required
+    # by the rest of the application.
+    fno_by_underlying = {}
     for query in queries:
         try:
             payload = api_get(
@@ -317,43 +370,53 @@ def search_underlying(symbol):
         except UpstoxError:
             continue
 
-        for item in payload.get("data", []):
+        for item in payload.get("data", []) or []:
             if item.get("segment") != "NSE_FO":
                 continue
+            underlying_key = item.get("underlying_key")
+            if not underlying_key:
+                continue
+
+            score = rank_item(item, query)
+            current = fno_by_underlying.get(underlying_key)
+            if current is None or score > current["score"]:
+                fno_by_underlying[underlying_key] = {
+                    "score": score,
+                    "item": item,
+                }
+
+    if fno_by_underlying:
+        candidates = []
+        for data in fno_by_underlying.values():
+            item = data["item"]
+            score = data["score"]
             underlying_key = item.get("underlying_key")
             underlying_symbol = str(item.get("underlying_symbol") or "").strip().upper()
             if not underlying_key or not underlying_symbol:
                 continue
 
-            current = fno_underlyings.get(underlying_key)
-            if current is None:
-                fno_underlyings[underlying_key] = item
+            candidates.append(
+                (
+                    score,
+                    {
+                        "name": item.get("name", ""),
+                        "segment": (
+                            "NSE_EQ"
+                            if item.get("underlying_type") == "EQUITY"
+                            else "NSE_INDEX"
+                        ),
+                        "exchange": "NSE",
+                        "instrument_key": underlying_key,
+                        "trading_symbol": underlying_symbol,
+                        "short_name": item.get("name", ""),
+                        "underlying_symbol": underlying_symbol,
+                    },
+                )
+            )
 
-    if fno_underlyings:
-        candidates = []
-        for item in fno_underlyings.values():
-            underlying_key = item.get("underlying_key")
-            underlying_symbol = item.get("underlying_symbol") or ""
-            synthetic = {
-                "name": item.get("name", ""),
-                "segment": "NSE_EQ" if item.get("underlying_type") == "EQUITY" else "NSE_INDEX",
-                "exchange": "NSE",
-                "instrument_key": underlying_key,
-                "trading_symbol": underlying_symbol,
-                "short_name": item.get("name", ""),
-                "underlying_symbol": underlying_symbol,
-            }
-            synthetic["_match_score"] = _instrument_rank(synthetic, original_input)
-            candidates.append(synthetic)
-
-        candidates.sort(key=lambda x: x["_match_score"], reverse=True)
-        if candidates:
-            best = candidates[0]
-            # Require a meaningful match.  This prevents a broad company-name
-            # query from silently resolving to an unrelated F&O stock.
-            if best["_match_score"] > 0:
-                best.pop("_match_score", None)
-                return best
+        candidates.sort(key=lambda x: x[0], reverse=True)
+        if candidates and candidates[0][0] > 25:
+            return candidates[0][1]
 
     raise UpstoxError(
         f"No NSE F&O instrument found for '{original_input}'. "
