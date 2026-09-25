@@ -2306,10 +2306,67 @@ if st.session_state.pop("scroll_to_top", False):
     st.markdown(
         """
         <script>
-        window.parent.document.documentElement.scrollTop = 0;
-        window.parent.document.body.scrollTop = 0;
-        window.parent.document.querySelector('section.main')?.scrollTo(0, 0);
-        window.parent.document.querySelector('[data-testid="stAppViewContainer"]')?.scrollTo(0, 0);
+        (function () {
+            // Streamlit's page is usually scrolled inside one of its own
+            // containers rather than the browser window.  Scroll the actual
+            // top hero into view, then also reset the common Streamlit
+            // scroll containers.  A few delayed passes are intentional:
+            // the analysis rerun may still be laying out the page when the
+            // first script executes.
+            function scrollToPageTop() {
+                try {
+                    const doc = window.parent.document;
+                    const hero = doc.querySelector('.fo-hero');
+
+                    if (hero) {
+                        hero.scrollIntoView({
+                            behavior: 'auto',
+                            block: 'start',
+                            inline: 'nearest'
+                        });
+                    }
+
+                    // Reset the browser/document scroll as well.
+                    window.parent.scrollTo(0, 0);
+                    doc.documentElement.scrollTop = 0;
+                    doc.body.scrollTop = 0;
+
+                    // Reset Streamlit's known scrolling containers.
+                    const selectors = [
+                        '[data-testid="stAppViewContainer"]',
+                        '[data-testid="stMain"]',
+                        'section.main',
+                        'section[data-testid="stMain"]'
+                    ];
+
+                    selectors.forEach(function (selector) {
+                        doc.querySelectorAll(selector).forEach(function (el) {
+                            el.scrollTop = 0;
+                            el.scrollLeft = 0;
+                        });
+                    });
+
+                    // Also reset any ancestor of the hero that is actually
+                    // scrollable. This catches Streamlit DOM changes.
+                    let el = hero;
+                    while (el && el !== doc.body) {
+                        if (el.scrollHeight > el.clientHeight) {
+                            el.scrollTop = 0;
+                        }
+                        el = el.parentElement;
+                    }
+                } catch (e) {
+                    // Ignore DOM timing differences between Streamlit versions.
+                }
+            }
+
+            scrollToPageTop();
+            setTimeout(scrollToPageTop, 50);
+            setTimeout(scrollToPageTop, 150);
+            setTimeout(scrollToPageTop, 300);
+            setTimeout(scrollToPageTop, 600);
+            setTimeout(scrollToPageTop, 1000);
+        })();
         </script>
         """,
         unsafe_allow_html=True,
