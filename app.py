@@ -334,8 +334,17 @@ def alias_symbol(symbol):
 
 
 @st.cache_data(ttl=60, show_spinner=False)
-def search_underlying(symbol):
+def search_underlying(symbol, exchange="NSE"):
+    """Find an equity/index underlying on the selected exchange.
+
+    NSE remains the default path. BSE uses its own BSE_EQ/BSE_INDEX
+    instrument keys, so the existing NSE behaviour is not altered.
+    """
     symbol = alias_symbol(symbol)
+    exchange = str(exchange or "NSE").upper()
+    if exchange not in {"NSE", "BSE"}:
+        exchange = "NSE"
+
     results = []
 
     for segment in ["EQ", "INDEX"]:
@@ -343,7 +352,7 @@ def search_underlying(symbol):
             "/v2/instruments/search",
             params={
                 "query": symbol,
-                "exchanges": "NSE",
+                "exchanges": exchange,
                 "segments": segment,
                 "page_number": 1,
                 "records": 30,
@@ -353,24 +362,29 @@ def search_underlying(symbol):
 
     if not results:
         raise UpstoxError(
-            f"No NSE instrument found for '{symbol}'. "
-            "Enter an NSE F&O stock symbol such as HDFCBANK or an index such as NIFTY."
+            f"No {exchange} instrument found for '{symbol}'. "
+            f"Enter a {exchange} F&O stock symbol such as RELIANCE or HDFCBANK."
         )
+
+    expected_eq = f"{exchange}_EQ"
+    expected_index = f"{exchange}_INDEX"
 
     exact = [
         item for item in results
         if str(item.get("trading_symbol", "")).upper() == symbol
+        and str(item.get("segment", "")) in {expected_eq, expected_index}
     ]
     if exact:
         return exact[0]
 
-    if symbol in {"NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY"}:
-        indexes = [x for x in results if x.get("segment") == "NSE_INDEX"]
+    if exchange == "NSE" and symbol in {"NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY"}:
+        indexes = [x for x in results if x.get("segment") == expected_index]
         if indexes:
             return indexes[0]
 
-    equities = [x for x in results if x.get("segment") == "NSE_EQ"]
-    return equities[0] if equities else results[0]
+    indexes = [x for x in results if x.get("segment") == expected_index]
+    equities = [x for x in results if x.get("segment") == expected_eq]
+    return equities[0] if equities else (indexes[0] if indexes else results[0])
 
 
 @st.cache_data(ttl=300, show_spinner=False)
@@ -605,73 +619,6 @@ def timeframe_score(side, tf5, tf30, daily):
         elif tf.get("trend") == opposite:
             score -= 8
     return float(np.clip(score, 0, 30)), alignment
-
-
-def oi_levels(chain, spot):
-    """Build practical OI support/resistance and OI-wall context.
-
-    Uses a local strike band, then separates the nearest meaningful wall from
-    the largest wall so a very distant strike does not dominate the decision.
-    """
-    valid = chain.dropna(subset=["Strike"]).copy()
-    if valid.empty or not np.isfinite(spot):
-        return spot, spot, np.nan, {"put_walls": [], "call_walls": [],
-                                    "major_support": spot, "major_resistance": spot,
-                                    "nearest_support": spot, "nearest_resistance": spot}
-
-    # Keep OI analysis close enough to the underlying to remain actionable.
-    band = valid[(valid["Strike"] >= spot * 0.90) & (valid["Strike"] <= spot * 1.10)].copy()
-    if band.empty:
-        band = valid.copy()
-
-    band["PE OI"] = pd.to_numeric(band["PE OI"], errors="coerce").fillna(0)
-    band["CE OI"] = pd.to_numeric(band["CE OI"], errors="coerce").fillna(0)
-    band["PE Chg OI"] = pd.to_numeric(band["PE Chg OI"], errors="coerce").fillna(0)
-    band["CE Chg OI"] = pd.to_numeric(band["CE Chg OI"], errors="coerce").fillna(0)
-
-    below = band[band["Strike"] <= spot].copy()
-    above = band[band["Strike"] >= spot].copy()
-
-    # Nearest walls provide the immediate decision barrier.
-    nearest_support = float(below["Strike"].max()) if not below.empty else float(band["Strike"].min())
-    nearest_resistance = float(above["Strike"].min()) if not above.empty else float(band["Strike"].max())
-
-    # Major walls use OI, but only among strikes on the correct side.
-    support_row = below.loc[below["PE OI"].idxmax()] if not below.empty else band.loc[band["PE OI"].idxmax()]
-    resistance_row = above.loc[above["CE OI"].idxmax()] if not above.empty else band.loc[band["CE OI"].idxmax()]
-
-    major_support = float(support_row["Strike"])
-    major_resistance = float(resistance_row["Strike"])
-
-    total_call_oi = float(band["CE OI"].sum())
-    total_put_oi = float(band["PE OI"].sum())
-    pcr = total_put_oi / total_call_oi if total_call_oi > 0 else np.nan
-
-    put_walls = band.nlargest(3, "PE OI")[["Strike", "PE OI", "PE Chg OI"]].to_dict("records")
-    call_walls = band.nlargest(3, "CE OI")[["Strike", "CE OI", "CE Chg OI"]].to_dict("records")
-
-    return (
-        major_support,
-        major_resistance,
-        pcr,
-        {
-            "put_walls": put_walls,
-            "call_walls": call_walls,
-            "major_support": major_support,
-            "major_resistance": major_resistance,
-            "nearest_support": nearest_support,
-            "nearest_resistance": nearest_resistance,
-            "support_room_pct": max((spot - major_support) / max(spot, 1) * 100, 0),
-            "resistance_room_pct": max((major_resistance - spot) / max(spot, 1) * 100, 0),
-        },
-    )
-
-
-def nearest_row(chain, strike):
-    if chain.empty or not np.isfinite(strike):
-        return None
-    index = (chain["Strike"] - strike).abs().idxmin()
-    return chain.loc[index]
 
 
 def normalize_chain(rows):
@@ -1419,20 +1366,30 @@ def log_signal(symbol, expiry, decision, plan, spot, pcr, support, resistance, t
 # FULL F&O TRADE ALERT SCANNER — USES THIS FILE'S EXISTING ENGINE
 # ============================================================
 
-FNO_MASTER_URL = "https://assets.upstox.com/market-quote/instruments/exchange/NSE.json.gz"
+FNO_MASTER_URLS = {
+    "NSE": "https://assets.upstox.com/market-quote/instruments/exchange/NSE.json.gz",
+    "BSE": "https://assets.upstox.com/market-quote/instruments/exchange/BSE.json.gz",
+}
 
 
 @st.cache_data(ttl=3600, show_spinner=False)
-def get_fno_underlyings():
-    """Build current NSE equity F&O universe from Upstox BOD master."""
+def get_fno_underlyings(exchange="NSE"):
+    """Build the current equity F&O universe for NSE or BSE from Upstox BOD."""
+    exchange = str(exchange or "NSE").upper()
+    if exchange not in FNO_MASTER_URLS:
+        exchange = "NSE"
+
+    master_url = FNO_MASTER_URLS[exchange]
+    fo_segment = f"{exchange}_FO"
+
     try:
-        response = requests.get(FNO_MASTER_URL, timeout=30)
+        response = requests.get(master_url, timeout=30)
         response.raise_for_status()
         raw = gzip.decompress(response.content)
         payload = json.loads(raw.decode("utf-8"))
     except Exception as exc:
         raise UpstoxError(
-            f"Unable to load the Upstox NSE F&O instrument list: {exc}"
+            f"Unable to load the Upstox {exchange} F&O instrument list: {exc}"
         ) from exc
 
     records = payload.get("data", payload.get("instruments", [])) if isinstance(payload, dict) else payload
@@ -1442,7 +1399,7 @@ def get_fno_underlyings():
     for item in records:
         if not isinstance(item, dict):
             continue
-        if item.get("segment") != "NSE_FO":
+        if item.get("segment") != fo_segment:
             continue
         if item.get("instrument_type") not in {"CE", "PE", "FUT"}:
             continue
@@ -1475,6 +1432,7 @@ def get_fno_underlyings():
                 "symbol": symbol,
                 "underlying_key": underlying_key,
                 "expiry": expiry_date,
+                "exchange": exchange,
             }
 
     return sorted(universe.values(), key=lambda x: x["symbol"])
@@ -1670,6 +1628,7 @@ def _scanner_plan_for_candidate(candidate, symbol, expiry, risk_profile):
 
     return {
         "Stock": symbol,
+        "Exchange": candidate.get("exchange", "NSE"),
         "Trade": action,
         "Strike": float(plan["strike"]),
         "Expiry": expiry,
@@ -1693,16 +1652,19 @@ def _scanner_plan_for_candidate(candidate, symbol, expiry, risk_profile):
     }
 
 
-def scan_fno_trade_alerts(risk_profile, top_alerts=5):
+def scan_fno_trade_alerts(risk_profile, top_alerts=5, exchange="NSE"):
     """
-    Full NSE equity F&O scan using the same strategy engine as the main page.
+    Full NSE or BSE equity F&O scan using the same strategy engine as the main page.
 
     Stage 1: option-chain filter only.
     Stage 2: existing technical + OI + quality + readiness gates.
 
     Only final actionable 4-way strategies are returned.
     """
-    universe = get_fno_underlyings()
+    exchange = str(exchange or "NSE").upper()
+    if exchange not in {"NSE", "BSE"}:
+        exchange = "NSE"
+    universe = get_fno_underlyings(exchange)
     stage1 = []
     scanned = 0
     failed = 0
@@ -1719,6 +1681,7 @@ def scan_fno_trade_alerts(risk_profile, top_alerts=5):
                 candidate["symbol"] = item["symbol"]
                 candidate["underlying_key"] = item["underlying_key"]
                 candidate["expiry"] = item["expiry"]
+                candidate["exchange"] = item.get("exchange", exchange)
                 stage1.append(candidate)
 
             scanned += 1
@@ -1819,19 +1782,24 @@ class _FNOScannerManager:
         self.scan_time = None
         self.error = None
         self.profile = None
+        self.exchange = None
         self.next_allowed = 0.0
         self.started_at = 0.0
         self.finished_at = 0.0
 
-    def start_if_needed(self, risk_profile, force=False):
+    def start_if_needed(self, risk_profile, exchange="NSE", force=False):
+        exchange = str(exchange or "NSE").upper()
+        if exchange not in {"NSE", "BSE"}:
+            exchange = "NSE"
         now = time.time()
         with self.lock:
             if self.running:
                 return
-            if self.profile != risk_profile:
+            if self.profile != risk_profile or self.exchange != exchange:
                 # A profile change should trigger a fresh scan, but only after
                 # the current worker has finished. Do not start duplicate workers.
                 self.profile = risk_profile
+                self.exchange = exchange
                 self.next_allowed = 0.0
             if not force and now < self.next_allowed and self.results:
                 return
@@ -1841,16 +1809,16 @@ class _FNOScannerManager:
 
         worker = threading.Thread(
             target=self._worker,
-            args=(risk_profile,),
+            args=(risk_profile, exchange),
             daemon=True,
             name="fno-background-scanner",
         )
         worker.start()
 
-    def _worker(self, risk_profile):
+    def _worker(self, risk_profile, exchange):
         try:
             results, total, scanned, failed, stage2_count = scan_fno_trade_alerts(
-                risk_profile, top_alerts=5
+                risk_profile, top_alerts=5, exchange=exchange
             )
             now = time.time()
             with self.lock:
@@ -1938,7 +1906,7 @@ st.markdown("""
 # SIDEBAR
 # ============================================================
 
-def _render_fno_scanner_panel():
+def _render_fno_scanner_panel(exchange="NSE"):
     """Render the manual Top-5 trade scanner in the left sidebar.
 
     The scan is launched only when the user presses Scan Trades. The actual
@@ -1951,7 +1919,7 @@ def _render_fno_scanner_panel():
 
         st.markdown("### 🔥 TOP 5 POSSIBLE TRADES")
         st.caption(
-            "Scans the NSE equity F&O universe using the same trade engine, "
+            f"Scans the {exchange} equity F&O universe using the same trade engine, "
             "quality gates and risk profile as the main analyzer."
         )
 
@@ -1963,7 +1931,7 @@ def _render_fno_scanner_panel():
         )
 
         if scan_trades:
-            scanner_manager.start_if_needed(risk_for_scanner, force=True)
+            scanner_manager.start_if_needed(risk_for_scanner, exchange=exchange, force=True)
             st.session_state["scanner_manual_scan_requested"] = True
             st.rerun()
 
@@ -2041,7 +2009,7 @@ def _render_fno_scanner_panel():
             if alert_info:
                 total, scanned, failed, stage2_count = alert_info
                 st.caption(
-                    f"Scanned {scanned}/{total} F&O stocks • "
+                    f"{exchange} F&O: scanned {scanned}/{total} stocks • "
                     f"{failed} unavailable • {stage2_count} shortlisted"
                 )
 
@@ -2063,7 +2031,7 @@ def _render_fno_scanner_panel():
                 st.markdown(
                     f"""
                     <div class="scanner-alert {card_class}">
-                      <div class="scanner-rank">#{rank} · {alert['Stock']}</div>
+                      <div class="scanner-rank">#{rank} · {alert.get('Exchange', exchange)} · {alert['Stock']}</div>
                       <div class="scanner-main">
                         <b>{alert['Trade']} · {alert['Strike']:.0f}</b>
                         <span class="scanner-action {action_class}">{action}</span>
@@ -2088,6 +2056,7 @@ def _render_fno_scanner_panel():
                     use_container_width=True,
                 ):
                     st.session_state["symbol"] = alias_symbol(alert["Stock"])
+                    st.session_state["fno_exchange"] = alert.get("Exchange", exchange)
                     st.rerun()
 
         else:
@@ -2105,9 +2074,22 @@ def _render_fno_scanner_panel():
                 "Press Scan Trades to search the full F&O universe. No automatic scan is performed."
             )
 
+# Exchange selector is intentionally separate so NSE remains the default and
+# its existing behaviour is preserved. BSE uses the same analyzer/scanner logic
+# with BSE-specific Upstox instrument keys and BSE_FO contracts.
+with st.sidebar:
+    st.markdown("### 🏦 F&O Exchange")
+    fno_exchange = st.radio(
+        "Select exchange",
+        ["NSE", "BSE"],
+        index=0 if st.session_state.get("fno_exchange", "NSE") == "NSE" else 1,
+        horizontal=True,
+        key="fno_exchange",
+    )
+
 # Manual F&O scanner lives entirely in the left sidebar.
 # The main analyzer below remains unchanged and continues to use live Upstox data.
-_render_fno_scanner_panel()
+_render_fno_scanner_panel(fno_exchange)
 
 analyze = False
 refresh = False
@@ -2117,9 +2099,9 @@ with st.sidebar:
     st.markdown("## 🔎 Analyze Instrument")
 
     symbol_input = st.text_input(
-        "NSE Stock / Index",
+        f"{fno_exchange} Stock / Index",
         value=st.session_state.get("symbol", "KOTAKBANK"),
-        placeholder="NIFTY / BANKNIFTY / HDFCBANK",
+        placeholder=("NIFTY / BANKNIFTY / HDFCBANK" if fno_exchange == "NSE" else "SENSEX / RELIANCE / TCS"),
     )
 
     risk_profile = st.selectbox(
@@ -2154,6 +2136,7 @@ with st.sidebar:
 
 if analyze:
     st.session_state["symbol"] = alias_symbol(symbol_input)
+    st.session_state["fno_exchange"] = fno_exchange
     st.rerun()
 
 if refresh:
@@ -2165,10 +2148,13 @@ if refresh:
 # ============================================================
 
 symbol = alias_symbol(st.session_state.get("symbol", symbol_input or "KOTAKBANK"))
+fno_exchange = str(st.session_state.get("fno_exchange", fno_exchange) or "NSE").upper()
+if fno_exchange not in {"NSE", "BSE"}:
+    fno_exchange = "NSE"
 
 try:
     with st.spinner(f"Analyzing live {symbol} data..."):
-        underlying = search_underlying(symbol)
+        underlying = search_underlying(symbol, fno_exchange)
         underlying_key = underlying["instrument_key"]
         contracts = get_contracts(underlying_key)
         expiries = available_expiries(contracts)
