@@ -2295,11 +2295,25 @@ with st.sidebar:
     st.caption("No simulated prices are used.")
 
 if analyze:
+    st.session_state["scroll_to_top"] = True
     st.rerun()
 
 if refresh:
     st.cache_data.clear()
     st.rerun()
+
+if st.session_state.pop("scroll_to_top", False):
+    st.markdown(
+        """
+        <script>
+        window.parent.document.documentElement.scrollTop = 0;
+        window.parent.document.body.scrollTop = 0;
+        window.parent.document.querySelector('section.main')?.scrollTo(0, 0);
+        window.parent.document.querySelector('[data-testid="stAppViewContainer"]')?.scrollTo(0, 0);
+        </script>
+        """,
+        unsafe_allow_html=True,
+    )
 
 # ============================================================
 # LIVE ANALYSIS
