@@ -2253,8 +2253,8 @@ with st.sidebar:
 
     symbol_input = st.text_input(
         "Stock / Index",
-        value=st.session_state.get("analyzer_search_value", ""),
         placeholder="NIFTY / BANKNIFTY / HDFCBANK",
+        key="analyzer_search_value",
     )
 
     risk_profile = st.selectbox(
@@ -2264,10 +2264,17 @@ with st.sidebar:
         key="risk_profile",
     )
 
+    def _analyze_live_market_callback():
+        entered = str(st.session_state.get("analyzer_search_value", "")).strip()
+        if entered:
+            st.session_state["symbol"] = alias_symbol(entered)
+        st.session_state["analyzer_search_value"] = ""
+
     analyze = st.button(
         "Analyze Live Market",
         type="primary",
         use_container_width=True,
+        on_click=_analyze_live_market_callback,
     )
 
     refresh = st.button(
@@ -2288,10 +2295,6 @@ with st.sidebar:
     st.caption("No simulated prices are used.")
 
 if analyze:
-    entered_symbol = str(symbol_input or "").strip()
-    if entered_symbol:
-        st.session_state["symbol"] = alias_symbol(entered_symbol)
-        st.session_state["analyzer_search_value"] = ""
     st.rerun()
 
 if refresh:
