@@ -2084,7 +2084,6 @@ with st.sidebar:
         ["NSE", "BSE"],
         index=0 if st.session_state.get("fno_exchange", "NSE") == "NSE" else 1,
         horizontal=True,
-        key="fno_exchange",
     )
 
 # Manual F&O scanner lives entirely in the left sidebar.
