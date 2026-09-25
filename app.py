@@ -2248,9 +2248,12 @@ with st.sidebar:
     st.divider()
     st.markdown("## 🔎 Analyze Instrument")
 
+    if "analyzer_search_value" not in st.session_state:
+        st.session_state["analyzer_search_value"] = ""
+
     symbol_input = st.text_input(
-        "NSE Stock / Index",
-        value=st.session_state.get("symbol", "KOTAKBANK"),
+        "Stock / Index",
+        value=st.session_state.get("analyzer_search_value", ""),
         placeholder="NIFTY / BANKNIFTY / HDFCBANK",
     )
 
@@ -2285,7 +2288,10 @@ with st.sidebar:
     st.caption("No simulated prices are used.")
 
 if analyze:
-    st.session_state["symbol"] = alias_symbol(symbol_input)
+    entered_symbol = str(symbol_input or "").strip()
+    if entered_symbol:
+        st.session_state["symbol"] = alias_symbol(entered_symbol)
+        st.session_state["analyzer_search_value"] = ""
     st.rerun()
 
 if refresh:
