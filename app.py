@@ -456,42 +456,77 @@ def alias_commodity(symbol):
 
 @st.cache_data(ttl=60, show_spinner=False)
 def search_commodity_future(symbol):
-    """Find the nearest live MCX futures contract for a commodity."""
+    """Find the nearest valid MCX commodity future.
+
+    Upstox Instrument Search is a free-text search. Some MCX contracts are
+    returned more reliably when the query includes FUT, so we try a small
+    set of progressively broader searches and then apply strict MCX/FUT
+    filtering locally. This does not touch the NSE Equity F&O path.
+    """
     symbol = alias_commodity(symbol)
-    payload = api_get(
-        "/v2/instruments/search",
-        params={
-            "query": symbol,
-            "exchanges": "MCX",
-            "segments": "FO",
-            "instrument_types": "FUT",
-            "page_number": 1,
-            "records": 30,
-        },
-        timeout=30,
-    )
-    rows = payload.get("data", []) or []
+    queries = [symbol, f"{symbol} FUT"]
+    rows = []
+
+    for query in queries:
+        try:
+            payload = api_get(
+                "/v2/instruments/search",
+                params={
+                    "query": query,
+                    "exchanges": "MCX",
+                    "segments": "FO",
+                    "page_number": 1,
+                    "records": 30,
+                },
+                timeout=30,
+            )
+            rows.extend(payload.get("data", []) or [])
+        except UpstoxError:
+            continue
+
+    # Deduplicate results returned by the two searches.
+    unique = {}
+    for row in rows:
+        key = row.get("instrument_key")
+        if key:
+            unique[str(key)] = row
+
     today = date.today().isoformat()
-    futures = [
-        x for x in rows
-        if str(x.get("exchange", "")).upper() == "MCX"
-        and str(x.get("instrument_type", "")).upper() == "FUT"
-        and x.get("expiry")
-        and str(x.get("expiry")) >= today
-    ]
-    exact = [
-        x for x in futures
-        if alias_commodity(x.get("underlying_symbol", "")) == symbol
-        or alias_commodity(x.get("trading_symbol", "").split(" FUT ")[0]) == symbol
-    ]
-    futures = exact or futures
-    if not futures:
+    futures = []
+    for row in unique.values():
+        segment = str(row.get("segment", "")).upper()
+        exchange = str(row.get("exchange", "")).upper()
+        instrument_type = str(row.get("instrument_type", "")).upper()
+        expiry = str(row.get("expiry", ""))
+        if exchange != "MCX" or segment != "MCX_FO" or instrument_type != "FUT":
+            continue
+        if not expiry or expiry < today:
+            continue
+        futures.append(row)
+
+    def row_symbol(row):
+        underlying = alias_commodity(row.get("underlying_symbol", ""))
+        trading = str(row.get("trading_symbol", "")).upper()
+        name = alias_commodity(row.get("name", ""))
+        return underlying, trading, name
+
+    # Prefer an exact commodity match.
+    exact = []
+    for row in futures:
+        underlying, trading, name = row_symbol(row)
+        if underlying == symbol or trading.startswith(f"{symbol} FUT") or name == symbol:
+            exact.append(row)
+
+    candidates = exact or futures
+    if not candidates:
         raise UpstoxError(
             f"No MCX futures instrument found for '{symbol}'. "
             "Try GOLD, GOLDM, SILVER, SILVERM, CRUDEOIL or NATURALGAS."
         )
-    futures.sort(key=lambda x: str(x.get("expiry")))
-    return futures[0]
+
+    # Nearest valid expiry.
+    candidates.sort(key=lambda x: str(x.get("expiry", "9999-12-31")))
+    return candidates[0]
 
 
 @st.cache_data(ttl=300, show_spinner=False)
