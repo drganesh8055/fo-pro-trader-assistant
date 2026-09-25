@@ -656,11 +656,12 @@ def timeframe_score(side, tf5, tf30, daily):
 
 
 def oi_levels(chain, spot):
+    """Calculate OI-based support, resistance, PCR and major OI walls."""
     valid = chain.dropna(subset=["Strike"]).copy()
     if valid.empty:
         return spot, spot, np.nan, {"put_walls": [], "call_walls": []}
 
-    # Do not allow a distant strike to become a misleading support/resistance.
+    # Keep support/resistance focused on a reasonable band around spot.
     band = valid[
         (valid["Strike"] >= spot * 0.90) &
         (valid["Strike"] <= spot * 1.10)
@@ -668,114 +669,41 @@ def oi_levels(chain, spot):
     if band.empty:
         band = valid
 
+    # OI columns can contain missing values, so always rank on zero-filled data.
+    pe_oi = band["PE OI"].fillna(0)
+    ce_oi = band["CE OI"].fillna(0)
+
     below = band[band["Strike"] <= spot]
     above = band[band["Strike"] >= spot]
 
     support_row = (
         below.loc[below["PE OI"].fillna(0).idxmax()]
-        if not below.empty else band.loc[band["PE OI"].fillna(0).idxmax()]
+        if not below.empty
+        else band.loc[pe_oi.idxmax()]
     )
+
     resistance_row = (
         above.loc[above["CE OI"].fillna(0).idxmax()]
-        if not above.empty else band.loc[band["CE OI"].fillna(0).idxmax()]
+        if not above.empty
+        else band.loc[ce_oi.idxmax()]
     )
 
-    total_call_oi = band["CE OI"].fillna(0).sum()
-    total_put_oi = band["PE OI"].fillna(0).sum()
+    total_call_oi = ce_oi.sum()
+    total_put_oi = pe_oi.sum()
     pcr = total_put_oi / total_call_oi if total_call_oi else np.nan
 
-    put_walls = band.nlargest(3, "PE OI")[["Strike", "PE OI", "PE Chg OI"]].to_dict("records")
-    call_walls = band.nlargest(3, "CE OI")[["Strike", "CE OI", "CE Chg OI"]].to_dict("records")
+    put_walls = band.nlargest(3, "PE OI")[
+        ["Strike", "PE OI", "PE Chg OI"]
+    ].to_dict("records")
+    call_walls = band.nlargest(3, "CE OI")[
+        ["Strike", "CE OI", "CE Chg OI"]
+    ].to_dict("records")
 
     return (
         float(support_row["Strike"]),
         float(resistance_row["Strike"]),
         pcr,
         {"put_walls": put_walls, "call_walls": call_walls},
-    )
-
-
-def nearest_row(chain, strike):
-    if chain.empty:
-        return None
-    index = (chain["Strike"] - strike).abs().idxmin()
-    return chain.loc[index]
-
-def normalize_chain(rows):
-    records = []
-
-    for item in rows:
-        strike = safe_float(item.get("strike_price"))
-
-        call = item.get("call_options") or {}
-        put = item.get("put_options") or {}
-
-        call_market = call.get("market_data") or {}
-        call_greeks = call.get("option_greeks") or {}
-        put_market = put.get("market_data") or {}
-        put_greeks = put.get("option_greeks") or {}
-
-        call_oi = safe_float(call_market.get("oi"), 0)
-        put_oi = safe_float(put_market.get("oi"), 0)
-
-        call_prev_oi = safe_float(call_market.get("prev_oi"), 0)
-        put_prev_oi = safe_float(put_market.get("prev_oi"), 0)
-
-        records.append(
-            {
-                "Strike": strike,
-                "CE Key": call.get("instrument_key"),
-                "CE LTP": safe_float(call_market.get("ltp")),
-                "CE Bid": safe_float(call_market.get("bid_price")),
-                "CE Ask": safe_float(call_market.get("ask_price")),
-                "CE OI": call_oi,
-                "CE Chg OI": call_oi - call_prev_oi,
-                "CE Volume": safe_float(call_market.get("volume"), 0),
-                "CE IV": safe_float(call_greeks.get("iv")),
-                "CE Delta": safe_float(call_greeks.get("delta")),
-                "CE PoP": safe_float(call_greeks.get("pop")),
-                "PE Key": put.get("instrument_key"),
-                "PE LTP": safe_float(put_market.get("ltp")),
-                "PE Bid": safe_float(put_market.get("bid_price")),
-                "PE Ask": safe_float(put_market.get("ask_price")),
-                "PE OI": put_oi,
-                "PE Chg OI": put_oi - put_prev_oi,
-                "PE Volume": safe_float(put_market.get("volume"), 0),
-                "PE IV": safe_float(put_greeks.get("iv")),
-                "PE Delta": safe_float(put_greeks.get("delta")),
-                "PE PoP": safe_float(put_greeks.get("pop")),
-            }
-        )
-
-    return pd.DataFrame(records).sort_values("Strike").reset_index(drop=True)
-
-
-def oi_levels(chain, spot):
-    valid = chain.dropna(subset=["Strike"]).copy()
-
-    below = valid[valid["Strike"] <= spot]
-    above = valid[valid["Strike"] >= spot]
-
-    support_row = (
-        below.loc[below["PE OI"].idxmax()]
-        if not below.empty
-        else valid.loc[valid["PE OI"].idxmax()]
-    )
-
-    resistance_row = (
-        above.loc[above["CE OI"].idxmax()]
-        if not above.empty
-        else valid.loc[valid["CE OI"].idxmax()]
-    )
-
-    total_call_oi = valid["CE OI"].sum()
-    total_put_oi = valid["PE OI"].sum()
-    pcr = total_put_oi / total_call_oi if total_call_oi else np.nan
-
-    return (
-        float(support_row["Strike"]),
-        float(resistance_row["Strike"]),
-        pcr,
     )
 
 
