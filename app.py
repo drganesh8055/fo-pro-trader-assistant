@@ -1,6 +1,5 @@
 import gzip
 import json
-import math
 from datetime import date, datetime, timedelta
 from zoneinfo import ZoneInfo
 from urllib.parse import quote
@@ -425,340 +424,6 @@ def get_quote(instrument_key):
         raise UpstoxError("No live quote returned by Upstox.")
     return next(iter(data.values()))
 
-
-
-# ============================================================
-# MCX COMMODITY OPTION DATA
-# ============================================================
-
-COMMODITY_ALIASES = {
-    "GOLDM": "GOLDM",
-    "GOLDMINI": "GOLDM",
-    "SILVERM": "SILVERM",
-    "SILVERMINI": "SILVERM",
-    "CRUDE": "CRUDEOIL",
-    "CRUDEOIL": "CRUDEOIL",
-    "NATGAS": "NATURALGAS",
-    "NATURALGAS": "NATURALGAS",
-    "COPPER": "COPPER",
-    "ZINC": "ZINC",
-    "ALUMINIUM": "ALUMINIUM",
-    "ALUMINUM": "ALUMINIUM",
-    "LEAD": "LEAD",
-    "NICKEL": "NICKEL",
-}
-
-
-def alias_commodity(symbol):
-    s = str(symbol or "").strip().upper().replace(" ", "")
-    return COMMODITY_ALIASES.get(s, s)
-
-
-@st.cache_data(ttl=60, show_spinner=False)
-def search_commodity_future(symbol):
-    """Find the nearest valid MCX commodity future.
-
-    Upstox Instrument Search is a free-text search. Some MCX contracts are
-    returned more reliably when the query includes FUT, so we try a small
-    set of progressively broader searches and then apply strict MCX/FUT
-    filtering locally. This does not touch the NSE Equity F&O path.
-    """
-    symbol = alias_commodity(symbol)
-    queries = [symbol, f"{symbol} FUT"]
-    rows = []
-
-    for query in queries:
-        try:
-            payload = api_get(
-                "/v2/instruments/search",
-                params={
-                    "query": query,
-                    "exchanges": "MCX",
-                    "segments": "FO",
-                    "page_number": 1,
-                    "records": 30,
-                },
-                timeout=30,
-            )
-            rows.extend(payload.get("data", []) or [])
-        except UpstoxError:
-            continue
-
-    # Deduplicate results returned by the two searches.
-    unique = {}
-    for row in rows:
-        key = row.get("instrument_key")
-        if key:
-            unique[str(key)] = row
-
-    today = date.today().isoformat()
-    futures = []
-    for row in unique.values():
-        segment = str(row.get("segment", "")).upper()
-        exchange = str(row.get("exchange", "")).upper()
-        instrument_type = str(row.get("instrument_type", "")).upper()
-        expiry = str(row.get("expiry", ""))
-        if exchange != "MCX" or segment != "MCX_FO" or instrument_type != "FUT":
-            continue
-        if not expiry or expiry < today:
-            continue
-        futures.append(row)
-
-    def row_symbol(row):
-        underlying = alias_commodity(row.get("underlying_symbol", ""))
-        trading = str(row.get("trading_symbol", "")).upper()
-        name = alias_commodity(row.get("name", ""))
-        return underlying, trading, name
-
-    # Prefer an exact commodity match.
-    exact = []
-    for row in futures:
-        underlying, trading, name = row_symbol(row)
-        if underlying == symbol or trading.startswith(f"{symbol} FUT") or name == symbol:
-            exact.append(row)
-
-    candidates = exact or futures
-    if not candidates:
-        raise UpstoxError(
-            f"No MCX futures instrument found for '{symbol}'. "
-            "Try GOLD, GOLDM, SILVER, SILVERM, CRUDEOIL or NATURALGAS."
-        )
-
-    # Nearest valid expiry.
-    candidates.sort(key=lambda x: str(x.get("expiry", "9999-12-31")))
-    return candidates[0]
-
-
-@st.cache_data(ttl=300, show_spinner=False)
-def get_commodity_option_contracts(symbol, expiry="current_month"):
-    """Find MCX CE/PE contracts around ATM using the Instrument Search API.
-
-    Upstox's /v2/option/chain endpoint is explicitly unavailable for MCX, so
-    commodities use the supported Instrument Search + Option Greeks + Full
-    Market Quote APIs to reconstruct the live chain locally.
-    """
-    symbol = alias_commodity(symbol)
-    all_rows = []
-    for option_type in ("CE", "PE"):
-        payload = api_get(
-            "/v2/instruments/search",
-            params={
-                "query": symbol,
-                "exchanges": "MCX",
-                "segments": "FO",
-                "instrument_types": option_type,
-                "expiry": expiry,
-                "page_number": 1,
-                "records": 30,
-            },
-            timeout=30,
-        )
-        all_rows.extend(payload.get("data", []) or [])
-
-    rows = [
-        x for x in all_rows
-        if str(x.get("exchange", "")).upper() == "MCX"
-        and str(x.get("instrument_type", "")).upper() in {"CE", "PE"}
-        and x.get("instrument_key")
-        and np.isfinite(safe_float(x.get("strike_price")))
-    ]
-    # Deduplicate in case the search service returns overlapping matches.
-    unique = {}
-    for row in rows:
-        unique[row["instrument_key"]] = row
-    rows = list(unique.values())
-    if not rows:
-        raise UpstoxError(
-            f"No MCX option contracts were returned for {symbol} ({expiry})."
-        )
-    return rows
-
-
-@st.cache_data(ttl=30, show_spinner=False)
-def get_quotes_batch(instrument_keys):
-    keys = [str(k) for k in instrument_keys if k]
-    if not keys:
-        return {}
-    result = {}
-    # V3 accepts up to 500 keys per request.
-    for start in range(0, len(keys), 450):
-        chunk = keys[start:start + 450]
-        payload = api_get(
-            "/v3/market-quote/quotes",
-            params={"instrument_key": ",".join(chunk)},
-            timeout=30,
-        )
-        data = payload.get("data", {}) or {}
-        for value in data.values():
-            key = value.get("instrument_token") or value.get("instrument_key")
-            if key:
-                result[str(key)] = value
-    return result
-
-
-@st.cache_data(ttl=30, show_spinner=False)
-def get_option_greeks_batch(instrument_keys):
-    keys = [str(k) for k in instrument_keys if k]
-    if not keys:
-        return {}
-    result = {}
-    for start in range(0, len(keys), 50):
-        chunk = keys[start:start + 50]
-        payload = api_get(
-            "/v3/market-quote/option-greek",
-            params={"instrument_key": ",".join(chunk)},
-            timeout=30,
-        )
-        data = payload.get("data", {}) or {}
-        for value in data.values():
-            key = value.get("instrument_token") or value.get("instrument_key")
-            if key:
-                result[str(key)] = value
-    return result
-
-
-def _quote_depth(quote_data, side):
-    depth = quote_data.get("depth") or {}
-    levels = depth.get(side) or []
-    first = levels[0] if levels else {}
-    return safe_float(first.get("price")), safe_float(first.get("quantity"), 0)
-
-
-def _normal_cdf(x):
-    try:
-        return 0.5 * (1.0 + math.erf(float(x) / math.sqrt(2.0)))
-    except Exception:
-        return np.nan
-
-
-def commodity_option_pop(spot, strike, premium, iv_pct, expiry, side):
-    """Estimate buyer PoP from a Black-76 expiry distribution.
-
-    Upstox provides MCX Greeks but its MCX option-chain endpoint is unavailable.
-    Therefore PoP is calculated from live futures price, live option premium,
-    IV and time to expiry rather than being invented or copied from another
-    market.
-    """
-    spot = safe_float(spot)
-    strike = safe_float(strike)
-    premium = safe_float(premium)
-    iv_pct = safe_float(iv_pct)
-    if not all(np.isfinite(x) for x in [spot, strike, premium, iv_pct]):
-        return np.nan
-    if spot <= 0 or strike <= 0 or premium <= 0 or iv_pct <= 0:
-        return np.nan
-    try:
-        expiry_date = datetime.strptime(str(expiry), "%Y-%m-%d").date()
-    except Exception:
-        return np.nan
-    days = max((expiry_date - date.today()).days, 0) + 0.5
-    t = days / 365.0
-    sigma = iv_pct / 100.0
-    vol_t = sigma * math.sqrt(t)
-    if vol_t <= 0:
-        return np.nan
-    # Approximate probability that expiry settlement crosses the option's
-    # premium-adjusted break-even under the Black-76 futures distribution.
-    if str(side).upper() == "CE":
-        breakeven = strike + premium
-        d2 = (math.log(max(spot, 1e-12) / max(breakeven, 1e-12)) - 0.5 * sigma * sigma * t) / vol_t
-        pop = _normal_cdf(d2)
-    else:
-        breakeven = max(strike - premium, 1e-12)
-        d2 = (math.log(max(spot, 1e-12) / breakeven) - 0.5 * sigma * sigma * t) / vol_t
-        pop = _normal_cdf(-d2)
-    return float(np.clip(pop * 100.0, 0, 100)) if np.isfinite(pop) else np.nan
-
-
-def build_commodity_chain(contract_rows, spot, expiry):
-    """Build the same normalized chain shape used by the equity engine."""
-    if not contract_rows or not np.isfinite(spot):
-        return pd.DataFrame()
-
-    contracts = [
-        x for x in contract_rows
-        if str(x.get("expiry")) == str(expiry)
-        and str(x.get("instrument_type", "")).upper() in {"CE", "PE"}
-    ]
-    if not contracts:
-        return pd.DataFrame()
-
-    # Keep a practical ATM band. This preserves enough strikes for OI walls
-    # without creating a burst of quote/Greek API calls.
-    contracts = sorted(
-        contracts,
-        key=lambda x: abs(safe_float(x.get("strike_price")) - spot),
-    )[:40]
-
-    keys = [x.get("instrument_key") for x in contracts if x.get("instrument_key")]
-    greeks = get_option_greeks_batch(keys)
-    quotes = get_quotes_batch(keys)
-
-    by_strike = {}
-    for contract in contracts:
-        key = str(contract.get("instrument_key"))
-        strike = safe_float(contract.get("strike_price"))
-        side = str(contract.get("instrument_type", "")).upper()
-        if not np.isfinite(strike) or side not in {"CE", "PE"}:
-            continue
-        g = greeks.get(key) or {}
-        q = quotes.get(key) or {}
-        if not g:
-            # Some quote keys are returned as exchange:symbol rather than the
-            # pipe key; match on instrument token when available.
-            token = str(contract.get("instrument_key"))
-            g = next((v for k, v in greeks.items() if str(v.get("instrument_token")) == token), {})
-        if not q:
-            q = next((v for k, v in quotes.items() if str(v.get("instrument_token")) == key), {})
-        if not q:
-            continue
-
-        bid, bid_qty = _quote_depth(q, "buy")
-        ask, ask_qty = _quote_depth(q, "sell")
-        ltp = safe_float(q.get("last_price"), safe_float(g.get("last_price")))
-        iv_pct = safe_float(g.get("iv")) * 100.0 if np.isfinite(safe_float(g.get("iv"))) and safe_float(g.get("iv")) <= 5 else safe_float(g.get("iv"))
-        delta = safe_float(g.get("delta"))
-        pop = commodity_option_pop(spot, strike, ltp, iv_pct, expiry, side)
-        prev_oi = safe_float(q.get("previous_oi"), 0)
-        oi = safe_float(q.get("oi"), safe_float(g.get("oi"), 0))
-        volume = safe_float(q.get("volume"), safe_float(g.get("volume"), 0))
-        rec = by_strike.setdefault(strike, {})
-        rec.update({
-            "Strike": strike,
-            f"{side} Key": key,
-            f"{side} LTP": ltp,
-            f"{side} Bid": bid,
-            f"{side} Ask": ask,
-            f"{side} Bid Qty": bid_qty,
-            f"{side} Ask Qty": ask_qty,
-            f"{side} Prev Close": safe_float(q.get("prev_close_price"), safe_float(g.get("cp"))),
-            f"{side} OI": oi,
-            f"{side} Chg OI": oi - prev_oi,
-            f"{side} Volume": volume,
-            f"{side} IV": iv_pct,
-            f"{side} Delta": delta,
-            f"{side} Gamma": safe_float(g.get("gamma")),
-            f"{side} Theta": safe_float(g.get("theta")),
-            f"{side} Vega": safe_float(g.get("vega")),
-            f"{side} PoP": pop,
-        })
-
-    if not by_strike:
-        return pd.DataFrame()
-
-    records = []
-    for strike, rec in sorted(by_strike.items()):
-        base = {"Strike": strike}
-        for side in ("CE", "PE"):
-            for field, default in [
-                ("Key", None), ("LTP", np.nan), ("Bid", np.nan), ("Ask", np.nan),
-                ("Bid Qty", 0), ("Ask Qty", 0), ("Prev Close", np.nan), ("OI", 0),
-                ("Chg OI", 0), ("Volume", 0), ("IV", np.nan), ("Delta", np.nan),
-                ("Gamma", np.nan), ("Theta", np.nan), ("Vega", np.nan), ("PoP", np.nan),
-            ]:
-                base[f"{side} {field}"] = rec.get(f"{side} {field}", default)
-        records.append(base)
-    return pd.DataFrame(records).sort_values("Strike").reset_index(drop=True)
 
 
 @st.cache_data(ttl=90, show_spinner=False)
@@ -2440,31 +2105,9 @@ def _render_fno_scanner_panel():
                 "Press Scan Trades to search the full F&O universe. No automatic scan is performed."
             )
 
-# ============================================================
-# MARKET SELECTOR
-# ============================================================
-with st.sidebar:
-    st.markdown("## 📈 MARKET")
-    market_mode = st.radio(
-        "Select market",
-        ["Equity Market", "Commodity Market"],
-        index=0,
-        key="market_mode",
-        horizontal=False,
-    )
-
-# Equity scanner and all existing Equity F&O behavior stay on their original
-# path. Commodity mode is a separate data path and does not modify the equity
-# scanner or the equity decision engine.
-if market_mode == "Equity Market":
-    _render_fno_scanner_panel()
-else:
-    with st.sidebar:
-        st.markdown("### 🪙 MCX OPTIONS")
-        st.caption(
-            "Uses the same technical, OI, liquidity, Greeks, quality and risk engine. "
-            "MCX chain data is reconstructed from supported live Upstox APIs."
-        )
+# Manual F&O scanner lives entirely in the left sidebar.
+# The main analyzer below remains unchanged and continues to use live Upstox data.
+_render_fno_scanner_panel()
 
 analyze = False
 refresh = False
@@ -2473,20 +2116,10 @@ with st.sidebar:
     st.divider()
     st.markdown("## 🔎 Analyze Instrument")
 
-    if market_mode == "Equity Market":
-        symbol_label = "NSE Stock / Index"
-        symbol_default = st.session_state.get("symbol", "KOTAKBANK")
-        symbol_placeholder = "NIFTY / BANKNIFTY / HDFCBANK"
-    else:
-        symbol_label = "MCX Commodity"
-        symbol_default = st.session_state.get("commodity_symbol", "GOLD")
-        symbol_placeholder = "GOLD / SILVER / CRUDEOIL / NATURALGAS"
-
     symbol_input = st.text_input(
-        symbol_label,
-        value=symbol_default,
-        placeholder=symbol_placeholder,
-        key="market_symbol_input",
+        "NSE Stock / Index",
+        value=st.session_state.get("symbol", "KOTAKBANK"),
+        placeholder="NIFTY / BANKNIFTY / HDFCBANK",
     )
 
     risk_profile = st.selectbox(
@@ -2517,15 +2150,10 @@ with st.sidebar:
 
     st.divider()
     st.caption("LIVE DATA • Powered by Upstox")
-    if market_mode == "Commodity Market":
-        st.caption("MCX OPTIONS • Live futures + option Greeks/quotes")
     st.caption("No simulated prices are used.")
 
 if analyze:
-    if market_mode == "Equity Market":
-        st.session_state["symbol"] = alias_symbol(symbol_input)
-    else:
-        st.session_state["commodity_symbol"] = alias_commodity(symbol_input)
+    st.session_state["symbol"] = alias_symbol(symbol_input)
     st.rerun()
 
 if refresh:
@@ -2536,111 +2164,44 @@ if refresh:
 # LIVE ANALYSIS
 # ============================================================
 
-if market_mode == "Equity Market":
-    symbol = alias_symbol(st.session_state.get("symbol", symbol_input or "KOTAKBANK"))
-else:
-    symbol = alias_commodity(st.session_state.get("commodity_symbol", symbol_input or "GOLD"))
+symbol = alias_symbol(st.session_state.get("symbol", symbol_input or "KOTAKBANK"))
 
 try:
     with st.spinner(f"Analyzing live {symbol} data..."):
-        if market_mode == "Equity Market":
-            # ========================================================
-            # EXISTING EQUITY F&O PATH — intentionally unchanged
-            # ========================================================
-            underlying = search_underlying(symbol)
-            underlying_key = underlying["instrument_key"]
-            contracts = get_contracts(underlying_key)
-            expiries = available_expiries(contracts)
-            if not expiries:
-                raise UpstoxError("No upcoming F&O expiry was returned by Upstox.")
-            selected_expiry = expiries[0]
-            # Upstox provides lot_size at the option-contract level. Use the
-            # selected nearest expiry so the displayed lot size always matches
-            # the contracts being analyzed.
-            expiry_contracts = [
-                c for c in contracts
-                if str(c.get("expiry", "")) == selected_expiry
-                and str(c.get("instrument_type", "")).upper() in {"CE", "PE"}
-            ]
-            lot_sizes = [
-                safe_float(c.get("lot_size"))
-                for c in expiry_contracts
-                if np.isfinite(safe_float(c.get("lot_size"))) and safe_float(c.get("lot_size")) > 0
-            ]
-            lot_size = int(round(lot_sizes[0])) if lot_sizes else np.nan
-            raw_chain = get_option_chain(underlying_key, selected_expiry)
-            chain = normalize_chain(raw_chain)
-            quote_data = get_quote(underlying_key)
-            spot = safe_float(quote_data.get("last_price"))
-            previous_close = safe_float(quote_data.get("prev_close_price"), spot)
-            net_change = safe_float(quote_data.get("net_change"), spot - previous_close)
-            change_pct = net_change / previous_close * 100 if previous_close else 0
-            candles = get_daily_candles(underlying_key)
-            candles_30m = get_30m_candles(underlying_key)
-            candles_5m = get_intraday_candles(underlying_key, 5)
-            daily_tech = technicals(candles, spot)
-            tf30 = technicals(candles_30m, spot)
-            tf5 = technicals(candles_5m, spot)
-        else:
-            # ========================================================
-            # MCX COMMODITY PATH
-            # ========================================================
-            future = search_commodity_future(symbol)
-            underlying_key = future.get("instrument_key")
-            if not underlying_key:
-                raise UpstoxError("No tradable MCX futures instrument key was returned.")
-
-            future_quote = get_quote(underlying_key)
-            spot = safe_float(future_quote.get("last_price"))
-            if not np.isfinite(spot) or spot <= 0:
-                raise UpstoxError("No live MCX futures price was returned by Upstox.")
-            previous_close = safe_float(future_quote.get("prev_close_price"), spot)
-            net_change = safe_float(future_quote.get("net_change"), spot - previous_close)
-            change_pct = net_change / previous_close * 100 if previous_close else 0
-
-            contract_rows = []
-            for expiry_keyword in ("current_month", "next_month"):
-                try:
-                    candidate_rows = get_commodity_option_contracts(symbol, expiry_keyword)
-                except UpstoxError:
-                    candidate_rows = []
-                if candidate_rows:
-                    contract_rows = candidate_rows
-                    break
-            expiries = sorted({
-                str(x.get("expiry")) for x in contract_rows
-                if x.get("expiry") and str(x.get("expiry")) >= date.today().isoformat()
-            })
-            if not expiries:
-                raise UpstoxError(f"No upcoming MCX option expiry was returned for {symbol}.")
-            selected_expiry = expiries[0]
-            expiry_contracts = [
-                c for c in contract_rows
-                if str(c.get("expiry")) == selected_expiry
-                and str(c.get("instrument_type", "")).upper() in {"CE", "PE"}
-            ]
-            lot_sizes = [
-                safe_float(c.get("lot_size"))
-                for c in expiry_contracts
-                if np.isfinite(safe_float(c.get("lot_size"))) and safe_float(c.get("lot_size")) > 0
-            ]
-            lot_size = int(round(lot_sizes[0])) if lot_sizes else np.nan
-
-            # The MCX option-chain endpoint is not available, so reconstruct
-            # the live chain from contract metadata + Greek + full quote APIs.
-            raw_chain = expiry_contracts
-            chain = build_commodity_chain(raw_chain, spot, selected_expiry)
-            if chain.empty:
-                raise UpstoxError(
-                    f"No live MCX option quotes/Greeks were returned for {symbol}."
-                )
-
-            candles = get_daily_candles(underlying_key)
-            candles_30m = get_30m_candles(underlying_key)
-            candles_5m = get_intraday_candles(underlying_key, 5)
-            daily_tech = technicals(candles, spot)
-            tf30 = technicals(candles_30m, spot)
-            tf5 = technicals(candles_5m, spot)
+        underlying = search_underlying(symbol)
+        underlying_key = underlying["instrument_key"]
+        contracts = get_contracts(underlying_key)
+        expiries = available_expiries(contracts)
+        if not expiries:
+            raise UpstoxError("No upcoming F&O expiry was returned by Upstox.")
+        selected_expiry = expiries[0]
+        # Upstox provides lot_size at the option-contract level. Use the
+        # selected nearest expiry so the displayed lot size always matches
+        # the contracts being analyzed.
+        expiry_contracts = [
+            c for c in contracts
+            if str(c.get("expiry", "")) == selected_expiry
+            and str(c.get("instrument_type", "")).upper() in {"CE", "PE"}
+        ]
+        lot_sizes = [
+            safe_float(c.get("lot_size"))
+            for c in expiry_contracts
+            if np.isfinite(safe_float(c.get("lot_size"))) and safe_float(c.get("lot_size")) > 0
+        ]
+        lot_size = int(round(lot_sizes[0])) if lot_sizes else np.nan
+        raw_chain = get_option_chain(underlying_key, selected_expiry)
+        chain = normalize_chain(raw_chain)
+        quote_data = get_quote(underlying_key)
+        spot = safe_float(quote_data.get("last_price"))
+        previous_close = safe_float(quote_data.get("prev_close_price"), spot)
+        net_change = safe_float(quote_data.get("net_change"), spot - previous_close)
+        change_pct = net_change / previous_close * 100 if previous_close else 0
+        candles = get_daily_candles(underlying_key)
+        candles_30m = get_30m_candles(underlying_key)
+        candles_5m = get_intraday_candles(underlying_key, 5)
+        daily_tech = technicals(candles, spot)
+        tf30 = technicals(candles_30m, spot)
+        tf5 = technicals(candles_5m, spot)
 except UpstoxRateLimitError as exc:
     st.error(f"⏳ Upstox rate limit reached. Please wait about {exc.retry_after} seconds before refreshing.")
     st.stop()
@@ -2816,21 +2377,7 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 now_ist = datetime.now(ZoneInfo("Asia/Kolkata"))
-if market_mode == "Commodity Market":
-    # MCX regular trading window is materially longer than the NSE equity
-    # session. This is a simple session indicator; exchange holidays are not
-    # inferred here.
-    market_open = now_ist.weekday() < 5 and (now_ist.hour, now_ist.minute) >= (9, 0) and (now_ist.hour, now_ist.minute) <= (23, 30)
-    market_name = "MCX COMMODITY"
-    instrument_note = f"MCX Options · Nearest expiry {selected_expiry}"
-    snapshot_title = "MCX FUTURE"
-    expiry_note = "Nearest MCX option expiry"
-else:
-    market_open = now_ist.weekday() < 5 and (now_ist.hour, now_ist.minute) >= (9, 15) and (now_ist.hour, now_ist.minute) <= (15, 30)
-    market_name = "NSE EQUITY F&O"
-    instrument_note = f"NSE F&O · Nearest expiry {selected_expiry}"
-    snapshot_title = "SPOT"
-    expiry_note = "Nearest F&O expiry"
+market_open = now_ist.weekday() < 5 and (now_ist.hour, now_ist.minute) >= (9, 15) and (now_ist.hour, now_ist.minute) <= (15, 30)
 status_text = "● LIVE DATA" if market_open else "● MARKET CLOSED"
 status_bg = "#16a34a" if market_open else "#dc2626"
 
@@ -2839,7 +2386,7 @@ st.markdown(f"""
   <div class="fo-hero-top">
     <div>
       <div class="fo-brand">📊 FO PRO Trader Assistant</div>
-      <div class="fo-tagline">Live Upstox data · {market_name} · 5-way F&O decision engine · Quality-focused trade selection</div>
+      <div class="fo-tagline">Live Upstox data · 5-way F&O decision engine · Quality-focused trade selection</div>
     </div>
     <div class="fo-live" style="background:{status_bg};border-color:transparent;">
       <b>{status_text}</b>
@@ -2851,7 +2398,7 @@ st.markdown(f"""
 
 st.markdown(f"""
 <div class="fo-instrument">
-  <div><div class="fo-symbol">{symbol}</div><div class="fo-symbol-note">{instrument_note}</div></div>
+  <div><div class="fo-symbol">{symbol}</div><div class="fo-symbol-note">NSE F&O · Nearest expiry {selected_expiry}</div></div>
   <div class="fo-regime">MARKET REGIME · {regime}</div>
 </div>
 <div class="fo-section">MARKET SNAPSHOT</div>
@@ -2859,8 +2406,8 @@ st.markdown(f"""
 
 spot_note = f"{net_change:+.2f} ({change_pct:+.2f}%)"
 metric_html = [
-    (snapshot_title, fmt_price(spot), spot_note, "spot"),
-    ("EXPIRY", selected_expiry, expiry_note, ""),
+    ("SPOT", fmt_price(spot), spot_note, "spot"),
+    ("EXPIRY", selected_expiry, "Nearest F&O expiry", ""),
     ("PCR", f"{pcr:.2f}" if np.isfinite(pcr) else "—", "Put / Call OI", ""),
     ("SUPPORT", fmt_price(support), "Put OI zone", "support"),
     ("RESISTANCE", fmt_price(resistance), "Call OI zone", "resistance"),
@@ -3167,5 +2714,5 @@ else:
     st.markdown("<div class='fo-why'><div class='fo-why-line' style='color:#98a2b3;text-align:center;'>No option is currently selected for execution.</div></div>",unsafe_allow_html=True)
 
 st.markdown(f"""
-<div class="fo-footer">Live Upstox snapshot · {"MCX Commodity" if market_mode == "Commodity Market" else "NSE Equity F&O"} · Expiry {selected_expiry} · Updated {now_ist.strftime('%d-%b-%Y %H:%M:%S IST')}<br>PoP is a model input; for MCX it is calculated from live futures price, option premium, IV and time to expiry. It is not a guaranteed win probability. Option selling can carry substantial risk.</div>
+<div class="fo-footer">Live Upstox snapshot · Expiry {selected_expiry} · Updated {now_ist.strftime('%d-%b-%Y %H:%M:%S IST')}<br>PoP is a model input from the Upstox option chain; it is not a guaranteed win probability. Option selling can carry substantial risk.</div>
 """,unsafe_allow_html=True)
