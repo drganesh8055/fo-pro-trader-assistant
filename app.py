@@ -2359,6 +2359,16 @@ with st.sidebar:
         key="risk_profile",
     )
 
+    beginner_mode = st.checkbox(
+        "🛡️ Beginner Safety + Explainability",
+        value=True,
+        key="beginner_mode",
+        help="Adds stricter entry filters, blocks option-selling strategies from being selected, and shows a plain-English trade checklist. It does not guarantee profit or remove market risk.",
+    )
+
+    if beginner_mode:
+        st.caption("🛡️ Beginner Safety ON · BUY setups only · stronger confirmation required")
+
     def _analyze_live_market_callback():
         entered = str(st.session_state.get("analyzer_search_value", "")).strip()
         if entered:
@@ -2553,8 +2563,74 @@ else:
     available = [(safe_float(p.get("score"), 0), action, p) for action, p in strategy_plans.items() if p]
     best_plan = max(available, key=lambda x: x[0])[2] if available else None
 
-# The decision is intentionally binary at the action level: one of four trades
-# or NO TRADE. There are no WAIT/WATCHLIST states in the primary UI.
+# ============================================================
+# BEGINNER SAFETY + EXPLAINABILITY LAYER
+# ============================================================
+# This layer sits above the existing engine. It does not alter the underlying
+# indicators, option-chain calculations or Upstox data. When enabled, it adds
+# stricter execution gates intended to make the primary output easier to use
+# responsibly as a beginner decision-support tool.
+beginner_mode = bool(st.session_state.get("beginner_mode", True))
+beginner_safety_reasons = []
+beginner_checks = []
+
+def _add_beginner_check(name, status, detail):
+    beginner_checks.append({"name": name, "status": status, "detail": detail})
+
+if beginner_mode:
+    # Beginner mode intentionally selects BUY setups only. Option selling can
+    # involve materially different margin and tail-risk characteristics and is
+    # therefore kept visible in the engine result but cannot become the primary
+    # beginner execution decision.
+    if decision in {"CALL SELL", "PUT SELL"}:
+        beginner_safety_reasons.append("Option-selling strategy is disabled in Beginner Safety mode")
+        decision = "NO TRADE"
+        best_plan = None
+
+    candidate = strategy_plans.get(decision) if decision in {"CALL BUY", "PUT BUY"} else None
+    if candidate:
+        score = safe_float(candidate.get("score"), 0)
+        pop = safe_float(candidate.get("pop"), np.nan)
+        alignment = int(candidate.get("alignment", 0) or 0)
+        rr1 = safe_float(candidate.get("rr1"), 0)
+        delta = abs(safe_float(candidate.get("delta"), np.nan))
+        spread_pct = safe_float(candidate.get("spread_pct"), 999)
+        volume = safe_float(candidate.get("volume"), 0)
+        iv = safe_float(candidate.get("iv"), np.nan)
+        hard_fail = candidate.get("fail_reasons") or []
+        trigger_hit = bool(candidate.get("trigger_hit"))
+        candle_confirmed = bool(candidate.get("candle_confirmed"))
+        volume_confirmed = bool(candidate.get("volume_confirmed"))
+
+        _add_beginner_check("Quality score", "pass" if score >= 70 else "fail", f"{score:.0f}/100 · beginner threshold 70")
+        _add_beginner_check("Model PoP", "pass" if np.isfinite(pop) and pop >= 60 else "fail", f"{pop:.1f}% · beginner threshold 60%" if np.isfinite(pop) else "Unavailable")
+        _add_beginner_check("Timeframe alignment", "pass" if alignment >= 2 else "fail", f"{alignment}/3 timeframes aligned")
+        _add_beginner_check("Entry confirmation", "pass" if trigger_hit and candle_confirmed and volume_confirmed else "wait", "Breakout + candle + volume confirmation required")
+        _add_beginner_check("Risk / reward", "pass" if rr1 >= 1.0 else "fail", f"T1 R:R {rr1:.2f} · minimum 1.00")
+        _add_beginner_check("Option liquidity", "pass" if spread_pct <= 2 and volume >= 1000 else "fail", f"Spread {spread_pct:.1f}% · Volume {volume:,.0f}")
+        _add_beginner_check("Delta", "pass" if np.isfinite(delta) and 0.35 <= delta <= 0.70 else "fail", f"|Delta| {delta:.2f} · preferred 0.35–0.70" if np.isfinite(delta) else "Unavailable")
+        _add_beginner_check("Existing engine gates", "pass" if not hard_fail else "fail", "All hard checks passed" if not hard_fail else "; ".join(hard_fail))
+
+        safety_fail = (
+            score < 70 or not np.isfinite(pop) or pop < 60 or alignment < 2 or
+            not (trigger_hit and candle_confirmed and volume_confirmed) or
+            rr1 < 1.0 or spread_pct > 2 or volume < 1000 or
+            not np.isfinite(delta) or delta < 0.35 or delta > 0.70 or
+            bool(hard_fail)
+        )
+        if safety_fail:
+            beginner_safety_reasons.append("One or more beginner safety checks did not pass")
+            decision = "NO TRADE"
+            best_plan = None
+
+    # If no BUY candidate survived, make the reason explicit rather than
+    # presenting the best SELL candidate as a beginner trade.
+    if decision == "NO TRADE" and not beginner_checks:
+        _add_beginner_check("Trade candidate", "fail", "No BUY setup passed the existing engine gates")
+
+# The decision remains binary at the primary UI level: an executable setup or
+# NO TRADE. Beginner Safety adds an additional layer; it never guarantees a
+# winning trade.
 
 # Forward-test logging is intentionally backend-only. It does not change the UI.
 if decision != "NO TRADE" and best_plan:
@@ -2657,6 +2733,14 @@ for title, value, note, cls in metric_html:
 metrics += "</div>"
 st.markdown(metrics, unsafe_allow_html=True)
 
+if beginner_mode:
+    st.markdown("""
+    <div class="fo-safety-banner">
+      <div><b>🛡️ BEGINNER SAFETY + EXPLAINABILITY IS ON</b><span>The app is using a stricter execution filter, BUY setups only, stronger confirmation and a plain-English checklist. This is decision support — not a guarantee of profit.</span></div>
+      <div class="fo-safety-badge">SAFETY ON</div>
+    </div>
+    """, unsafe_allow_html=True)
+
 st.markdown("<div class='fo-section'>TRADE DECISION</div>", unsafe_allow_html=True)
 trend_name = overall_trend(tf5, tf30, daily_tech)[0].upper()
 decision_class = "call" if "CALL" in decision else "put" if "PUT" in decision else "neutral"
@@ -2667,12 +2751,14 @@ else:
     action_pop = np.nan; action_score = max([safe_float(p.get("score"),0) for p in strategy_plans.values() if p] or [0]); contract = "No executable setup"
 
 decision_note = {
-    "CALL BUY":"Directional upside setup — execute only when the displayed confirmation conditions are satisfied.",
+    "CALL BUY":"Directional upside setup — use only after the displayed confirmation and safety checks are satisfied.",
     "CALL SELL":"Premium-selling setup — requires price to remain below resistance and pass the seller risk gates.",
-    "PUT BUY":"Directional downside setup — execute only when the displayed confirmation conditions are satisfied.",
+    "PUT BUY":"Directional downside setup — use only after the displayed confirmation and safety checks are satisfied.",
     "PUT SELL":"Premium-selling setup — requires price to remain above support and pass the seller risk gates.",
-    "NO TRADE":"No strategy currently meets the minimum quality, alignment, liquidity and PoP gates."
+    "NO TRADE":"No executable setup currently passes the active quality and safety gates."
 }[decision]
+if beginner_mode and decision == "NO TRADE" and beginner_safety_reasons:
+    decision_note = "Beginner Safety stopped the setup: " + "; ".join(beginner_safety_reasons) + "."
 
 st.markdown(f"""
 <div class="fo-decision {decision_class}">
@@ -2688,6 +2774,37 @@ st.markdown(f"""
   </div>
 </div>
 """, unsafe_allow_html=True)
+
+# ============================================================
+# BEGINNER EXPLAINABILITY / TRADE CHECK
+# ============================================================
+if beginner_mode:
+    st.markdown("<div class='fo-section'>BEGINNER TRADE CHECK</div>", unsafe_allow_html=True)
+    if decision != "NO TRADE" and best_plan:
+        risk_per_unit = max(safe_float(best_plan.get("entry"), 0) - safe_float(best_plan.get("sl"), 0), 0)
+        max_loss = risk_per_unit * safe_float(lot_size, 0)
+        reward_t1 = max(safe_float(best_plan.get("target1"), 0) - safe_float(best_plan.get("entry"), 0), 0) * safe_float(lot_size, 0)
+        reward_t2 = max(safe_float(best_plan.get("target2"), 0) - safe_float(best_plan.get("entry"), 0), 0) * safe_float(lot_size, 0)
+        checks_html = "<div class='fo-explain-grid'>"
+        for item in beginner_checks:
+            label = {"pass":"PASS","wait":"WAIT","fail":"STOP"}.get(item["status"], item["status"].upper())
+            checks_html += f"<div class='fo-explain-card {item['status']}'><div class='fo-explain-top'><div class='fo-explain-name'>{item['name']}</div><div class='fo-explain-status'>{label}</div></div><div class='fo-explain-detail'>{item['detail']}</div></div>"
+        checks_html += "</div>"
+        st.markdown(checks_html, unsafe_allow_html=True)
+        st.markdown(f"""<div class='fo-risk-box'>
+          <div class='fo-risk-cell'><span>PLANNED MAX LOSS · 1 LOT</span><b>₹{max_loss:,.0f}</b></div>
+          <div class='fo-risk-cell'><span>TARGET 1 · 1 LOT</span><b>₹{reward_t1:,.0f}</b></div>
+          <div class='fo-risk-cell'><span>TARGET 2 · 1 LOT</span><b>₹{reward_t2:,.0f}</b></div>
+        </div>""", unsafe_allow_html=True)
+        st.markdown("<div class='fo-beginner-note'>⚠️ Planned loss is based on the displayed entry and stop-loss for one lot. Real execution can differ because of slippage, spread, taxes, brokerage and fast market movement. Never treat the model PoP as a guarantee.</div>", unsafe_allow_html=True)
+    else:
+        checks_html = "<div class='fo-explain-grid'>"
+        for item in beginner_checks:
+            label = {"pass":"PASS","wait":"WAIT","fail":"STOP"}.get(item["status"], item["status"].upper())
+            checks_html += f"<div class='fo-explain-card {item['status']}'><div class='fo-explain-top'><div class='fo-explain-name'>{item['name']}</div><div class='fo-explain-status'>{label}</div></div><div class='fo-explain-detail'>{item['detail']}</div></div>"
+        checks_html += "</div>"
+        st.markdown(checks_html, unsafe_allow_html=True)
+        st.markdown("<div class='fo-beginner-note'>⛔ No trade is displayed because the setup did not satisfy the beginner safety requirements. Waiting is a valid outcome.</div>", unsafe_allow_html=True)
 
 st.markdown("<div class='fo-section'>ENGINE RESULT · ALL 4 STRATEGIES</div>", unsafe_allow_html=True)
 
@@ -2842,6 +2959,17 @@ section[data-testid="stSidebar"] .stCaption { color:#64748b !important; }
 .tab-danger { background:#ffe4e6 !important; border-color:#fb7185 !important; color:#9f1239 !important; }
 </style>""", unsafe_allow_html=True)
 
+st.markdown("""<style>
+.fo-safety-banner{display:flex;align-items:center;justify-content:space-between;gap:14px;background:linear-gradient(135deg,#eff6ff,#f8fbff);border:1px solid #93c5fd;border-left:6px solid #2563eb;border-radius:14px;padding:14px 16px;margin:12px 0 16px;}
+.fo-safety-banner b{font-size:16px;color:#12395b;}.fo-safety-banner span{font-size:13px;color:#52657a;display:block;margin-top:3px;line-height:1.45;}.fo-safety-badge{background:#dbeafe;color:#1d4ed8;border:1px solid #93c5fd;padding:7px 10px;border-radius:20px;font-size:12px;font-weight:900;white-space:nowrap;}
+.fo-explain-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px;}
+.fo-explain-card{background:#fff;border:1px solid #e7ebf0;border-radius:12px;padding:12px 13px;}.fo-explain-card.pass{border-left:5px solid #16a34a;background:#f7fff9;}.fo-explain-card.wait{border-left:5px solid #f59e0b;background:#fffdf5;}.fo-explain-card.fail{border-left:5px solid #dc2626;background:#fff8f8;}
+.fo-explain-top{display:flex;justify-content:space-between;gap:8px;align-items:center;}.fo-explain-name{font-size:13px;font-weight:900;color:#344054;}.fo-explain-status{font-size:11px;font-weight:900;letter-spacing:.5px;}.fo-explain-card.pass .fo-explain-status{color:#087f3e}.fo-explain-card.wait .fo-explain-status{color:#b45309}.fo-explain-card.fail .fo-explain-status{color:#c81e3a}.fo-explain-detail{font-size:12px;color:#667085;margin-top:6px;line-height:1.4;}
+.fo-risk-box{display:grid;grid-template-columns:repeat(3,1fr);gap:10px;background:#fff;border:1px solid #e7ebf0;border-radius:14px;padding:13px;margin-top:12px;}.fo-risk-cell{background:#f8fafc;border-radius:10px;padding:10px;text-align:center;}.fo-risk-cell span{display:block;font-size:11px;font-weight:900;color:#98a2b3;letter-spacing:.6px;}.fo-risk-cell b{display:block;font-size:18px;color:#182230;margin-top:4px;}
+.fo-beginner-note{background:#fffbeb;border:1px solid #fbbf24;border-radius:12px;padding:12px 14px;color:#92400e;font-size:13px;line-height:1.5;margin-top:10px;}
+@media(max-width:720px){.fo-explain-grid,.fo-risk-box{grid-template-columns:1fr}.fo-safety-banner{align-items:flex-start;flex-direction:column}.fo-safety-badge{align-self:flex-start}}
+</style>""", unsafe_allow_html=True)
+
 engine_html = "<div class='fo-engine fo-engine-grid'>"
 for action in ["CALL BUY","CALL SELL","PUT BUY","PUT SELL"]:
     plan = strategy_plans[action]
@@ -2951,7 +3079,7 @@ else:
     st.markdown("<div class='fo-why'><div class='fo-why-line' style='color:#98a2b3;text-align:center;'>No option is currently selected for execution.</div></div>",unsafe_allow_html=True)
 
 st.markdown(f"""
-<div class="fo-footer">Live Upstox snapshot · Expiry {selected_expiry} · Updated {now_ist.strftime('%d-%b-%Y %H:%M:%S IST')}<br>PoP is a model input from the Upstox option chain; it is not a guaranteed win probability. Option selling can carry substantial risk.</div>
+<div class="fo-footer">Live Upstox snapshot · Expiry {selected_expiry} · Updated {now_ist.strftime('%d-%b-%Y %H:%M:%S IST')}<br>Beginner Safety: {'ON' if beginner_mode else 'OFF'} · PoP is a model input from the Upstox option chain; it is not a guaranteed win probability. Option selling can carry substantial risk.</div>
 """,unsafe_allow_html=True)
 
 # ============================================================
