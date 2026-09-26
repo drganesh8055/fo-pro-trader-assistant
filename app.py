@@ -2397,86 +2397,7 @@ if refresh:
     st.cache_data.clear()
     st.rerun()
 
-if st.session_state.pop("scroll_to_top", False):
-    st.markdown(
-        """
-        <script>
-        (function () {
-            // Streamlit's page is usually scrolled inside one of its own
-            // containers rather than the browser window.  Scroll the actual
-            // top hero into view, then also reset the common Streamlit
-            // scroll containers.  A few delayed passes are intentional:
-            // the analysis rerun may still be laying out the page when the
-            // first script executes.
-            function scrollToPageTop() {
-                try {
-                    const win = window.parent;
-                    const doc = win.document;
-                    const hero = doc.querySelector('.fo-hero');
-                    const main = doc.querySelector('[data-testid="stMain"]') ||
-                                 doc.querySelector('section[data-testid="stMain"]') ||
-                                 doc.querySelector('section.main');
-                    const appView = doc.querySelector('[data-testid="stAppViewContainer"]');
-
-                    // Explicitly reset the main/right-hand analyzer area.
-                    const rightPaneSelectors = [
-                        '[data-testid="stMain"]',
-                        'section[data-testid="stMain"]',
-                        'section.main',
-                        '[data-testid="stAppViewContainer"]',
-                        '.main',
-                        '.block-container'
-                    ];
-
-                    rightPaneSelectors.forEach(function (selector) {
-                        doc.querySelectorAll(selector).forEach(function (el) {
-                            el.scrollTop = 0;
-                            el.scrollLeft = 0;
-                        });
-                    });
-
-                    // Reset nested scrollable containers inside the main area.
-                    // This catches Streamlit DOM/layout changes and ensures the
-                    // visible right-side analysis starts from its absolute top.
-                    if (main) {
-                        main.scrollTop = 0;
-                        main.scrollLeft = 0;
-                        main.querySelectorAll('*').forEach(function (el) {
-                            if (el.scrollHeight > el.clientHeight + 2) {
-                                el.scrollTop = 0;
-                                el.scrollLeft = 0;
-                            }
-                        });
-                    }
-
-                    if (appView) {
-                        appView.scrollTop = 0;
-                        appView.scrollLeft = 0;
-                    }
-
-                    win.scrollTo(0, 0);
-                    doc.documentElement.scrollTop = 0;
-                    doc.body.scrollTop = 0;
-
-                    // Bring the top of the right-side analysis content into view.
-                    if (hero) {
-                        hero.scrollIntoView({ behavior: 'auto', block: 'start', inline: 'nearest' });
-                    }
-                } catch (e) {
-                    // Ignore DOM timing differences between Streamlit versions.
-                }
-            }
-            scrollToPageTop();
-            setTimeout(scrollToPageTop, 50);
-            setTimeout(scrollToPageTop, 150);
-            setTimeout(scrollToPageTop, 300);
-            setTimeout(scrollToPageTop, 600);
-            setTimeout(scrollToPageTop, 1000);
-        })();
-        </script>
-        """,
-        unsafe_allow_html=True,
-    )
+scroll_to_top_after_render = st.session_state.pop("scroll_to_top", False)
 
 # ============================================================
 # LIVE ANALYSIS
@@ -3034,3 +2955,78 @@ else:
 st.markdown(f"""
 <div class="fo-footer">Live Upstox snapshot · Expiry {selected_expiry} · Updated {now_ist.strftime('%d-%b-%Y %H:%M:%S IST')}<br>PoP is a model input from the Upstox option chain; it is not a guaranteed win probability. Option selling can carry substantial risk.</div>
 """,unsafe_allow_html=True)
+
+# ============================================================
+# RESET RIGHT-SIDE ANALYZER SCROLL AFTER FULL RENDER
+# ============================================================
+if scroll_to_top_after_render:
+    scroll_js = """
+    <script>
+    (function () {
+        function resetAnalysisScroll() {
+            try {
+                const doc = document;
+                const win = window;
+                const hero = doc.querySelector('.fo-hero');
+                const main = doc.querySelector('[data-testid="stMain"]') ||
+                             doc.querySelector('section[data-testid="stMain"]') ||
+                             doc.querySelector('section.main');
+                const appView = doc.querySelector('[data-testid="stAppViewContainer"]');
+
+                [main, appView, doc.documentElement, doc.body].forEach(function (el) {
+                    if (el) {
+                        el.scrollTop = 0;
+                        el.scrollLeft = 0;
+                    }
+                });
+                win.scrollTo(0, 0);
+
+                if (hero) {
+                    let el = hero.parentElement;
+                    while (el) {
+                        const style = win.getComputedStyle(el);
+                        const canScrollY = el.scrollHeight > el.clientHeight + 2;
+                        const overflowY = style.overflowY === 'auto' ||
+                                          style.overflowY === 'scroll' ||
+                                          style.overflowY === 'overlay';
+                        if (canScrollY || overflowY) {
+                            el.scrollTop = 0;
+                            el.scrollLeft = 0;
+                        }
+                        el = el.parentElement;
+                    }
+                    hero.scrollIntoView({behavior: 'auto', block: 'start', inline: 'nearest'});
+                }
+
+                if (main) {
+                    main.querySelectorAll('*').forEach(function (el) {
+                        if (el.scrollHeight > el.clientHeight + 2) {
+                            const style = win.getComputedStyle(el);
+                            if (style.overflowY === 'auto' ||
+                                style.overflowY === 'scroll' ||
+                                style.overflowY === 'overlay') {
+                                el.scrollTop = 0;
+                            }
+                        }
+                    });
+                }
+            } catch (e) {}
+        }
+
+        resetAnalysisScroll();
+        setTimeout(resetAnalysisScroll, 50);
+        setTimeout(resetAnalysisScroll, 150);
+        setTimeout(resetAnalysisScroll, 300);
+        setTimeout(resetAnalysisScroll, 600);
+        setTimeout(resetAnalysisScroll, 1000);
+    })();
+    </script>
+    """
+
+    if hasattr(st, "html"):
+        st.html(scroll_js, unsafe_allow_javascript=True)
+    else:
+        st.markdown(
+            '<a id="fo-analysis-scroll-top" href="#fo-analysis-scroll-top">&nbsp;</a>',
+            unsafe_allow_html=True,
+        )
