@@ -323,14 +323,49 @@ def safe_float(value, default=np.nan):
 
 
 def alias_symbol(symbol):
-    s = symbol.strip().upper().replace(" ", "")
+    """Normalize common index aliases and known company-name inputs."""
+    raw = str(symbol or "").strip().upper()
+    compact = "".join(ch for ch in raw if ch.isalnum())
     aliases = {
         "NIFTY50": "NIFTY",
         "NIFTYBANK": "BANKNIFTY",
         "NIFTYFIN": "FINNIFTY",
         "MIDCAPNIFTY": "MIDCPNIFTY",
+        # Kaynes Technology company-name variants -> NSE F&O symbol.
+        "KAYNESTECHNOLOGIES": "KAYNES",
+        "KAYNESTECHNOLOGY": "KAYNES",
+        "KAYNESTECHNOLOGYINDIALTD": "KAYNES",
+        "KAYNESTECHNOLOGIESINDIALTD": "KAYNES",
     }
-    return aliases.get(s, s)
+    return aliases.get(compact, raw)
+
+
+def _search_queries_for_symbol(symbol):
+    """Build safe Upstox search variants for symbol or company-name input."""
+    raw = str(symbol or "").strip().upper()
+    compact = "".join(ch for ch in raw if ch.isalnum())
+    queries = []
+
+    for value in (raw, compact):
+        if value and value not in queries:
+            queries.append(value[:50])
+
+    # Upstox Instrument Search supports partial matching.  Prefix variants
+    # make long company-name input such as KAYNESTECHNOLOGIES resolvable.
+    if len(compact) >= 6:
+        for n in (10, 8, 6):
+            prefix = compact[:n]
+            if prefix not in queries:
+                queries.append(prefix)
+
+    # Also try the first word for normal company-name input.
+    words = [w for w in raw.replace("-", " ").split() if w]
+    if words:
+        first_word = "".join(ch for ch in words[0] if ch.isalnum())
+        if len(first_word) >= 4 and first_word not in queries:
+            queries.append(first_word[:50])
+
+    return queries
 
 
 @st.cache_data(ttl=60, show_spinner=False)
@@ -339,11 +374,54 @@ def search_underlying(symbol):
 
     Frontend remains unchanged. The backend checks NSE first and then BSE,
     and only accepts an underlying when Upstox confirms that CE/PE contracts
-    exist on that exchange. This prevents a normal BSE_EQ listing from being
-    mistaken for a BSE_FO instrument.
+    exist on that exchange. Company names are resolved through multiple safe
+    Upstox search variants, so users do not need to know the exact NSE symbol.
     """
     original = str(symbol or "").strip().upper()
     symbol = alias_symbol(original)
+
+    if not original:
+        raise UpstoxError(
+            "Please enter an NSE/BSE F&O stock symbol or company name, such as HDFCBANK, KAYNES or NIFTY."
+        )
+
+    queries = _search_queries_for_symbol(symbol)
+
+    def _compact(value):
+        return "".join(ch for ch in str(value or "").upper() if ch.isalnum())
+
+    target = _compact(symbol)
+
+    def _item_fields(item):
+        return [
+            _compact(item.get("trading_symbol")),
+            _compact(item.get("short_name")),
+            _compact(item.get("name")),
+            _compact(item.get("underlying_symbol")),
+        ]
+
+    def _rank_item(item, query):
+        q = _compact(query)
+        if not q:
+            return -1
+        score = 0
+        for field in _item_fields(item):
+            if not field:
+                continue
+            if field == q:
+                score = max(score, 1000)
+            elif field.startswith(q):
+                score = max(score, 800)
+            elif q in field:
+                score = max(score, 650)
+            elif field in q and len(field) >= 4:
+                score = max(score, 550)
+        segment = str(item.get("segment") or "")
+        if segment.endswith("_EQ") or segment.endswith("_INDEX"):
+            score += 100
+        elif segment.endswith("_FO"):
+            score += 25
+        return score
 
     def _resolve_for_exchange(exchange):
         expected_eq = f"{exchange}_EQ"
@@ -351,41 +429,58 @@ def search_underlying(symbol):
         expected_fo = f"{exchange}_FO"
 
         results = []
-        for segment in ["EQ", "INDEX"]:
-            try:
-                payload = api_get(
-                    "/v2/instruments/search",
-                    params={
-                        "query": symbol,
-                        "exchanges": exchange,
-                        "segments": segment,
-                        "page_number": 1,
-                        "records": 30,
-                    },
-                )
-                results.extend(payload.get("data", []) or [])
-            except UpstoxError:
-                continue
+        seen_keys = set()
 
+        # Search several variants instead of relying only on the exact input.
+        # This fixes long company-name inputs while retaining normal symbol
+        # lookup and the existing NSE/BSE exchange fallback.
+        for query in queries:
+            for segment in ("EQ", "INDEX"):
+                try:
+                    payload = api_get(
+                        "/v2/instruments/search",
+                        params={
+                            "query": query,
+                            "exchanges": exchange,
+                            "segments": segment,
+                            "page_number": 1,
+                            "records": 30,
+                        },
+                    )
+                except UpstoxError:
+                    continue
+
+                for item in payload.get("data", []) or []:
+                    key = item.get("instrument_key")
+                    if key and key in seen_keys:
+                        continue
+                    if key:
+                        seen_keys.add(key)
+                    results.append(item)
+
+        # Exact normalized symbol wins.
         exact = [
             item for item in results
-            if str(item.get("trading_symbol", "")).upper() == symbol
+            if target and target in _item_fields(item)
             and str(item.get("segment", "")) in {expected_eq, expected_index}
         ]
 
         # Preserve the existing NSE index behaviour exactly.
         if exchange == "NSE" and symbol in {"NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY"}:
             indexes = [x for x in results if x.get("segment") == expected_index]
-            if indexes:
-                direct = indexes[0]
-            else:
-                direct = None
+            direct = indexes[0] if indexes else None
         else:
-            direct = exact[0] if exact else None
-            if direct is None:
-                indexes = [x for x in results if x.get("segment") == expected_index]
-                equities = [x for x in results if x.get("segment") == expected_eq]
-                direct = equities[0] if equities else (indexes[0] if indexes else None)
+            if exact:
+                direct = sorted(exact, key=lambda x: _rank_item(x, symbol), reverse=True)[0]
+            else:
+                eligible = [
+                    x for x in results
+                    if x.get("segment") in {expected_eq, expected_index}
+                ]
+                direct = (
+                    sorted(eligible, key=lambda x: max(_rank_item(x, q) for q in queries), reverse=True)[0]
+                    if eligible else None
+                )
 
         # A normal EQ/INDEX result is usable only when option contracts exist.
         if direct is not None:
@@ -407,7 +502,7 @@ def search_underlying(symbol):
 
         # Fall back to the actual F&O segment and use its underlying_key.
         fo_candidates = {}
-        for query in [symbol, original]:
+        for query in queries + [original]:
             query = str(query or "").strip().upper()
             if not query:
                 continue
@@ -438,7 +533,7 @@ def search_underlying(symbol):
                 if not underlying_key or not underlying_symbol:
                     continue
 
-                score = 0
+                score = _rank_item(item, query)
                 if underlying_symbol == symbol:
                     score += 100
                 if underlying_symbol == original:
@@ -479,8 +574,8 @@ def search_underlying(symbol):
             return resolved
 
     raise UpstoxError(
-        f"No NSE instrument found for '{symbol}'. "
-        "Enter an NSE F&O stock symbol such as HDFCBANK or an index such as NIFTY."
+        f"No NSE/BSE option-capable instrument found for '{original}'. "
+        "Enter an NSE/BSE F&O stock symbol or company name such as HDFCBANK or KAYNES."
     )
 
 
