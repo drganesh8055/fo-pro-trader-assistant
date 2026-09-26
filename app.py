@@ -2390,14 +2390,12 @@ with st.sidebar:
     st.caption("No simulated prices are used.")
 
 if analyze:
-    st.session_state["scroll_to_top"] = True
     st.rerun()
 
 if refresh:
     st.cache_data.clear()
     st.rerun()
 
-scroll_to_top_after_render = st.session_state.pop("scroll_to_top", False)
 
 # ============================================================
 # LIVE ANALYSIS
@@ -2957,131 +2955,168 @@ st.markdown(f"""
 """,unsafe_allow_html=True)
 
 # ============================================================
-# RESET RIGHT-SIDE ANALYZER SCROLL AFTER FULL RENDER
+# RESET RIGHT-SIDE ANALYZER SCROLL AFTER EVERY ANALYZE CLICK
 # ============================================================
-if scroll_to_top_after_render:
-    # Streamlit's main page can have more than one scroll surface.  In
-    # particular, recent versions expose stMainBlockContainer separately
-    # from stMain.  Reset the actual main/right-side scroll surfaces and
-    # observe late React/Streamlit layout changes so the old position cannot
-    # immediately come back after the rerun.
-    scroll_js = r"""
-    <script>
-    (() => {
-        const TOP_SELECTORS = [
+# IMPORTANT: This is deliberately installed on every Streamlit rerun, but the
+# browser-side controller itself is installed only once.  The controller hooks
+# the actual "Analyze Live Market" button and therefore survives repeated
+# searches/reruns instead of depending on a one-shot session_state flag.
+scroll_js = r"""
+<script>
+(() => {
+    if (window.__FO_PRO_SCROLL_CONTROLLER__) return;
+    window.__FO_PRO_SCROLL_CONTROLLER__ = true;
+
+    const BUTTON_TEXT = 'analyze live market';
+
+    function mainSurfaces() {
+        const selectors = [
             '[data-testid="stMainBlockContainer"]',
             '[data-testid="stMain"]',
             'section[data-testid="stMain"]',
             'section.main',
-            'div.main',
+            '[data-testid="stAppViewContainer"]',
             '.main'
         ];
-
-        function getMainSurfaces() {
-            const found = [];
-            const seen = new Set();
-            for (const selector of TOP_SELECTORS) {
+        const result = [];
+        const seen = new Set();
+        for (const selector of selectors) {
+            try {
                 document.querySelectorAll(selector).forEach(el => {
                     if (!seen.has(el)) {
                         seen.add(el);
-                        found.push(el);
+                        result.push(el);
                     }
                 });
-            }
-            return found;
-        }
-
-        function resetElement(el) {
-            if (!el) return;
-            try {
-                el.scrollTop = 0;
-                el.scrollLeft = 0;
             } catch (_) {}
         }
+        return result;
+    }
 
-        function resetScrollableChildren(root) {
-            if (!root) return;
-            const all = [root, ...root.querySelectorAll('*')];
-            for (const el of all) {
+    function reset(el) {
+        if (!el) return;
+        try {
+            el.scrollTop = 0;
+            el.scrollLeft = 0;
+        } catch (_) {}
+    }
+
+    function resetScrollableDescendants(root) {
+        if (!root) return;
+        try {
+            const nodes = root.querySelectorAll('*');
+            for (const el of nodes) {
+                const cs = getComputedStyle(el);
+                if (el.scrollHeight > el.clientHeight + 2 &&
+                    (cs.overflowY === 'auto' || cs.overflowY === 'scroll' || cs.overflowY === 'overlay')) {
+                    reset(el);
+                }
+            }
+        } catch (_) {}
+    }
+
+    function scrollRightPaneTop() {
+        try {
+            // Browser/document scroll.
+            reset(document.scrollingElement);
+            reset(document.documentElement);
+            reset(document.body);
+            window.scrollTo(0, 0);
+
+            // Streamlit main/right-side content surfaces.
+            for (const surface of mainSurfaces()) {
+                reset(surface);
+                resetScrollableDescendants(surface);
+            }
+
+            // The analyzer itself and all of its scrollable ancestors.
+            const hero = document.querySelector('.fo-hero');
+            if (hero) {
+                reset(hero);
+                let parent = hero.parentElement;
+                while (parent) {
+                    try {
+                        const cs = getComputedStyle(parent);
+                        if (parent.scrollHeight > parent.clientHeight + 2 ||
+                            cs.overflowY === 'auto' || cs.overflowY === 'scroll' || cs.overflowY === 'overlay') {
+                            reset(parent);
+                        }
+                    } catch (_) {}
+                    parent = parent.parentElement;
+                }
                 try {
-                    const cs = getComputedStyle(el);
-                    const scrollable =
-                        el.scrollHeight > el.clientHeight + 1 &&
-                        ['auto', 'scroll', 'overlay'].includes(cs.overflowY);
-                    if (scrollable) resetElement(el);
+                    hero.scrollIntoView({behavior: 'auto', block: 'start', inline: 'nearest'});
                 } catch (_) {}
             }
-        }
+        } catch (_) {}
+    }
 
-        function resetRightPane() {
-            try {
-                const hero = document.querySelector('.fo-hero');
-                const surfaces = getMainSurfaces();
-
-                // Reset the browser/page scroll as well as Streamlit's main
-                // content surfaces.
-                resetElement(document.scrollingElement);
-                resetElement(document.documentElement);
-                resetElement(document.body);
-                window.scrollTo(0, 0);
-
-                surfaces.forEach(surface => {
-                    resetElement(surface);
-                    resetScrollableChildren(surface);
-                });
-
-                // Reset every scrollable ancestor of the analyzer hero.
-                if (hero) {
-                    let el = hero.parentElement;
-                    while (el) {
-                        try {
-                            const cs = getComputedStyle(el);
-                            if (el.scrollHeight > el.clientHeight + 1 ||
-                                ['auto', 'scroll', 'overlay'].includes(cs.overflowY)) {
-                                resetElement(el);
-                            }
-                        } catch (_) {}
-                        el = el.parentElement;
-                    }
-                    hero.scrollIntoView({behavior: 'auto', block: 'start', inline: 'nearest'});
-                }
-            } catch (_) {}
-        }
-
-        // Run after the rerender and again after layout/paint settles.
-        resetRightPane();
-        [25, 75, 150, 300, 500, 800, 1200, 1800].forEach(ms => {
-            setTimeout(resetRightPane, ms);
+    function resetAfterAnalyzeClick() {
+        // One immediate reset plus repeated resets while Streamlit performs
+        // the rerun and React reconstructs the analyzer DOM.
+        scrollRightPaneTop();
+        [0, 20, 50, 100, 200, 350, 500, 750, 1000, 1500, 2000].forEach(ms => {
+            setTimeout(scrollRightPaneTop, ms);
         });
+    }
 
-        // Streamlit/React can append or resize blocks after the first paint.
-        // Watch the main app briefly and re-apply the top position whenever
-        // the analyzer DOM changes.
-        const main = document.querySelector('[data-testid="stMain"]') ||
-                     document.querySelector('section[data-testid="stMain"]') ||
-                     document.querySelector('section.main');
-        if (main && window.MutationObserver) {
-            let last = Date.now();
-            const observer = new MutationObserver(() => {
-                const now = Date.now();
-                if (now - last > 30) {
-                    last = now;
-                    resetRightPane();
-                }
-            });
-            observer.observe(main, {childList: true, subtree: true, attributes: true});
-            setTimeout(() => observer.disconnect(), 2500);
+    function isAnalyzeButton(button) {
+        if (!button) return false;
+        const text = (button.innerText || button.textContent || '')
+            .replace(/\s+/g, ' ')
+            .trim()
+            .toLowerCase();
+        return text.includes(BUTTON_TEXT);
+    }
+
+    function attachToAnalyzeButtons(root) {
+        const scope = root || document;
+        let buttons = [];
+        try {
+            if (scope.matches && scope.matches('button')) buttons.push(scope);
+            if (scope.querySelectorAll) {
+                buttons = buttons.concat(Array.from(scope.querySelectorAll('button')));
+            }
+        } catch (_) {}
+
+        for (const button of buttons) {
+            if (!isAnalyzeButton(button)) continue;
+            if (button.__FO_PRO_SCROLL_HANDLER__) continue;
+
+            const handler = () => resetAfterAnalyzeClick();
+            button.addEventListener('click', handler, true);
+            button.__FO_PRO_SCROLL_HANDLER__ = handler;
         }
-    })();
-    </script>
-    """
+    }
 
-    if hasattr(st, "html"):
-        try:
-            st.html(scroll_js, unsafe_allow_javascript=True)
-        except TypeError:
-            # Older Streamlit versions do not expose unsafe_allow_javascript.
-            # Keep a harmless marker rather than breaking the application.
-            st.markdown('<div id="fo-analysis-scroll-top"></div>', unsafe_allow_html=True)
-    else:
-        st.markdown('<div id="fo-analysis-scroll-top"></div>', unsafe_allow_html=True)
+    // Attach now if the button already exists.
+    attachToAnalyzeButtons(document);
+
+    // Streamlit replaces DOM nodes during every rerun.  Keep watching for the
+    // newly-created Analyze button and attach the same click handler to it.
+    if (window.MutationObserver) {
+        const observer = new MutationObserver(mutations => {
+            for (const mutation of mutations) {
+                for (const node of mutation.addedNodes) {
+                    if (node.nodeType === 1) attachToAnalyzeButtons(node);
+                }
+            }
+        });
+        observer.observe(document.body, {childList: true, subtree: true});
+    }
+
+    // Safety net: if a Streamlit version replaces the button without a normal
+    // mutation sequence, periodically look for it and attach the handler.
+    setInterval(() => attachToAnalyzeButtons(document), 1000);
+})();
+</script>
+"""
+
+if hasattr(st, "html"):
+    try:
+        st.html(scroll_js, unsafe_allow_javascript=True)
+    except TypeError:
+        st.markdown('<div id="fo-analysis-scroll-controller"></div>', unsafe_allow_html=True)
+else:
+    st.markdown('<div id="fo-analysis-scroll-controller"></div>', unsafe_allow_html=True)
+
