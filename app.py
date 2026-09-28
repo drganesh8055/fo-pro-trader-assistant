@@ -323,54 +323,260 @@ def safe_float(value, default=np.nan):
 
 
 def alias_symbol(symbol):
-    s = symbol.strip().upper().replace(" ", "")
+    """Normalize common index aliases and known company-name inputs."""
+    raw = str(symbol or "").strip().upper()
+    compact = "".join(ch for ch in raw if ch.isalnum())
     aliases = {
         "NIFTY50": "NIFTY",
         "NIFTYBANK": "BANKNIFTY",
         "NIFTYFIN": "FINNIFTY",
         "MIDCAPNIFTY": "MIDCPNIFTY",
+        # Kaynes Technology company-name variants -> NSE F&O symbol.
+        "KAYNESTECHNOLOGIES": "KAYNES",
+        "KAYNESTECHNOLOGY": "KAYNES",
+        "KAYNESTECHNOLOGYINDIALTD": "KAYNES",
+        "KAYNESTECHNOLOGIESINDIALTD": "KAYNES",
     }
-    return aliases.get(s, s)
+    return aliases.get(compact, raw)
+
+
+def _search_queries_for_symbol(symbol):
+    """Build safe Upstox search variants for symbol or company-name input."""
+    raw = str(symbol or "").strip().upper()
+    compact = "".join(ch for ch in raw if ch.isalnum())
+    queries = []
+
+    for value in (raw, compact):
+        if value and value not in queries:
+            queries.append(value[:50])
+
+    # Upstox Instrument Search supports partial matching.  Prefix variants
+    # make long company-name input such as KAYNESTECHNOLOGIES resolvable.
+    if len(compact) >= 6:
+        for n in (10, 8, 6):
+            prefix = compact[:n]
+            if prefix not in queries:
+                queries.append(prefix)
+
+    # Also try the first word for normal company-name input.
+    words = [w for w in raw.replace("-", " ").split() if w]
+    if words:
+        first_word = "".join(ch for ch in words[0] if ch.isalnum())
+        if len(first_word) >= 4 and first_word not in queries:
+            queries.append(first_word[:50])
+
+    return queries
 
 
 @st.cache_data(ttl=60, show_spinner=False)
 def search_underlying(symbol):
-    symbol = alias_symbol(symbol)
-    results = []
+    """Resolve a real option-capable underlying across NSE and BSE.
 
-    for segment in ["EQ", "INDEX"]:
-        payload = api_get(
-            "/v2/instruments/search",
-            params={
-                "query": symbol,
-                "exchanges": "NSE",
-                "segments": segment,
-                "page_number": 1,
-                "records": 30,
-            },
-        )
-        results.extend(payload.get("data", []))
+    Frontend remains unchanged. The backend checks NSE first and then BSE,
+    and only accepts an underlying when Upstox confirms that CE/PE contracts
+    exist on that exchange. Company names are resolved through multiple safe
+    Upstox search variants, so users do not need to know the exact NSE symbol.
+    """
+    original = str(symbol or "").strip().upper()
+    symbol = alias_symbol(original)
 
-    if not results:
+    if not original:
         raise UpstoxError(
-            f"No NSE instrument found for '{symbol}'. "
-            "Enter an NSE F&O stock symbol such as HDFCBANK or an index such as NIFTY."
+            "Please enter an NSE/BSE F&O stock symbol or company name, such as HDFCBANK, KAYNES or NIFTY."
         )
 
-    exact = [
-        item for item in results
-        if str(item.get("trading_symbol", "")).upper() == symbol
-    ]
-    if exact:
-        return exact[0]
+    queries = _search_queries_for_symbol(symbol)
 
-    if symbol in {"NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY"}:
-        indexes = [x for x in results if x.get("segment") == "NSE_INDEX"]
-        if indexes:
-            return indexes[0]
+    def _compact(value):
+        return "".join(ch for ch in str(value or "").upper() if ch.isalnum())
 
-    equities = [x for x in results if x.get("segment") == "NSE_EQ"]
-    return equities[0] if equities else results[0]
+    target = _compact(symbol)
+
+    def _item_fields(item):
+        return [
+            _compact(item.get("trading_symbol")),
+            _compact(item.get("short_name")),
+            _compact(item.get("name")),
+            _compact(item.get("underlying_symbol")),
+        ]
+
+    def _rank_item(item, query):
+        q = _compact(query)
+        if not q:
+            return -1
+        score = 0
+        for field in _item_fields(item):
+            if not field:
+                continue
+            if field == q:
+                score = max(score, 1000)
+            elif field.startswith(q):
+                score = max(score, 800)
+            elif q in field:
+                score = max(score, 650)
+            elif field in q and len(field) >= 4:
+                score = max(score, 550)
+        segment = str(item.get("segment") or "")
+        if segment.endswith("_EQ") or segment.endswith("_INDEX"):
+            score += 100
+        elif segment.endswith("_FO"):
+            score += 25
+        return score
+
+    def _resolve_for_exchange(exchange):
+        expected_eq = f"{exchange}_EQ"
+        expected_index = f"{exchange}_INDEX"
+        expected_fo = f"{exchange}_FO"
+
+        results = []
+        seen_keys = set()
+
+        # Search several variants instead of relying only on the exact input.
+        # This fixes long company-name inputs while retaining normal symbol
+        # lookup and the existing NSE/BSE exchange fallback.
+        for query in queries:
+            for segment in ("EQ", "INDEX"):
+                try:
+                    payload = api_get(
+                        "/v2/instruments/search",
+                        params={
+                            "query": query,
+                            "exchanges": exchange,
+                            "segments": segment,
+                            "page_number": 1,
+                            "records": 30,
+                        },
+                    )
+                except UpstoxError:
+                    continue
+
+                for item in payload.get("data", []) or []:
+                    key = item.get("instrument_key")
+                    if key and key in seen_keys:
+                        continue
+                    if key:
+                        seen_keys.add(key)
+                    results.append(item)
+
+        # Exact normalized symbol wins.
+        exact = [
+            item for item in results
+            if target and target in _item_fields(item)
+            and str(item.get("segment", "")) in {expected_eq, expected_index}
+        ]
+
+        # Preserve the existing NSE index behaviour exactly.
+        if exchange == "NSE" and symbol in {"NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY"}:
+            indexes = [x for x in results if x.get("segment") == expected_index]
+            direct = indexes[0] if indexes else None
+        else:
+            if exact:
+                direct = sorted(exact, key=lambda x: _rank_item(x, symbol), reverse=True)[0]
+            else:
+                eligible = [
+                    x for x in results
+                    if x.get("segment") in {expected_eq, expected_index}
+                ]
+                direct = (
+                    sorted(eligible, key=lambda x: max(_rank_item(x, q) for q in queries), reverse=True)[0]
+                    if eligible else None
+                )
+
+        # A normal EQ/INDEX result is usable only when option contracts exist.
+        if direct is not None:
+            try:
+                probe = api_get(
+                    "/v2/option/contract",
+                    params={"instrument_key": direct.get("instrument_key")},
+                    timeout=30,
+                )
+                contracts = probe.get("data", []) or []
+                if any(
+                    str(c.get("segment", "")) == expected_fo
+                    and str(c.get("instrument_type", "")).upper() in {"CE", "PE"}
+                    for c in contracts
+                ):
+                    return direct
+            except UpstoxError:
+                pass
+
+        # Fall back to the actual F&O segment and use its underlying_key.
+        fo_candidates = {}
+        for query in queries + [original]:
+            query = str(query or "").strip().upper()
+            if not query:
+                continue
+            try:
+                payload = api_get(
+                    "/v2/instruments/search",
+                    params={
+                        "query": query,
+                        "exchanges": exchange,
+                        "segments": "FO",
+                        "page_number": 1,
+                        "records": 100,
+                    },
+                )
+            except UpstoxError:
+                continue
+
+            for item in payload.get("data", []) or []:
+                if str(item.get("segment", "")) != expected_fo:
+                    continue
+                if str(item.get("instrument_type", "")).upper() not in {"CE", "PE", "FUT"}:
+                    continue
+                if item.get("underlying_type") not in {"EQUITY", "INDEX"}:
+                    continue
+
+                underlying_key = item.get("underlying_key")
+                underlying_symbol = str(item.get("underlying_symbol") or "").strip().upper()
+                if not underlying_key or not underlying_symbol:
+                    continue
+
+                score = _rank_item(item, query)
+                if underlying_symbol == symbol:
+                    score += 100
+                if underlying_symbol == original:
+                    score += 80
+                if str(item.get("trading_symbol", "")).upper().startswith(symbol + " "):
+                    score += 20
+                if str(item.get("instrument_type", "")).upper() in {"CE", "PE"}:
+                    score += 5
+
+                current = fo_candidates.get(underlying_key)
+                if current is None or score > current["score"]:
+                    fo_candidates[underlying_key] = {"score": score, "item": item}
+
+        if fo_candidates:
+            best = sorted(
+                fo_candidates.values(),
+                key=lambda x: x["score"],
+                reverse=True,
+            )[0]["item"]
+            underlying_key = best.get("underlying_key")
+            underlying_symbol = str(best.get("underlying_symbol") or symbol).strip().upper()
+            return {
+                "name": best.get("name", ""),
+                "segment": expected_eq if best.get("underlying_type") == "EQUITY" else expected_index,
+                "exchange": exchange,
+                "instrument_key": underlying_key,
+                "trading_symbol": underlying_symbol,
+                "short_name": best.get("name", ""),
+                "underlying_symbol": underlying_symbol,
+            }
+
+        return None
+
+    # Keep the existing NSE behaviour first; BSE is a backend fallback.
+    for exchange in ("NSE", "BSE"):
+        resolved = _resolve_for_exchange(exchange)
+        if resolved is not None:
+            return resolved
+
+    raise UpstoxError(
+        f"No NSE/BSE option-capable instrument found for '{original}'. "
+        "Enter an NSE/BSE F&O stock symbol or company name such as HDFCBANK or KAYNES."
+    )
 
 
 @st.cache_data(ttl=300, show_spinner=False)
@@ -1419,65 +1625,84 @@ def log_signal(symbol, expiry, decision, plan, spot, pcr, support, resistance, t
 # FULL F&O TRADE ALERT SCANNER — USES THIS FILE'S EXISTING ENGINE
 # ============================================================
 
-FNO_MASTER_URL = "https://assets.upstox.com/market-quote/instruments/exchange/NSE.json.gz"
+FNO_MASTER_URLS = {
+    "NSE": "https://assets.upstox.com/market-quote/instruments/exchange/NSE.json.gz",
+    "BSE": "https://assets.upstox.com/market-quote/instruments/exchange/BSE.json.gz",
+}
 
 
 @st.cache_data(ttl=3600, show_spinner=False)
 def get_fno_underlyings():
-    """Build current NSE equity F&O universe from Upstox BOD master."""
-    try:
-        response = requests.get(FNO_MASTER_URL, timeout=30)
-        response.raise_for_status()
-        raw = gzip.decompress(response.content)
-        payload = json.loads(raw.decode("utf-8"))
-    except Exception as exc:
-        raise UpstoxError(
-            f"Unable to load the Upstox NSE F&O instrument list: {exc}"
-        ) from exc
+    """Build the combined NSE + BSE equity F&O universe from Upstox BOD masters.
 
-    records = payload.get("data", payload.get("instruments", [])) if isinstance(payload, dict) else payload
+    This is backend-only. The scanner UI remains exactly the same as before.
+    """
     today = date.today().isoformat()
     universe = {}
+    errors = []
 
-    for item in records:
-        if not isinstance(item, dict):
-            continue
-        if item.get("segment") != "NSE_FO":
-            continue
-        if item.get("instrument_type") not in {"CE", "PE", "FUT"}:
-            continue
-        if item.get("underlying_type") != "EQUITY":
-            continue
-
-        expiry_raw = str(item.get("expiry", "")).strip()
-        underlying_key = item.get("underlying_key")
-        symbol = str(item.get("underlying_symbol") or "").strip().upper()
-        if not expiry_raw or not underlying_key or not symbol:
+    for exchange, master_url in FNO_MASTER_URLS.items():
+        try:
+            response = requests.get(master_url, timeout=30)
+            response.raise_for_status()
+            raw = gzip.decompress(response.content)
+            payload = json.loads(raw.decode("utf-8"))
+        except Exception as exc:
+            errors.append(f"{exchange}: {exc}")
             continue
 
-        if expiry_raw.isdigit():
-            try:
-                expiry_date = datetime.fromtimestamp(
-                    int(expiry_raw) / 1000,
-                    tz=ZoneInfo("Asia/Kolkata")
-                ).date().isoformat()
-            except Exception:
+        records = payload.get("data", payload.get("instruments", [])) if isinstance(payload, dict) else payload
+
+        for item in records:
+            if not isinstance(item, dict):
                 continue
-        else:
-            expiry_date = expiry_raw[:10]
+            if item.get("segment") != f"{exchange}_FO":
+                continue
+            if item.get("instrument_type") not in {"CE", "PE", "FUT"}:
+                continue
+            if item.get("underlying_type") != "EQUITY":
+                continue
 
-        if expiry_date < today:
-            continue
+            expiry_raw = str(item.get("expiry", "")).strip()
+            underlying_key = item.get("underlying_key")
+            symbol = str(item.get("underlying_symbol") or "").strip().upper()
+            if not expiry_raw or not underlying_key or not symbol:
+                continue
 
-        current = universe.get(underlying_key)
-        if current is None or expiry_date < current["expiry"]:
-            universe[underlying_key] = {
-                "symbol": symbol,
-                "underlying_key": underlying_key,
-                "expiry": expiry_date,
-            }
+            if expiry_raw.isdigit():
+                try:
+                    expiry_date = datetime.fromtimestamp(
+                        int(expiry_raw) / 1000,
+                        tz=ZoneInfo("Asia/Kolkata")
+                    ).date().isoformat()
+                except Exception:
+                    continue
+            else:
+                expiry_date = expiry_raw[:10]
 
-    return sorted(universe.values(), key=lambda x: x["symbol"])
+            if expiry_date < today:
+                continue
+
+            # Keep NSE and BSE entries distinct internally. This lets the
+            # scanner use the correct exchange-specific underlying key while
+            # the final UI still shows only the normal stock/trade card.
+            key = (exchange, underlying_key)
+            current = universe.get(key)
+            if current is None or expiry_date < current["expiry"]:
+                universe[key] = {
+                    "symbol": symbol,
+                    "underlying_key": underlying_key,
+                    "expiry": expiry_date,
+                    "exchange": exchange,
+                }
+
+    if not universe and errors:
+        raise UpstoxError(
+            "Unable to load the Upstox NSE F&O instrument list: "
+            + " | ".join(errors)
+        )
+
+    return sorted(universe.values(), key=lambda x: (x["symbol"], x["exchange"]))
 
 
 @st.cache_data(ttl=45, show_spinner=False)
@@ -1671,6 +1896,7 @@ def _scanner_plan_for_candidate(candidate, symbol, expiry, risk_profile):
     return {
         "Stock": symbol,
         "Trade": action,
+        "Exchange": candidate.get("exchange", "NSE"),
         "Strike": float(plan["strike"]),
         "Expiry": expiry,
         "PoP": safe_float(plan.get("pop")),
@@ -1695,7 +1921,7 @@ def _scanner_plan_for_candidate(candidate, symbol, expiry, risk_profile):
 
 def scan_fno_trade_alerts(risk_profile, top_alerts=5):
     """
-    Full NSE equity F&O scan using the same strategy engine as the main page.
+    Full combined NSE + BSE equity F&O scan using the same strategy engine as the main page.
 
     Stage 1: option-chain filter only.
     Stage 2: existing technical + OI + quality + readiness gates.
@@ -1719,11 +1945,11 @@ def scan_fno_trade_alerts(risk_profile, top_alerts=5):
                 candidate["symbol"] = item["symbol"]
                 candidate["underlying_key"] = item["underlying_key"]
                 candidate["expiry"] = item["expiry"]
+                candidate["exchange"] = item.get("exchange", "NSE")
                 stage1.append(candidate)
 
             scanned += 1
         except UpstoxRateLimitError:
-            progress.empty()
             raise
         except Exception:
             failed += 1
@@ -1765,7 +1991,6 @@ def scan_fno_trade_alerts(risk_profile, top_alerts=5):
             if plan:
                 alerts.append(plan)
         except UpstoxRateLimitError:
-            progress.empty()
             raise
         except Exception:
             pass
@@ -1822,8 +2047,10 @@ class _FNOScannerManager:
         self.error = None
         self.profile = None
         self.next_allowed = 0.0
+        self.started_at = 0.0
+        self.finished_at = 0.0
 
-    def start_if_needed(self, risk_profile):
+    def start_if_needed(self, risk_profile, force=False):
         now = time.time()
         with self.lock:
             if self.running:
@@ -1833,10 +2060,11 @@ class _FNOScannerManager:
                 # the current worker has finished. Do not start duplicate workers.
                 self.profile = risk_profile
                 self.next_allowed = 0.0
-            if now < self.next_allowed and self.results:
+            if not force and now < self.next_allowed and self.results:
                 return
             self.running = True
             self.error = None
+            self.started_at = now
 
         worker = threading.Thread(
             target=self._worker,
@@ -1860,6 +2088,7 @@ class _FNOScannerManager:
                 ).strftime("%H:%M:%S")
                 self.error = None
                 self.running = False
+                self.finished_at = now
                 self.next_allowed = now + SCANNER_REFRESH_SECONDS
         except UpstoxRateLimitError as exc:
             with self.lock:
@@ -1868,11 +2097,13 @@ class _FNOScannerManager:
                     f"about {exc.retry_after} seconds."
                 )
                 self.running = False
+                self.finished_at = time.time()
                 self.next_allowed = time.time() + max(60, int(exc.retry_after or 60))
         except Exception as exc:
             with self.lock:
                 self.error = f"Background F&O scanner unavailable: {exc}"
                 self.running = False
+                self.finished_at = time.time()
                 self.next_allowed = time.time() + 120
 
     def snapshot(self):
@@ -1883,6 +2114,8 @@ class _FNOScannerManager:
                 self.scan_time,
                 self.error,
                 self.running,
+                self.started_at,
+                self.finished_at,
             )
 
 
@@ -1931,120 +2164,192 @@ st.markdown("""
 # ============================================================
 # SIDEBAR
 # ============================================================
-with st.sidebar:
-    # --------------------------------------------------------
-    # BACKEND-ONLY F&O ALERTS
-    # The scan itself remains invisible; only its health/freshness
-    # and final opportunities are shown to the user.
-    # --------------------------------------------------------
-    risk_for_scanner = st.session_state.get("risk_profile", "Balanced")
-    scanner_manager = get_fno_scanner_manager()
-    scanner_manager.start_if_needed(risk_for_scanner)
-    alert_results, alert_info, alert_time, alert_error, alert_running = scanner_manager.snapshot()
-    alert_results = alert_results[:5]
 
-    st.markdown("### 🔔 F&O TRADE ALERTS")
+def _render_fno_scanner_panel():
+    """Render the manual Top-5 trade scanner in the left sidebar.
 
-    scanner_now = datetime.now(ZoneInfo("Asia/Kolkata"))
-    scanner_market_open = (
-        scanner_now.weekday() < 5
-        and (scanner_now.hour, scanner_now.minute) >= (9, 15)
-        and (scanner_now.hour, scanner_now.minute) <= (15, 30)
-    )
+    The scan is launched only when the user presses Scan Trades. The actual
+    full-market scan runs in the existing background worker, so the Streamlit
+    request thread is not blocked and the right-side analyzer remains untouched.
+    """
+    with st.sidebar:
+        risk_for_scanner = st.session_state.get("risk_profile", "Balanced")
+        scanner_manager = get_fno_scanner_manager()
 
-    if not scanner_market_open:
-        scanner_status_cls = "scanner-status-closed"
-        scanner_status_text = "● MARKET CLOSED"
-        scanner_status_detail = f"Last update: {alert_time + ' IST' if alert_time else 'No completed scan yet'}"
-    elif alert_error:
-        scanner_status_cls = "scanner-status-error"
-        scanner_status_text = "● SCANNER TEMPORARILY PAUSED"
-        scanner_status_detail = "Will retry automatically"
-    elif alert_running:
-        scanner_status_cls = "scanner-status-running"
-        scanner_status_text = "● UPDATING OPPORTUNITIES"
-        scanner_status_detail = "Background scan in progress"
-    elif alert_time:
-        scanner_status_cls = "scanner-status-active"
-        scanner_status_text = "● BACKGROUND SCANNER ACTIVE"
-        scanner_status_detail = f"Updated {alert_time} IST"
-    else:
-        scanner_status_cls = "scanner-status-running"
-        scanner_status_text = "● STARTING BACKGROUND SCANNER"
-        scanner_status_detail = "First result will appear automatically"
+        st.markdown("### 🔥 TOP 5 POSSIBLE TRADES")
+        st.caption(
+            "Scans the NSE equity F&O universe using the same trade engine, "
+            "quality gates and risk profile as the main analyzer."
+        )
 
-    st.markdown(
-        f"""<div class=\"scanner-status {scanner_status_cls}\">
-            <div class=\"scanner-status-main\"><span class=\"scanner-dot\">{scanner_status_text[:1]}</span><span>{scanner_status_text[2:]}</span></div>
-            <span class=\"scanner-updated\">{scanner_status_detail}</span>
-        </div>""",
-        unsafe_allow_html=True,
-    )
+        scan_trades = st.button(
+            "🔎 Scan Trades",
+            key="scan_trades_button",
+            use_container_width=True,
+            type="primary",
+        )
 
-    if alert_results:
+        if scan_trades:
+            scanner_manager.start_if_needed(risk_for_scanner, force=True)
+            st.session_state["scanner_manual_scan_requested"] = True
+            st.rerun()
 
-        for rank, alert in enumerate(alert_results, start=1):
-            action = alert["Trade"]
-            is_call = "CALL" in action
-            action_class = (
-                "scanner-call-action" if is_call else "scanner-put-action"
+        snapshot = scanner_manager.snapshot()
+        if isinstance(snapshot, (tuple, list)) and len(snapshot) >= 7:
+            (
+                alert_results,
+                alert_info,
+                alert_time,
+                alert_error,
+                alert_running,
+                started_at,
+                finished_at,
+            ) = snapshot[:7]
+        elif isinstance(snapshot, (tuple, list)) and len(snapshot) == 5:
+            (
+                alert_results,
+                alert_info,
+                alert_time,
+                alert_error,
+                alert_running,
+            ) = snapshot
+            started_at = 0.0
+            finished_at = 0.0
+        else:
+            raise ValueError(
+                f"Unexpected scanner manager snapshot format: {type(snapshot).__name__}"
             )
-            if "SELL" in action:
-                action_class = "scanner-sell-action"
 
-            card_class = (
-                "scanner-alert-call" if is_call else "scanner-alert-put"
-            )
-            if "SELL" in action:
-                card_class += " scanner-alert-sell"
+        alert_results = alert_results[:5]
 
+        if alert_running and st_autorefresh is not None:
+            st_autorefresh(interval=1500, key="fno_manual_scan_poll")
+
+        if alert_running:
+            elapsed = int(max(0, time.time() - started_at)) if started_at else 0
             st.markdown(
-                f"""
-                <div class="scanner-alert {card_class}">
-                  <div class="scanner-rank">#{rank} · {alert['Stock']}</div>
-                  <div class="scanner-main">
-                    <b>{alert['Trade']} · {alert['Strike']:.0f}</b>
-                    <span class="scanner-action {action_class}">{action}</span>
-                  </div>
-                  <div class="scanner-stats">
-                    <div class="scanner-stat"><span>PoP</span><b>{alert['PoP']:.1f}%</b></div>
-                    <div class="scanner-stat"><span>QUALITY</span><b>{alert['Quality']:.0f}/100</b></div>
-                    <div class="scanner-stat"><span>ALIGN</span><b>{alert['Alignment']}/3</b></div>
-                  </div>
-                  <div class="scanner-note">
-                    Entry {fmt_price(alert['Entry'])} · SL {fmt_price(alert['SL'])} ·
-                    T1 {fmt_price(alert['Target1'])}
-                  </div>
-                </div>
-                """,
+                f'''<div class="scanner-status scanner-status-running">
+                    <div class="scanner-status-main">
+                        <span class="scanner-dot">●</span>
+                        <span>SCANNING F&O MARKET</span>
+                    </div>
+                    <span class="scanner-updated">{elapsed}s</span>
+                </div>''',
+                unsafe_allow_html=True,
+            )
+            st.caption(
+                "Backend scan is running. The Top 5 results will appear here when complete."
+            )
+
+        elif alert_error:
+            st.markdown(
+                f'''<div class="scanner-status scanner-status-error">
+                    <div class="scanner-status-main">
+                        <span class="scanner-dot">●</span>
+                        <span>SCAN ERROR</span>
+                    </div>
+                </div>''',
+                unsafe_allow_html=True,
+            )
+            st.caption(alert_error)
+
+        elif alert_results:
+            st.markdown(
+                f'''<div class="scanner-status scanner-status-active">
+                    <div class="scanner-status-main">
+                        <span class="scanner-dot">●</span>
+                        <span>TOP {len(alert_results)} TRADES FOUND</span>
+                    </div>
+                    <span class="scanner-updated">{alert_time or ''} IST</span>
+                </div>''',
                 unsafe_allow_html=True,
             )
 
-            if st.button(
-                f"Analyze {alert['Stock']}",
-                key=f"scanner_analyze_{rank}_{alert['Stock']}_{alert['Trade']}",
-                use_container_width=True,
-            ):
-                st.session_state["symbol"] = alias_symbol(alert["Stock"])
-                st.rerun()
+            if alert_info:
+                total, scanned, failed, stage2_count = alert_info
+                st.caption(
+                    f"Scanned {scanned}/{total} F&O stocks • "
+                    f"{failed} unavailable • {stage2_count} shortlisted"
+                )
 
-    if alert_error and not alert_results:
-        st.caption(f"Scanner note: {alert_error}")
-    elif not alert_results:
-        if scanner_market_open and not alert_running:
-            st.info("No qualifying F&O opportunities currently.")
-        elif alert_running:
-            st.caption("The scanner is working in the background. Results will appear after the current scan completes.")
-        elif not scanner_market_open:
-            st.caption("No live scan is required while the market is closed.")
+            for rank, alert in enumerate(alert_results, start=1):
+                action = alert["Trade"]
+                is_call = "CALL" in action
+                action_class = (
+                    "scanner-call-action" if is_call else "scanner-put-action"
+                )
+                if "SELL" in action:
+                    action_class = "scanner-sell-action"
 
+                card_class = (
+                    "scanner-alert-call" if is_call else "scanner-alert-put"
+                )
+                if "SELL" in action:
+                    card_class += " scanner-alert-sell"
+
+                st.markdown(
+                    f"""
+                    <div class="scanner-alert {card_class}">
+                      <div class="scanner-rank">#{rank} · {alert['Stock']}</div>
+                      <div class="scanner-main">
+                        <b>{alert['Trade']} · {alert['Strike']:.0f}</b>
+                        <span class="scanner-action {action_class}">{action}</span>
+                      </div>
+                      <div class="scanner-stats">
+                        <div class="scanner-stat"><span>PoP</span><b>{alert['PoP']:.1f}%</b></div>
+                        <div class="scanner-stat"><span>QUALITY</span><b>{alert['Quality']:.0f}/100</b></div>
+                        <div class="scanner-stat"><span>ALIGN</span><b>{alert['Alignment']}/3</b></div>
+                      </div>
+                      <div class="scanner-note">
+                        Entry {fmt_price(alert['Entry'])} · SL {fmt_price(alert['SL'])} ·
+                        T1 {fmt_price(alert['Target1'])}
+                      </div>
+                    </div>
+                    """,
+                    unsafe_allow_html=True,
+                )
+
+                if st.button(
+                    f"Analyze {alert['Stock']}",
+                    key=f"scanner_analyze_{rank}_{alert['Stock']}_{alert['Trade']}",
+                    use_container_width=True,
+                ):
+                    st.session_state["symbol"] = alias_symbol(alert["Stock"])
+                    st.rerun()
+
+        else:
+            st.markdown(
+                '''<div class="scanner-status scanner-status-closed">
+                    <div class="scanner-status-main">
+                        <span class="scanner-dot">●</span>
+                        <span>READY TO SCAN</span>
+                    </div>
+                    <span class="scanner-updated">Backend</span>
+                </div>''',
+                unsafe_allow_html=True,
+            )
+            st.caption(
+                "Press Scan Trades to search the full F&O universe. No automatic scan is performed."
+            )
+
+# Manual F&O scanner lives entirely in the left sidebar.
+# The main analyzer below remains unchanged and continues to use live Upstox data.
+_render_fno_scanner_panel()
+
+analyze = False
+refresh = False
+
+with st.sidebar:
     st.divider()
     st.markdown("## 🔎 Analyze Instrument")
 
+    if "analyzer_search_value" not in st.session_state:
+        st.session_state["analyzer_search_value"] = ""
+
     symbol_input = st.text_input(
-        "NSE Stock / Index",
-        value=st.session_state.get("symbol", "KOTAKBANK"),
+        "Stock / Index",
         placeholder="NIFTY / BANKNIFTY / HDFCBANK",
+        key="analyzer_search_value",
     )
 
     risk_profile = st.selectbox(
@@ -2054,10 +2359,17 @@ with st.sidebar:
         key="risk_profile",
     )
 
+    def _analyze_live_market_callback():
+        entered = str(st.session_state.get("analyzer_search_value", "")).strip()
+        if entered:
+            st.session_state["symbol"] = alias_symbol(entered)
+        st.session_state["analyzer_search_value"] = ""
+
     analyze = st.button(
         "Analyze Live Market",
         type="primary",
         use_container_width=True,
+        on_click=_analyze_live_market_callback,
     )
 
     refresh = st.button(
@@ -2078,12 +2390,14 @@ with st.sidebar:
     st.caption("No simulated prices are used.")
 
 if analyze:
-    st.session_state["symbol"] = alias_symbol(symbol_input)
+    st.session_state["scroll_to_top"] = True
     st.rerun()
 
 if refresh:
     st.cache_data.clear()
     st.rerun()
+
+scroll_to_top_after_render = st.session_state.pop("scroll_to_top", False)
 
 # ============================================================
 # LIVE ANALYSIS
@@ -2289,7 +2603,7 @@ st.markdown("""
 .fo-decision-note{font-size:14px;color:#667085;margin-top:6px;}.fo-score-ring{min-width:100px;text-align:center;border-radius:15px;background:rgba(255,255,255,.72);border:1px solid rgba(0,0,0,.06);padding:11px 13px;}.fo-score-ring b{display:block;font-size:28px;color:#182230;line-height:1;}.fo-score-ring span{font-size:12px;color:#98a2b3;font-weight:800;letter-spacing:.6px;}
 .fo-decision-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:9px;margin-top:17px;}.fo-decision-cell{background:rgba(255,255,255,.72);border:1px solid rgba(16,42,67,.07);border-radius:11px;padding:11px;text-align:center;}.fo-decision-cell span{display:block;font-size:12px;font-weight:900;color:#98a2b3;letter-spacing:.7px;}.fo-decision-cell b{display:block;font-size:18px;color:#182230;margin-top:5px;}
 .fo-engine{display:grid;grid-template-columns:repeat(4,1fr);gap:10px;}.fo-engine-card{background:#fff;border:1px solid #e7ebf0;border-radius:14px;padding:14px;box-shadow:0 3px 12px rgba(16,42,67,.03);position:relative;overflow:hidden;}.fo-engine-card.selected{border-color:#8fcfa1;box-shadow:0 5px 18px rgba(20,122,61,.09);}.fo-engine-card.rejected{opacity:.82;}.fo-engine-top{display:flex;justify-content:space-between;gap:8px;align-items:center;}.fo-engine-action{font-size:15px;font-weight:900;color:#182230;}.fo-engine-status{font-size:11px;font-weight:900;padding:5px 7px;border-radius:10px;letter-spacing:.5px;background:#f2f4f7;color:#667085;}.fo-engine-card.selected{background:#eaf8ef;border-color:#8fcfa1;box-shadow:0 5px 18px rgba(20,122,61,.12);}.fo-engine-card.selected .fo-engine-status{background:#16a34a;color:#fff;}.fo-engine-card.rejected{background:#fff0f1;border-color:#f2c5c8;opacity:1;}.fo-engine-card.rejected .fo-engine-status{background:#dc2626;color:#fff;}.fo-engine-contract{font-size:25px;font-weight:900;margin:10px 0 12px;color:#182230;}.fo-engine-stats{display:grid;grid-template-columns:1fr 1fr;gap:7px;}.fo-engine-stats div{background:#f8fafc;border-radius:9px;padding:8px;}.fo-engine-stats span{display:block;font-size:11px;color:#98a2b3;font-weight:900;}.fo-engine-stats b{display:block;font-size:16px;margin-top:3px;color:#182230;}.fo-engine-reason{font-size:12px;color:#98a2b3;line-height:1.45;margin-top:10px;min-height:26px;}
-.fo-plan-head{display:flex;align-items:center;justify-content:space-between;gap:14px;background:#fff;border:1px solid #e7ebf0;border-radius:16px 16px 0 0;padding:17px 19px;}.fo-plan-action{font-size:13px;font-weight:900;color:#98a2b3;letter-spacing:.8px;}.fo-plan-contract{font-size:25px;font-weight:900;color:#182230;margin-top:3px;}.fo-plan-pop{font-size:24px;font-weight:900;color:#147a3d;white-space:nowrap;}.fo-levels{display:grid;grid-template-columns:repeat(5,1fr);gap:9px;margin-top:9px;}.fo-level{background:#fff;border:1px solid #e7ebf0;border-radius:13px;padding:14px;min-height:86px;}.fo-level span{display:block;font-size:12px;color:#98a2b3;font-weight:900;letter-spacing:.6px;}.fo-level b{display:block;font-size:21px;color:#182230;margin-top:7px;}.fo-level small{display:block;font-size:12px;color:#98a2b3;margin-top:4px;}.fo-level.entry{border-top:3px solid #3b82f6;}.fo-level.sl{border-top:3px solid #dc2626;}.fo-level.t1{border-top:3px solid #16a34a;}.fo-level.t2{border-top:3px solid #0f766e;}.fo-level.greeks{border-top:3px solid #7c3aed;}
+.fo-plan-head{display:flex;align-items:center;justify-content:space-between;gap:14px;background:#fff;border:1px solid #e7ebf0;border-radius:16px 16px 0 0;padding:17px 19px;}.fo-plan-action{font-size:13px;font-weight:900;color:#98a2b3;letter-spacing:.8px;}.fo-plan-contract{font-size:25px;font-weight:900;color:#182230;margin-top:3px;}.fo-plan-pop{font-size:24px;font-weight:900;color:#147a3d;white-space:nowrap;}.fo-levels{display:grid;grid-template-columns:repeat(5,1fr);gap:9px;margin-top:9px;}.fo-level{background:#fff;border:1px solid #e7ebf0;border-radius:13px;padding:14px;min-height:86px;}.fo-level span{display:block;font-size:12px;color:#98a2b3;font-weight:900;letter-spacing:.6px;}.fo-level b{display:block;font-size:21px;color:#182230;margin-top:7px;}.fo-level small{display:block;font-size:12px;color:#98a2b3;margin-top:4px;}.fo-level.entry{border-top:3px solid #3b82f6;}.fo-level.sl{border-top:3px solid #dc2626;}.fo-level.t1{border-top:3px solid #16a34a;}.fo-level.t2{border-top:3px solid #0f766e;}.fo-level.greeks{border-top:3px solid #7c3aed;}.fo-level-pct{font-weight:800!important;font-size:14px!important;}.fo-level-lot{font-weight:900!important;font-size:14px!important;margin-top:2px!important;}.fo-level.entry .fo-level-pct,.fo-level.entry .fo-level-lot{color:#475467;}.fo-level.sl .fo-level-pct,.fo-level.sl .fo-level-lot{color:#b4232f;}.fo-level.t1 .fo-level-pct,.fo-level.t1 .fo-level-lot,.fo-level.t2 .fo-level-pct,.fo-level.t2 .fo-level-lot{color:#147a3d;}
 .fo-exit{background:#fff;border:1px solid #e7ebf0;border-radius:13px;padding:13px 16px;margin-top:9px;display:flex;gap:12px;align-items:flex-start;}.fo-exit-icon{font-size:21px;}.fo-exit span{display:block;font-size:12px;color:#98a2b3;font-weight:900;letter-spacing:.6px;}.fo-exit b{display:block;font-size:14px;color:#344054;line-height:1.5;margin-top:3px;}
 .fo-sr{display:grid;grid-template-columns:1fr 1.2fr 1fr;border:1px solid #e7ebf0;border-radius:16px;overflow:hidden;background:#fff;box-shadow:0 3px 12px rgba(16,42,67,.03);}.fo-sr-side{padding:20px;text-align:center;display:flex;flex-direction:column;justify-content:center;}.fo-sr-side.support{background:#f4fbf6;}.fo-sr-side.resistance{background:#fff6f6;}.fo-sr-side span{font-size:12px;font-weight:900;letter-spacing:.7px;}.fo-sr-side.support span{color:#147a3d;}.fo-sr-side.resistance span{color:#b4232f;}.fo-sr-side b{font-size:28px;margin-top:7px;color:#182230;}.fo-sr-side small{font-size:13px;color:#98a2b3;margin-top:4px;}.fo-sr-mid{display:flex;align-items:center;justify-content:center;flex-direction:column;gap:8px;border-left:1px dashed #dfe3e8;border-right:1px dashed #dfe3e8;padding:15px;}.fo-sr-mid span{font-size:12px;color:#98a2b3;font-weight:800;}.fo-current{font-size:21px;font-weight:900;background:#f5f7f9;border:1px solid #e5e7eb;border-radius:22px;padding:8px 15px;color:#182230;}
 .fo-why{background:#fff;border:1px solid #e7ebf0;border-radius:15px;padding:6px 17px;box-shadow:0 3px 12px rgba(16,42,67,.03);}.fo-why-line{padding:10px 2px;border-bottom:1px solid #eef0f2;font-size:14px;color:#344054;line-height:1.5;}.fo-why-line:last-child{border-bottom:0;}
@@ -2384,6 +2698,150 @@ st.markdown("""<style>
 .fo-engine.fo-engine-grid{display:grid!important;grid-template-columns:repeat(2,minmax(0,1fr))!important;grid-auto-rows:1fr!important;gap:14px!important;width:100%!important;align-items:stretch!important;}
 .fo-engine.fo-engine-grid .fo-engine-card{display:flex!important;flex-direction:column!important;min-width:0!important;width:100%!important;height:100%!important;margin:0!important;box-sizing:border-box!important;}
 @media(max-width:720px){.fo-engine.fo-engine-grid{grid-template-columns:1fr!important;}}
+
+
+/* ============================================================
+   FULL COLOR SEMANTIC UI — VISUAL ONLY
+   No trading logic, API logic, calculations or layout structure changed.
+   ============================================================ */
+.stApp { background:linear-gradient(180deg,#eef6ff 0%,#f7f9fc 42%,#eef8f4 100%); }
+.block-container { max-width:1520px; }
+
+/* Main Streamlit controls */
+.stButton > button {
+    border:1px solid #93c5fd !important;
+    border-radius:10px !important;
+    font-weight:800 !important;
+    background:linear-gradient(180deg,#eff6ff,#dbeafe) !important;
+    color:#174ea6 !important;
+    box-shadow:0 3px 10px rgba(37,99,235,.10) !important;
+}
+.stButton > button:hover { border-color:#2563eb !important; background:#dbeafe !important; color:#1d4ed8 !important; }
+.stButton > button[kind="primary"] { background:linear-gradient(135deg,#2563eb,#1d4ed8) !important; color:#fff !important; border-color:#1d4ed8 !important; }
+.stButton > button[kind="primary"]:hover { background:linear-gradient(135deg,#1d4ed8,#1e40af) !important; }
+.stTextInput input { border:2px solid #bfdbfe !important; border-radius:10px !important; background:#f8fbff !important; font-weight:700 !important; }
+.stTextInput input:focus { border-color:#2563eb !important; box-shadow:0 0 0 2px rgba(37,99,235,.12) !important; }
+[data-baseweb="select"] > div { border:2px solid #c4b5fd !important; border-radius:10px !important; background:#faf8ff !important; }
+.stCheckbox label { font-weight:700 !important; color:#334155 !important; }
+
+/* Sidebar becomes a clear control/status area */
+section[data-testid="stSidebar"] { background:linear-gradient(180deg,#f0f7ff 0%,#f8fbff 48%,#f2fbf6 100%); border-right:1px solid #cbdcf2; }
+section[data-testid="stSidebar"] h2 { color:#12395b !important; }
+section[data-testid="stSidebar"] hr { border-color:#cbdcf2 !important; }
+section[data-testid="stSidebar"] .stCaption { color:#64748b !important; }
+
+/* Instrument header */
+.fo-instrument { background:linear-gradient(100deg,#ffffff 0%,#f0f7ff 55%,#effcf5 100%); border:2px solid #c9dff4; }
+.fo-symbol { color:#0f3b63; }
+.fo-symbol-note { color:#64748b; }
+.fo-regime { background:#ede9fe; border-color:#c4b5fd; color:#6d28d9; }
+
+/* Section titles use a strong semantic accent */
+.fo-section { color:#0f4c81; }
+.fo-section:before { content:""; width:7px; height:22px; border-radius:5px; background:linear-gradient(180deg,#2563eb,#06b6d4); display:inline-block; }
+.fo-section:after { background:linear-gradient(90deg,#bfdbfe,#e2e8f0,transparent); }
+.section-heading { color:#0f4c81; }
+
+/* Market metrics: each category gets a visual meaning */
+.fo-metric { border:1px solid #d7e2ee; background:#fff; box-shadow:0 5px 15px rgba(15,23,42,.055); }
+.fo-metric.spot { background:linear-gradient(145deg,#e0f2fe,#ffffff); border-color:#7dd3fc; }
+.fo-metric.spot .fo-metric-label { color:#0369a1; }
+.fo-metric.spot .fo-metric-value { color:#075985; }
+.fo-metric.support { background:linear-gradient(145deg,#ecfdf5,#ffffff); border-left:6px solid #16a34a; }
+.fo-metric.support .fo-metric-label,.fo-metric.support .fo-metric-value { color:#15803d; }
+.fo-metric.resistance { background:linear-gradient(145deg,#fff1f2,#ffffff); border-left:6px solid #dc2626; }
+.fo-metric.resistance .fo-metric-label,.fo-metric.resistance .fo-metric-value { color:#b91c1c; }
+.fo-metric:nth-child(4) { background:linear-gradient(145deg,#faf5ff,#ffffff); border-top:4px solid #8b5cf6; }
+.fo-metric:nth-child(5) { background:linear-gradient(145deg,#fff7ed,#ffffff); border-top:4px solid #f97316; }
+.fo-metric:nth-child(6) { background:linear-gradient(145deg,#ecfeff,#ffffff); border-top:4px solid #0891b2; }
+.fo-metric:nth-child(7) { background:linear-gradient(145deg,#fefce8,#ffffff); border-top:4px solid #eab308; }
+.fo-metric-label { color:#64748b; }
+.fo-metric-value { color:#172b4d; }
+
+/* Decision card: green = call/buy, red = put, amber/grey = no trade */
+.fo-decision.call { background:linear-gradient(135deg,#dcfce7 0%,#f0fdf4 45%,#ffffff 100%); border:2px solid #4ade80; box-shadow:0 10px 26px rgba(22,163,74,.12); }
+.fo-decision.put { background:linear-gradient(135deg,#ffe4e6 0%,#fff1f2 45%,#ffffff 100%); border:2px solid #fb7185; box-shadow:0 10px 26px rgba(220,38,38,.10); }
+.fo-decision.neutral { background:linear-gradient(135deg,#fef3c7 0%,#fffbeb 45%,#ffffff 100%); border:2px solid #fbbf24; box-shadow:0 10px 26px rgba(245,158,11,.10); }
+.fo-decision.call .fo-decision-main { color:#087f3e; }
+.fo-decision.put .fo-decision-main { color:#c81e3a; }
+.fo-decision.neutral .fo-decision-main { color:#92400e; }
+.fo-decision .fo-decision-pop { border-radius:999px; padding:7px 12px; }
+.fo-decision.call .fo-decision-pop { background:#bbf7d0; color:#166534; }
+.fo-decision.put .fo-decision-pop { background:#fecdd3; color:#9f1239; }
+.fo-decision.neutral .fo-decision-pop { background:#fde68a; color:#92400e; }
+
+/* Selected trade plan */
+.fo-plan-head { border:2px solid #c7d7ea; background:linear-gradient(100deg,#ffffff,#eff6ff); }
+.fo-plan-action { color:#2563eb; }
+.fo-plan-contract { color:#0f3b63; }
+.fo-plan-pop { background:#dcfce7; border:1px solid #86efac; border-radius:999px; padding:7px 12px; color:#087f3e !important; }
+.fo-level { border:1px solid #d7e2ee; box-shadow:0 4px 12px rgba(15,23,42,.045); }
+.fo-level.entry { background:linear-gradient(180deg,#eff6ff,#fff); border-top:5px solid #2563eb; }
+.fo-level.entry span,.fo-level.entry b { color:#1d4ed8; }
+.fo-level.sl { background:linear-gradient(180deg,#fff1f2,#fff); border-top:5px solid #dc2626; }
+.fo-level.sl span,.fo-level.sl b,.fo-level.sl .fo-level-pct,.fo-level.sl .fo-level-lot { color:#b91c1c !important; }
+.fo-level.t1 { background:linear-gradient(180deg,#ecfdf5,#fff); border-top:5px solid #16a34a; }
+.fo-level.t1 span,.fo-level.t1 b,.fo-level.t1 .fo-level-pct,.fo-level.t1 .fo-level-lot { color:#15803d !important; }
+.fo-level.t2 { background:linear-gradient(180deg,#ecfeff,#fff); border-top:5px solid #0f766e; }
+.fo-level.t2 span,.fo-level.t2 b,.fo-level.t2 .fo-level-pct,.fo-level.t2 .fo-level-lot { color:#0f766e !important; }
+.fo-level.greeks { background:linear-gradient(180deg,#f5f3ff,#fff); border-top:5px solid #7c3aed; }
+.fo-level.greeks span,.fo-level.greeks b { color:#6d28d9; }
+.fo-level-pct { font-size:15px !important; }
+.fo-level-lot { font-size:15px !important; }
+
+/* Support / resistance map */
+.fo-sr { border:2px solid #d7e2ee; box-shadow:0 7px 20px rgba(15,23,42,.06); }
+.fo-sr-side.support { background:linear-gradient(180deg,#bbf7d0,#ecfdf5); }
+.fo-sr-side.support span,.fo-sr-side.support b { color:#15803d; }
+.fo-sr-side.resistance { background:linear-gradient(180deg,#fecdd3,#fff1f2); }
+.fo-sr-side.resistance span,.fo-sr-side.resistance b { color:#b91c1c; }
+.fo-sr-mid { background:linear-gradient(180deg,#e0f2fe,#f8fafc); }
+.fo-current { background:#0369a1; border-color:#075985; color:#fff; box-shadow:0 5px 14px rgba(3,105,161,.22); }
+.fo-current span { color:#dbeafe; }
+
+/* Option cards: calls green, puts red, sell actions purple */
+.option-card { border:1px solid #d7e2ee; box-shadow:0 5px 15px rgba(15,23,42,.055); }
+.option-call { background:linear-gradient(180deg,#dcfce7,#ffffff); border-top:6px solid #16a34a; }
+.option-put { background:linear-gradient(180deg,#ffe4e6,#ffffff); border-top:6px solid #dc2626; }
+.option-selected { box-shadow:0 10px 25px rgba(15,23,42,.12); }
+.selected-tag { background:#16a34a; color:#fff; border-color:#15803d; }
+.option-readiness.status-green { background:#bbf7d0; color:#166534; border-color:#4ade80; }
+.option-readiness.status-yellow { background:#fde68a; color:#92400e; border-color:#f59e0b; }
+.option-readiness.status-red { background:#fecdd3; color:#9f1239; border-color:#fb7185; }
+.option-readiness.status-grey { background:#e2e8f0; color:#475569; border-color:#94a3b8; }
+
+/* Checks: instantly readable pass / wait / fail */
+.check-card { border:2px solid #d7e2ee; background:linear-gradient(180deg,#fff,#f8fafc); }
+.check-row { border-bottom-color:#e2e8f0; }
+.check-pass { background:#ecfdf5; border-radius:7px; padding:4px 7px; color:#15803d !important; }
+.check-wait { background:#fffbeb; border-radius:7px; padding:4px 7px; color:#b45309 !important; }
+.check-fail { background:#fff1f2; border-radius:7px; padding:4px 7px; color:#be123c !important; }
+
+/* Exit / why sections */
+.fo-exit { background:linear-gradient(100deg,#eff6ff,#ecfeff); border:2px solid #93c5fd; }
+.fo-exit-icon { background:#2563eb; color:#fff; border-radius:50%; padding:4px 7px; }
+.fo-why { border:2px solid #d7e2ee; }
+.fo-why-line { border-bottom-color:#e2e8f0; }
+.fo-why-line:before { content:"✓"; display:inline-flex; align-items:center; justify-content:center; width:20px; height:20px; margin-right:7px; border-radius:50%; background:#dcfce7; color:#15803d; font-weight:900; }
+.fo-footer { background:linear-gradient(90deg,#e0f2fe,#ecfdf5); border:1px solid #bfdbfe; color:#475569; }
+
+/* Scanner */
+.scanner-status-active { background:#dcfce7 !important; border-color:#4ade80 !important; color:#166534 !important; }
+.scanner-status-running { background:#dbeafe !important; border-color:#60a5fa !important; color:#1d4ed8 !important; }
+.scanner-status-closed { background:#e2e8f0 !important; border-color:#94a3b8 !important; color:#475569 !important; }
+.scanner-status-error { background:#ffedd5 !important; border-color:#fb923c !important; color:#c2410c !important; }
+.scanner-call-action { background:#bbf7d0 !important; color:#166534 !important; }
+.scanner-put-action { background:#fecdd3 !important; color:#9f1239 !important; }
+.scanner-sell-action { background:#ddd6fe !important; color:#6d28d9 !important; }
+.scanner-stat { background:#fff !important; border:1px solid #dbe5ef; box-shadow:0 2px 8px rgba(15,23,42,.04); }
+
+/* Positive / warning / negative generic alert blocks */
+.status-green { background:linear-gradient(135deg,#dcfce7,#f0fdf4) !important; border-color:#4ade80 !important; }
+.status-yellow { background:linear-gradient(135deg,#fef3c7,#fffbeb) !important; border-color:#fbbf24 !important; }
+.status-red { background:linear-gradient(135deg,#ffe4e6,#fff1f2) !important; border-color:#fb7185 !important; }
+.status-grey { background:linear-gradient(135deg,#e2e8f0,#f8fafc) !important; border-color:#94a3b8 !important; }
+.tab-positive { background:#dcfce7 !important; border-color:#4ade80 !important; color:#166534 !important; }
+.tab-danger { background:#ffe4e6 !important; border-color:#fb7185 !important; color:#9f1239 !important; }
 </style>""", unsafe_allow_html=True)
 
 engine_html = "<div class='fo-engine fo-engine-grid'>"
@@ -2426,16 +2884,44 @@ if decision != "NO TRADE" and best_plan:
       <div class="fo-plan-pop">PoP {safe_float(best_plan.get('pop')):.1f}%</div>
     </div>
     """, unsafe_allow_html=True)
+    entry_value = safe_float(best_plan.get("entry"))
+
+    is_sell = (
+        str(best_plan.get("action", decision)).upper().endswith("SELL")
+        or str(decision).upper().endswith("SELL")
+    )
+    lot_qty = safe_float(lot_size)
+
+    def change_from_entry(level_value):
+        level_value = safe_float(level_value)
+        if not np.isfinite(entry_value) or entry_value == 0 or not np.isfinite(level_value):
+            return "—"
+        # Show the trade P&L per option unit, so BUY and SELL strategies
+        # are both represented from the trader's perspective.
+        change_inr = entry_value - level_value if is_sell else level_value - entry_value
+        change_pct = (change_inr / abs(entry_value)) * 100
+        return f"₹{change_inr:+.2f} · {change_pct:+.2f}% from entry"
+
+    def lot_pnl_from_entry(level_value):
+        level_value = safe_float(level_value)
+        if not np.isfinite(entry_value) or entry_value == 0 or not np.isfinite(level_value) or not np.isfinite(lot_qty) or lot_qty <= 0:
+            return "—"
+        change_inr_per_unit = entry_value - level_value if is_sell else level_value - entry_value
+        lot_pnl = change_inr_per_unit * lot_qty
+        return f"₹{lot_pnl:+,.0f} for 1 lot"
+
     level_items = [
-        ("ENTRY", fmt_price(best_plan.get("entry")), "Option premium", "entry"),
-        ("STOP LOSS", fmt_price(best_plan.get("sl")), "Defined risk level", "sl"),
-        ("TARGET 1", fmt_price(best_plan.get("target1")), "First profit level", "t1"),
-        ("TARGET 2", fmt_price(best_plan.get("target2")), "Second profit level", "t2"),
-        ("DELTA / IV", f"{safe_float(best_plan.get('delta')):.2f} / {safe_float(best_plan.get('iv')):.1f}%", "Option characteristics", "greeks"),
+        ("ENTRY", fmt_price(best_plan.get("entry")), "Option premium", "entry", change_from_entry(best_plan.get("entry")), ""),
+        ("STOP LOSS", fmt_price(best_plan.get("sl")), "Defined risk level", "sl", change_from_entry(best_plan.get("sl")), lot_pnl_from_entry(best_plan.get("sl"))),
+        ("TARGET 1", fmt_price(best_plan.get("target1")), "First profit level", "t1", change_from_entry(best_plan.get("target1")), lot_pnl_from_entry(best_plan.get("target1"))),
+        ("TARGET 2", fmt_price(best_plan.get("target2")), "Second profit level", "t2", change_from_entry(best_plan.get("target2")), lot_pnl_from_entry(best_plan.get("target2"))),
+        ("DELTA / IV", f"{safe_float(best_plan.get('delta')):.2f} / {safe_float(best_plan.get('iv')):.1f}%", "Option characteristics", "greeks", "", ""),
     ]
     level_html = "<div class='fo-levels'>"
-    for title, value, note, cls in level_items:
-        level_html += f"<div class='fo-level {cls}'><span>{title}</span><b>{value}</b><small>{note}</small></div>"
+    for title, value, note, cls, pct_note, lot_note in level_items:
+        pct_html = f"<small class='fo-level-pct'>{pct_note}</small>" if pct_note else ""
+        lot_html = f"<small class='fo-level-lot'>{lot_note}</small>" if lot_note else ""
+        level_html += f"<div class='fo-level {cls}'><span>{title}</span><b>{value}</b><small>{note}</small>{pct_html}{lot_html}</div>"
     level_html += "</div>"
     st.markdown(level_html, unsafe_allow_html=True)
     st.markdown(f"<div class='fo-exit'><div class='fo-exit-icon'>🚪</div><div><span>EXIT RULE</span><b>{best_plan.get('exit','Follow stop-loss and targets.')}</b></div></div>", unsafe_allow_html=True)
@@ -2469,3 +2955,133 @@ else:
 st.markdown(f"""
 <div class="fo-footer">Live Upstox snapshot · Expiry {selected_expiry} · Updated {now_ist.strftime('%d-%b-%Y %H:%M:%S IST')}<br>PoP is a model input from the Upstox option chain; it is not a guaranteed win probability. Option selling can carry substantial risk.</div>
 """,unsafe_allow_html=True)
+
+# ============================================================
+# RESET RIGHT-SIDE ANALYZER SCROLL AFTER FULL RENDER
+# ============================================================
+if scroll_to_top_after_render:
+    # Streamlit's main page can have more than one scroll surface.  In
+    # particular, recent versions expose stMainBlockContainer separately
+    # from stMain.  Reset the actual main/right-side scroll surfaces and
+    # observe late React/Streamlit layout changes so the old position cannot
+    # immediately come back after the rerun.
+    scroll_js = r"""
+    <script>
+    (() => {
+        const TOP_SELECTORS = [
+            '[data-testid="stMainBlockContainer"]',
+            '[data-testid="stMain"]',
+            'section[data-testid="stMain"]',
+            'section.main',
+            'div.main',
+            '.main'
+        ];
+
+        function getMainSurfaces() {
+            const found = [];
+            const seen = new Set();
+            for (const selector of TOP_SELECTORS) {
+                document.querySelectorAll(selector).forEach(el => {
+                    if (!seen.has(el)) {
+                        seen.add(el);
+                        found.push(el);
+                    }
+                });
+            }
+            return found;
+        }
+
+        function resetElement(el) {
+            if (!el) return;
+            try {
+                el.scrollTop = 0;
+                el.scrollLeft = 0;
+            } catch (_) {}
+        }
+
+        function resetScrollableChildren(root) {
+            if (!root) return;
+            const all = [root, ...root.querySelectorAll('*')];
+            for (const el of all) {
+                try {
+                    const cs = getComputedStyle(el);
+                    const scrollable =
+                        el.scrollHeight > el.clientHeight + 1 &&
+                        ['auto', 'scroll', 'overlay'].includes(cs.overflowY);
+                    if (scrollable) resetElement(el);
+                } catch (_) {}
+            }
+        }
+
+        function resetRightPane() {
+            try {
+                const hero = document.querySelector('.fo-hero');
+                const surfaces = getMainSurfaces();
+
+                // Reset the browser/page scroll as well as Streamlit's main
+                // content surfaces.
+                resetElement(document.scrollingElement);
+                resetElement(document.documentElement);
+                resetElement(document.body);
+                window.scrollTo(0, 0);
+
+                surfaces.forEach(surface => {
+                    resetElement(surface);
+                    resetScrollableChildren(surface);
+                });
+
+                // Reset every scrollable ancestor of the analyzer hero.
+                if (hero) {
+                    let el = hero.parentElement;
+                    while (el) {
+                        try {
+                            const cs = getComputedStyle(el);
+                            if (el.scrollHeight > el.clientHeight + 1 ||
+                                ['auto', 'scroll', 'overlay'].includes(cs.overflowY)) {
+                                resetElement(el);
+                            }
+                        } catch (_) {}
+                        el = el.parentElement;
+                    }
+                    hero.scrollIntoView({behavior: 'auto', block: 'start', inline: 'nearest'});
+                }
+            } catch (_) {}
+        }
+
+        // Run after the rerender and again after layout/paint settles.
+        resetRightPane();
+        [25, 75, 150, 300, 500, 800, 1200, 1800].forEach(ms => {
+            setTimeout(resetRightPane, ms);
+        });
+
+        // Streamlit/React can append or resize blocks after the first paint.
+        // Watch the main app briefly and re-apply the top position whenever
+        // the analyzer DOM changes.
+        const main = document.querySelector('[data-testid="stMain"]') ||
+                     document.querySelector('section[data-testid="stMain"]') ||
+                     document.querySelector('section.main');
+        if (main && window.MutationObserver) {
+            let last = Date.now();
+            const observer = new MutationObserver(() => {
+                const now = Date.now();
+                if (now - last > 30) {
+                    last = now;
+                    resetRightPane();
+                }
+            });
+            observer.observe(main, {childList: true, subtree: true, attributes: true});
+            setTimeout(() => observer.disconnect(), 2500);
+        }
+    })();
+    </script>
+    """
+
+    if hasattr(st, "html"):
+        try:
+            st.html(scroll_js, unsafe_allow_javascript=True)
+        except TypeError:
+            # Older Streamlit versions do not expose unsafe_allow_javascript.
+            # Keep a harmless marker rather than breaking the application.
+            st.markdown('<div id="fo-analysis-scroll-top"></div>', unsafe_allow_html=True)
+    else:
+        st.markdown('<div id="fo-analysis-scroll-top"></div>', unsafe_allow_html=True)
