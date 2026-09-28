@@ -323,260 +323,54 @@ def safe_float(value, default=np.nan):
 
 
 def alias_symbol(symbol):
-    """Normalize common index aliases and known company-name inputs."""
-    raw = str(symbol or "").strip().upper()
-    compact = "".join(ch for ch in raw if ch.isalnum())
+    s = symbol.strip().upper().replace(" ", "")
     aliases = {
         "NIFTY50": "NIFTY",
         "NIFTYBANK": "BANKNIFTY",
         "NIFTYFIN": "FINNIFTY",
         "MIDCAPNIFTY": "MIDCPNIFTY",
-        # Kaynes Technology company-name variants -> NSE F&O symbol.
-        "KAYNESTECHNOLOGIES": "KAYNES",
-        "KAYNESTECHNOLOGY": "KAYNES",
-        "KAYNESTECHNOLOGYINDIALTD": "KAYNES",
-        "KAYNESTECHNOLOGIESINDIALTD": "KAYNES",
     }
-    return aliases.get(compact, raw)
-
-
-def _search_queries_for_symbol(symbol):
-    """Build safe Upstox search variants for symbol or company-name input."""
-    raw = str(symbol or "").strip().upper()
-    compact = "".join(ch for ch in raw if ch.isalnum())
-    queries = []
-
-    for value in (raw, compact):
-        if value and value not in queries:
-            queries.append(value[:50])
-
-    # Upstox Instrument Search supports partial matching.  Prefix variants
-    # make long company-name input such as KAYNESTECHNOLOGIES resolvable.
-    if len(compact) >= 6:
-        for n in (10, 8, 6):
-            prefix = compact[:n]
-            if prefix not in queries:
-                queries.append(prefix)
-
-    # Also try the first word for normal company-name input.
-    words = [w for w in raw.replace("-", " ").split() if w]
-    if words:
-        first_word = "".join(ch for ch in words[0] if ch.isalnum())
-        if len(first_word) >= 4 and first_word not in queries:
-            queries.append(first_word[:50])
-
-    return queries
+    return aliases.get(s, s)
 
 
 @st.cache_data(ttl=60, show_spinner=False)
 def search_underlying(symbol):
-    """Resolve a real option-capable underlying across NSE and BSE.
+    symbol = alias_symbol(symbol)
+    results = []
 
-    Frontend remains unchanged. The backend checks NSE first and then BSE,
-    and only accepts an underlying when Upstox confirms that CE/PE contracts
-    exist on that exchange. Company names are resolved through multiple safe
-    Upstox search variants, so users do not need to know the exact NSE symbol.
-    """
-    original = str(symbol or "").strip().upper()
-    symbol = alias_symbol(original)
+    for segment in ["EQ", "INDEX"]:
+        payload = api_get(
+            "/v2/instruments/search",
+            params={
+                "query": symbol,
+                "exchanges": "NSE",
+                "segments": segment,
+                "page_number": 1,
+                "records": 30,
+            },
+        )
+        results.extend(payload.get("data", []))
 
-    if not original:
+    if not results:
         raise UpstoxError(
-            "Please enter an NSE/BSE F&O stock symbol or company name, such as HDFCBANK, KAYNES or NIFTY."
+            f"No NSE instrument found for '{symbol}'. "
+            "Enter an NSE F&O stock symbol such as HDFCBANK or an index such as NIFTY."
         )
 
-    queries = _search_queries_for_symbol(symbol)
+    exact = [
+        item for item in results
+        if str(item.get("trading_symbol", "")).upper() == symbol
+    ]
+    if exact:
+        return exact[0]
 
-    def _compact(value):
-        return "".join(ch for ch in str(value or "").upper() if ch.isalnum())
+    if symbol in {"NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY"}:
+        indexes = [x for x in results if x.get("segment") == "NSE_INDEX"]
+        if indexes:
+            return indexes[0]
 
-    target = _compact(symbol)
-
-    def _item_fields(item):
-        return [
-            _compact(item.get("trading_symbol")),
-            _compact(item.get("short_name")),
-            _compact(item.get("name")),
-            _compact(item.get("underlying_symbol")),
-        ]
-
-    def _rank_item(item, query):
-        q = _compact(query)
-        if not q:
-            return -1
-        score = 0
-        for field in _item_fields(item):
-            if not field:
-                continue
-            if field == q:
-                score = max(score, 1000)
-            elif field.startswith(q):
-                score = max(score, 800)
-            elif q in field:
-                score = max(score, 650)
-            elif field in q and len(field) >= 4:
-                score = max(score, 550)
-        segment = str(item.get("segment") or "")
-        if segment.endswith("_EQ") or segment.endswith("_INDEX"):
-            score += 100
-        elif segment.endswith("_FO"):
-            score += 25
-        return score
-
-    def _resolve_for_exchange(exchange):
-        expected_eq = f"{exchange}_EQ"
-        expected_index = f"{exchange}_INDEX"
-        expected_fo = f"{exchange}_FO"
-
-        results = []
-        seen_keys = set()
-
-        # Search several variants instead of relying only on the exact input.
-        # This fixes long company-name inputs while retaining normal symbol
-        # lookup and the existing NSE/BSE exchange fallback.
-        for query in queries:
-            for segment in ("EQ", "INDEX"):
-                try:
-                    payload = api_get(
-                        "/v2/instruments/search",
-                        params={
-                            "query": query,
-                            "exchanges": exchange,
-                            "segments": segment,
-                            "page_number": 1,
-                            "records": 30,
-                        },
-                    )
-                except UpstoxError:
-                    continue
-
-                for item in payload.get("data", []) or []:
-                    key = item.get("instrument_key")
-                    if key and key in seen_keys:
-                        continue
-                    if key:
-                        seen_keys.add(key)
-                    results.append(item)
-
-        # Exact normalized symbol wins.
-        exact = [
-            item for item in results
-            if target and target in _item_fields(item)
-            and str(item.get("segment", "")) in {expected_eq, expected_index}
-        ]
-
-        # Preserve the existing NSE index behaviour exactly.
-        if exchange == "NSE" and symbol in {"NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY"}:
-            indexes = [x for x in results if x.get("segment") == expected_index]
-            direct = indexes[0] if indexes else None
-        else:
-            if exact:
-                direct = sorted(exact, key=lambda x: _rank_item(x, symbol), reverse=True)[0]
-            else:
-                eligible = [
-                    x for x in results
-                    if x.get("segment") in {expected_eq, expected_index}
-                ]
-                direct = (
-                    sorted(eligible, key=lambda x: max(_rank_item(x, q) for q in queries), reverse=True)[0]
-                    if eligible else None
-                )
-
-        # A normal EQ/INDEX result is usable only when option contracts exist.
-        if direct is not None:
-            try:
-                probe = api_get(
-                    "/v2/option/contract",
-                    params={"instrument_key": direct.get("instrument_key")},
-                    timeout=30,
-                )
-                contracts = probe.get("data", []) or []
-                if any(
-                    str(c.get("segment", "")) == expected_fo
-                    and str(c.get("instrument_type", "")).upper() in {"CE", "PE"}
-                    for c in contracts
-                ):
-                    return direct
-            except UpstoxError:
-                pass
-
-        # Fall back to the actual F&O segment and use its underlying_key.
-        fo_candidates = {}
-        for query in queries + [original]:
-            query = str(query or "").strip().upper()
-            if not query:
-                continue
-            try:
-                payload = api_get(
-                    "/v2/instruments/search",
-                    params={
-                        "query": query,
-                        "exchanges": exchange,
-                        "segments": "FO",
-                        "page_number": 1,
-                        "records": 100,
-                    },
-                )
-            except UpstoxError:
-                continue
-
-            for item in payload.get("data", []) or []:
-                if str(item.get("segment", "")) != expected_fo:
-                    continue
-                if str(item.get("instrument_type", "")).upper() not in {"CE", "PE", "FUT"}:
-                    continue
-                if item.get("underlying_type") not in {"EQUITY", "INDEX"}:
-                    continue
-
-                underlying_key = item.get("underlying_key")
-                underlying_symbol = str(item.get("underlying_symbol") or "").strip().upper()
-                if not underlying_key or not underlying_symbol:
-                    continue
-
-                score = _rank_item(item, query)
-                if underlying_symbol == symbol:
-                    score += 100
-                if underlying_symbol == original:
-                    score += 80
-                if str(item.get("trading_symbol", "")).upper().startswith(symbol + " "):
-                    score += 20
-                if str(item.get("instrument_type", "")).upper() in {"CE", "PE"}:
-                    score += 5
-
-                current = fo_candidates.get(underlying_key)
-                if current is None or score > current["score"]:
-                    fo_candidates[underlying_key] = {"score": score, "item": item}
-
-        if fo_candidates:
-            best = sorted(
-                fo_candidates.values(),
-                key=lambda x: x["score"],
-                reverse=True,
-            )[0]["item"]
-            underlying_key = best.get("underlying_key")
-            underlying_symbol = str(best.get("underlying_symbol") or symbol).strip().upper()
-            return {
-                "name": best.get("name", ""),
-                "segment": expected_eq if best.get("underlying_type") == "EQUITY" else expected_index,
-                "exchange": exchange,
-                "instrument_key": underlying_key,
-                "trading_symbol": underlying_symbol,
-                "short_name": best.get("name", ""),
-                "underlying_symbol": underlying_symbol,
-            }
-
-        return None
-
-    # Keep the existing NSE behaviour first; BSE is a backend fallback.
-    for exchange in ("NSE", "BSE"):
-        resolved = _resolve_for_exchange(exchange)
-        if resolved is not None:
-            return resolved
-
-    raise UpstoxError(
-        f"No NSE/BSE option-capable instrument found for '{original}'. "
-        "Enter an NSE/BSE F&O stock symbol or company name such as HDFCBANK or KAYNES."
-    )
+    equities = [x for x in results if x.get("segment") == "NSE_EQ"]
+    return equities[0] if equities else results[0]
 
 
 @st.cache_data(ttl=300, show_spinner=False)
@@ -1625,84 +1419,65 @@ def log_signal(symbol, expiry, decision, plan, spot, pcr, support, resistance, t
 # FULL F&O TRADE ALERT SCANNER — USES THIS FILE'S EXISTING ENGINE
 # ============================================================
 
-FNO_MASTER_URLS = {
-    "NSE": "https://assets.upstox.com/market-quote/instruments/exchange/NSE.json.gz",
-    "BSE": "https://assets.upstox.com/market-quote/instruments/exchange/BSE.json.gz",
-}
+FNO_MASTER_URL = "https://assets.upstox.com/market-quote/instruments/exchange/NSE.json.gz"
 
 
 @st.cache_data(ttl=3600, show_spinner=False)
 def get_fno_underlyings():
-    """Build the combined NSE + BSE equity F&O universe from Upstox BOD masters.
+    """Build current NSE equity F&O universe from Upstox BOD master."""
+    try:
+        response = requests.get(FNO_MASTER_URL, timeout=30)
+        response.raise_for_status()
+        raw = gzip.decompress(response.content)
+        payload = json.loads(raw.decode("utf-8"))
+    except Exception as exc:
+        raise UpstoxError(
+            f"Unable to load the Upstox NSE F&O instrument list: {exc}"
+        ) from exc
 
-    This is backend-only. The scanner UI remains exactly the same as before.
-    """
+    records = payload.get("data", payload.get("instruments", [])) if isinstance(payload, dict) else payload
     today = date.today().isoformat()
     universe = {}
-    errors = []
 
-    for exchange, master_url in FNO_MASTER_URLS.items():
-        try:
-            response = requests.get(master_url, timeout=30)
-            response.raise_for_status()
-            raw = gzip.decompress(response.content)
-            payload = json.loads(raw.decode("utf-8"))
-        except Exception as exc:
-            errors.append(f"{exchange}: {exc}")
+    for item in records:
+        if not isinstance(item, dict):
+            continue
+        if item.get("segment") != "NSE_FO":
+            continue
+        if item.get("instrument_type") not in {"CE", "PE", "FUT"}:
+            continue
+        if item.get("underlying_type") != "EQUITY":
             continue
 
-        records = payload.get("data", payload.get("instruments", [])) if isinstance(payload, dict) else payload
+        expiry_raw = str(item.get("expiry", "")).strip()
+        underlying_key = item.get("underlying_key")
+        symbol = str(item.get("underlying_symbol") or "").strip().upper()
+        if not expiry_raw or not underlying_key or not symbol:
+            continue
 
-        for item in records:
-            if not isinstance(item, dict):
+        if expiry_raw.isdigit():
+            try:
+                expiry_date = datetime.fromtimestamp(
+                    int(expiry_raw) / 1000,
+                    tz=ZoneInfo("Asia/Kolkata")
+                ).date().isoformat()
+            except Exception:
                 continue
-            if item.get("segment") != f"{exchange}_FO":
-                continue
-            if item.get("instrument_type") not in {"CE", "PE", "FUT"}:
-                continue
-            if item.get("underlying_type") != "EQUITY":
-                continue
+        else:
+            expiry_date = expiry_raw[:10]
 
-            expiry_raw = str(item.get("expiry", "")).strip()
-            underlying_key = item.get("underlying_key")
-            symbol = str(item.get("underlying_symbol") or "").strip().upper()
-            if not expiry_raw or not underlying_key or not symbol:
-                continue
+        if expiry_date < today:
+            continue
 
-            if expiry_raw.isdigit():
-                try:
-                    expiry_date = datetime.fromtimestamp(
-                        int(expiry_raw) / 1000,
-                        tz=ZoneInfo("Asia/Kolkata")
-                    ).date().isoformat()
-                except Exception:
-                    continue
-            else:
-                expiry_date = expiry_raw[:10]
+        current = universe.get(underlying_key)
+        if current is None or expiry_date < current["expiry"]:
+            universe[underlying_key] = {
+                "symbol": symbol,
+                "underlying_key": underlying_key,
+                "expiry": expiry_date,
+            }
 
-            if expiry_date < today:
-                continue
-
-            # Keep NSE and BSE entries distinct internally. This lets the
-            # scanner use the correct exchange-specific underlying key while
-            # the final UI still shows only the normal stock/trade card.
-            key = (exchange, underlying_key)
-            current = universe.get(key)
-            if current is None or expiry_date < current["expiry"]:
-                universe[key] = {
-                    "symbol": symbol,
-                    "underlying_key": underlying_key,
-                    "expiry": expiry_date,
-                    "exchange": exchange,
-                }
-
-    if not universe and errors:
-        raise UpstoxError(
-            "Unable to load the Upstox NSE F&O instrument list: "
-            + " | ".join(errors)
-        )
-
-    return sorted(universe.values(), key=lambda x: (x["symbol"], x["exchange"]))
+    return sorted(universe.values(), key=lambda x: x["symbol"])
 
 
 @st.cache_data(ttl=45, show_spinner=False)
@@ -1896,7 +1671,6 @@ def _scanner_plan_for_candidate(candidate, symbol, expiry, risk_profile):
     return {
         "Stock": symbol,
         "Trade": action,
-        "Exchange": candidate.get("exchange", "NSE"),
         "Strike": float(plan["strike"]),
         "Expiry": expiry,
         "PoP": safe_float(plan.get("pop")),
@@ -1921,7 +1695,7 @@ def _scanner_plan_for_candidate(candidate, symbol, expiry, risk_profile):
 
 def scan_fno_trade_alerts(risk_profile, top_alerts=5):
     """
-    Full combined NSE + BSE equity F&O scan using the same strategy engine as the main page.
+    Full NSE equity F&O scan using the same strategy engine as the main page.
 
     Stage 1: option-chain filter only.
     Stage 2: existing technical + OI + quality + readiness gates.
@@ -1945,7 +1719,6 @@ def scan_fno_trade_alerts(risk_profile, top_alerts=5):
                 candidate["symbol"] = item["symbol"]
                 candidate["underlying_key"] = item["underlying_key"]
                 candidate["expiry"] = item["expiry"]
-                candidate["exchange"] = item.get("exchange", "NSE")
                 stage1.append(candidate)
 
             scanned += 1
@@ -2034,10 +1807,16 @@ def scan_fno_trade_alerts(risk_profile, top_alerts=5):
 # the last completed result. This keeps the main dashboard responsive.
 # ============================================================
 
-SCANNER_REFRESH_SECONDS = 300  # backend refresh: every 5 minutes
+SCANNER_SCAN_COOLDOWN_SECONDS = 15
 
 
 class _FNOScannerManager:
+    """Manual F&O scanner state.
+
+    The scanner does NOT start automatically. A user must press Scan Trades.
+    The worker still runs off the Streamlit request path so the main dashboard
+    stays responsive. Results are kept until the next manual scan.
+    """
     def __init__(self):
         self.lock = threading.RLock()
         self.running = False
@@ -2046,33 +1825,37 @@ class _FNOScannerManager:
         self.scan_time = None
         self.error = None
         self.profile = None
-        self.next_allowed = 0.0
         self.started_at = 0.0
         self.finished_at = 0.0
+        self.last_scan_epoch = 0.0
 
-    def start_if_needed(self, risk_profile, force=False):
+    def start_scan(self, risk_profile):
         now = time.time()
         with self.lock:
             if self.running:
-                return
-            if self.profile != risk_profile:
-                # A profile change should trigger a fresh scan, but only after
-                # the current worker has finished. Do not start duplicate workers.
-                self.profile = risk_profile
-                self.next_allowed = 0.0
-            if not force and now < self.next_allowed and self.results:
-                return
+                return False, "A scan is already running."
+            if self.last_scan_epoch and (now - self.last_scan_epoch) < SCANNER_SCAN_COOLDOWN_SECONDS:
+                remaining = int(SCANNER_SCAN_COOLDOWN_SECONDS - (now - self.last_scan_epoch))
+                return False, f"Please wait {max(1, remaining)} seconds before scanning again."
             self.running = True
             self.error = None
+            self.profile = risk_profile
             self.started_at = now
+            self.last_scan_epoch = now
 
         worker = threading.Thread(
             target=self._worker,
             args=(risk_profile,),
             daemon=True,
-            name="fno-background-scanner",
+            name="fno-manual-scanner",
         )
         worker.start()
+        return True, "Scan started."
+
+    # Backward-compatible alias for hot-reloaded Streamlit sessions. It is
+    # deliberately manual-only and NEVER starts unless explicitly called.
+    def start_if_needed(self, risk_profile):
+        return False, "Automatic scanning is disabled. Press Scan Trades."
 
     def _worker(self, risk_profile):
         try:
@@ -2081,41 +1864,31 @@ class _FNOScannerManager:
             )
             now = time.time()
             with self.lock:
-                self.results = results
+                self.results = results[:5]
                 self.info = (total, scanned, failed, stage2_count)
-                self.scan_time = datetime.now(
-                    ZoneInfo("Asia/Kolkata")
-                ).strftime("%H:%M:%S")
+                self.scan_time = datetime.now(ZoneInfo("Asia/Kolkata")).strftime("%H:%M:%S")
                 self.error = None
                 self.running = False
                 self.finished_at = now
-                self.next_allowed = now + SCANNER_REFRESH_SECONDS
         except UpstoxRateLimitError as exc:
             with self.lock:
                 self.error = (
-                    f"Upstox rate limit reached. Background scanner will retry after "
-                    f"about {exc.retry_after} seconds."
+                    f"Upstox rate limit reached. Please wait about {exc.retry_after} seconds "
+                    f"before scanning again."
                 )
                 self.running = False
                 self.finished_at = time.time()
-                self.next_allowed = time.time() + max(60, int(exc.retry_after or 60))
         except Exception as exc:
             with self.lock:
-                self.error = f"Background F&O scanner unavailable: {exc}"
+                self.error = f"F&O scanner unavailable: {exc}"
                 self.running = False
                 self.finished_at = time.time()
-                self.next_allowed = time.time() + 120
 
     def snapshot(self):
         with self.lock:
             return (
-                list(self.results),
-                self.info,
-                self.scan_time,
-                self.error,
-                self.running,
-                self.started_at,
-                self.finished_at,
+                list(self.results), self.info, self.scan_time, self.error,
+                self.running, self.started_at, self.finished_at,
             )
 
 
@@ -2166,130 +1939,99 @@ st.markdown("""
 # ============================================================
 
 def _render_fno_scanner_panel():
-    """Render the manual Top-5 trade scanner in the left sidebar.
-
-    The scan is launched only when the user presses Scan Trades. The actual
-    full-market scan runs in the existing background worker, so the Streamlit
-    request thread is not blocked and the right-side analyzer remains untouched.
-    """
+    """Render the manual TOP-5 NSE F&O scanner without changing the main analyzer."""
     with st.sidebar:
         risk_for_scanner = st.session_state.get("risk_profile", "Balanced")
         scanner_manager = get_fno_scanner_manager()
 
-        st.markdown("### 🔥 TOP 5 POSSIBLE TRADES")
-        st.caption(
-            "Scans the NSE equity F&O universe using the same trade engine, "
-            "quality gates and risk profile as the main analyzer."
+        scanner_now = datetime.now(ZoneInfo("Asia/Kolkata"))
+        scanner_market_open = (
+            scanner_now.weekday() < 5
+            and (scanner_now.hour, scanner_now.minute) >= (9, 15)
+            and (scanner_now.hour, scanner_now.minute) <= (15, 30)
         )
-
-        scan_trades = st.button(
-            "🔎 Scan Trades",
-            key="scan_trades_button",
-            use_container_width=True,
-            type="primary",
-        )
-
-        if scan_trades:
-            scanner_manager.start_if_needed(risk_for_scanner, force=True)
-            st.session_state["scanner_manual_scan_requested"] = True
-            st.rerun()
 
         snapshot = scanner_manager.snapshot()
         if isinstance(snapshot, (tuple, list)) and len(snapshot) >= 7:
-            (
-                alert_results,
-                alert_info,
-                alert_time,
-                alert_error,
-                alert_running,
-                started_at,
-                finished_at,
-            ) = snapshot[:7]
-        elif isinstance(snapshot, (tuple, list)) and len(snapshot) == 5:
-            (
-                alert_results,
-                alert_info,
-                alert_time,
-                alert_error,
-                alert_running,
-            ) = snapshot
+            (alert_results, alert_info, alert_time, alert_error,
+             alert_running, started_at, finished_at) = snapshot[:7]
+        else:
+            alert_results, alert_info, alert_time, alert_error, alert_running = snapshot[:5]
             started_at = 0.0
             finished_at = 0.0
-        else:
-            raise ValueError(
-                f"Unexpected scanner manager snapshot format: {type(snapshot).__name__}"
-            )
-
         alert_results = alert_results[:5]
 
-        if alert_running and st_autorefresh is not None:
-            st_autorefresh(interval=1500, key="fno_manual_scan_poll")
+        st.markdown("### 🔥 TOP 5 POSSIBLE TRADES")
+        st.caption(
+            "Scans the NSE equity F&O universe using the same core trade engine, "
+            "quality gates and selected risk profile as the main analyzer."
+        )
 
-        if alert_running:
+        if not scanner_market_open:
+            scanner_status_cls = "scanner-status-closed"
+            scanner_status_text = "● MARKET CLOSED"
+            scanner_status_detail = f"Last scan: {alert_time + ' IST' if alert_time else 'None'}"
+        elif alert_running:
+            scanner_status_cls = "scanner-status-running"
+            scanner_status_text = "● SCANNING F&O UNIVERSE"
             elapsed = int(max(0, time.time() - started_at)) if started_at else 0
-            st.markdown(
-                f'''<div class="scanner-status scanner-status-running">
-                    <div class="scanner-status-main">
-                        <span class="scanner-dot">●</span>
-                        <span>SCANNING F&O MARKET</span>
-                    </div>
-                    <span class="scanner-updated">{elapsed}s</span>
-                </div>''',
-                unsafe_allow_html=True,
-            )
-            st.caption(
-                "Backend scan is running. The Top 5 results will appear here when complete."
-            )
-
+            scanner_status_detail = f"Searching full NSE F&O universe · {elapsed}s"
         elif alert_error:
-            st.markdown(
-                f'''<div class="scanner-status scanner-status-error">
-                    <div class="scanner-status-main">
-                        <span class="scanner-dot">●</span>
-                        <span>SCAN ERROR</span>
-                    </div>
-                </div>''',
-                unsafe_allow_html=True,
+            scanner_status_cls = "scanner-status-error"
+            scanner_status_text = "● SCAN ERROR"
+            scanner_status_detail = "Press Scan Trades to try again"
+        else:
+            scanner_status_cls = "scanner-status-active"
+            scanner_status_text = "● READY TO SCAN"
+            scanner_status_detail = f"Last scan: {alert_time + ' IST' if alert_time else 'None'}"
+
+        st.markdown(
+            f'''<div class="scanner-status {scanner_status_cls}">
+                <div class="scanner-status-main"><span class="scanner-dot">●</span><span>{scanner_status_text[2:]}</span></div>
+                <span class="scanner-updated">{scanner_status_detail}</span>
+            </div>''',
+            unsafe_allow_html=True,
+        )
+
+        scan_clicked = st.button(
+            "🔎 Scan Trades",
+            key="fno_manual_scan_trades",
+            use_container_width=True,
+            disabled=(not scanner_market_open or alert_running),
+            help="Manually scan the NSE equity F&O universe for up to 5 actionable setups.",
+        )
+
+        if scan_clicked:
+            started, message = scanner_manager.start_scan(risk_for_scanner)
+            if started:
+                st.rerun()
+            else:
+                st.warning(message)
+
+        # Poll only while a user-requested scan is running. This does NOT start
+        # or repeat scans; it only lets the UI display the completed result.
+        if alert_running and st_autorefresh is not None:
+            st_autorefresh(interval=2000, key="fno_manual_scan_poll")
+
+        if alert_info:
+            total, scanned, failed, stage2_count = alert_info
+            st.caption(
+                f"Universe: {total} · Checked: {scanned} · Stage-2: {stage2_count} · Failed: {failed}"
             )
-            st.caption(alert_error)
 
-        elif alert_results:
-            st.markdown(
-                f'''<div class="scanner-status scanner-status-active">
-                    <div class="scanner-status-main">
-                        <span class="scanner-dot">●</span>
-                        <span>TOP {len(alert_results)} TRADES FOUND</span>
-                    </div>
-                    <span class="scanner-updated">{alert_time or ''} IST</span>
-                </div>''',
-                unsafe_allow_html=True,
-            )
-
-            if alert_info:
-                total, scanned, failed, stage2_count = alert_info
-                st.caption(
-                    f"Scanned {scanned}/{total} F&O stocks • "
-                    f"{failed} unavailable • {stage2_count} shortlisted"
-                )
-
+        if alert_results:
             for rank, alert in enumerate(alert_results, start=1):
                 action = alert["Trade"]
                 is_call = "CALL" in action
-                action_class = (
-                    "scanner-call-action" if is_call else "scanner-put-action"
-                )
+                action_class = "scanner-call-action" if is_call else "scanner-put-action"
                 if "SELL" in action:
                     action_class = "scanner-sell-action"
-
-                card_class = (
-                    "scanner-alert-call" if is_call else "scanner-alert-put"
-                )
+                card_class = "scanner-alert-call" if is_call else "scanner-alert-put"
                 if "SELL" in action:
                     card_class += " scanner-alert-sell"
 
                 st.markdown(
-                    f"""
-                    <div class="scanner-alert {card_class}">
+                    f'''<div class="scanner-alert {card_class}">
                       <div class="scanner-rank">#{rank} · {alert['Stock']}</div>
                       <div class="scanner-main">
                         <b>{alert['Trade']} · {alert['Strike']:.0f}</b>
@@ -2300,12 +2042,8 @@ def _render_fno_scanner_panel():
                         <div class="scanner-stat"><span>QUALITY</span><b>{alert['Quality']:.0f}/100</b></div>
                         <div class="scanner-stat"><span>ALIGN</span><b>{alert['Alignment']}/3</b></div>
                       </div>
-                      <div class="scanner-note">
-                        Entry {fmt_price(alert['Entry'])} · SL {fmt_price(alert['SL'])} ·
-                        T1 {fmt_price(alert['Target1'])}
-                      </div>
-                    </div>
-                    """,
+                      <div class="scanner-note">Entry {fmt_price(alert['Entry'])} · SL {fmt_price(alert['SL'])} · T1 {fmt_price(alert['Target1'])}</div>
+                    </div>''',
                     unsafe_allow_html=True,
                 )
 
@@ -2317,24 +2055,17 @@ def _render_fno_scanner_panel():
                     st.session_state["symbol"] = alias_symbol(alert["Stock"])
                     st.rerun()
 
-        else:
-            st.markdown(
-                '''<div class="scanner-status scanner-status-closed">
-                    <div class="scanner-status-main">
-                        <span class="scanner-dot">●</span>
-                        <span>READY TO SCAN</span>
-                    </div>
-                    <span class="scanner-updated">Backend</span>
-                </div>''',
-                unsafe_allow_html=True,
-            )
-            st.caption(
-                "Press Scan Trades to search the full F&O universe. No automatic scan is performed."
-            )
+        elif not alert_running:
+            if alert_error:
+                st.warning(f"Scanner note: {alert_error}")
+            elif scanner_market_open:
+                st.info("Press Scan Trades to search for the current TOP 5 possible trades.")
+            else:
+                st.caption("Scanner is available during NSE market hours (09:15–15:30 IST).")
 
-# Manual F&O scanner lives entirely in the left sidebar.
+
+# F&O background-alert panel intentionally removed.
 # The main analyzer below remains unchanged and continues to use live Upstox data.
-_render_fno_scanner_panel()
 
 analyze = False
 refresh = False
@@ -2343,13 +2074,10 @@ with st.sidebar:
     st.divider()
     st.markdown("## 🔎 Analyze Instrument")
 
-    if "analyzer_search_value" not in st.session_state:
-        st.session_state["analyzer_search_value"] = ""
-
     symbol_input = st.text_input(
-        "Stock / Index",
+        "NSE Stock / Index",
+        value=st.session_state.get("symbol", "KOTAKBANK"),
         placeholder="NIFTY / BANKNIFTY / HDFCBANK",
-        key="analyzer_search_value",
     )
 
     risk_profile = st.selectbox(
@@ -2359,27 +2087,10 @@ with st.sidebar:
         key="risk_profile",
     )
 
-    beginner_mode = st.checkbox(
-        "🛡️ Beginner Safety + Explainability",
-        value=True,
-        key="beginner_mode",
-        help="Adds stricter entry filters, blocks option-selling strategies from being selected, and shows a plain-English trade checklist. It does not guarantee profit or remove market risk.",
-    )
-
-    if beginner_mode:
-        st.caption("🛡️ Beginner Safety ON · BUY setups only · stronger confirmation required")
-
-    def _analyze_live_market_callback():
-        entered = str(st.session_state.get("analyzer_search_value", "")).strip()
-        if entered:
-            st.session_state["symbol"] = alias_symbol(entered)
-        st.session_state["analyzer_search_value"] = ""
-
     analyze = st.button(
         "Analyze Live Market",
         type="primary",
         use_container_width=True,
-        on_click=_analyze_live_market_callback,
     )
 
     refresh = st.button(
@@ -2400,12 +2111,12 @@ with st.sidebar:
     st.caption("No simulated prices are used.")
 
 if analyze:
+    st.session_state["symbol"] = alias_symbol(symbol_input)
     st.rerun()
 
 if refresh:
     st.cache_data.clear()
     st.rerun()
-
 
 # ============================================================
 # LIVE ANALYSIS
@@ -2563,74 +2274,8 @@ else:
     available = [(safe_float(p.get("score"), 0), action, p) for action, p in strategy_plans.items() if p]
     best_plan = max(available, key=lambda x: x[0])[2] if available else None
 
-# ============================================================
-# BEGINNER SAFETY + EXPLAINABILITY LAYER
-# ============================================================
-# This layer sits above the existing engine. It does not alter the underlying
-# indicators, option-chain calculations or Upstox data. When enabled, it adds
-# stricter execution gates intended to make the primary output easier to use
-# responsibly as a beginner decision-support tool.
-beginner_mode = bool(st.session_state.get("beginner_mode", True))
-beginner_safety_reasons = []
-beginner_checks = []
-
-def _add_beginner_check(name, status, detail):
-    beginner_checks.append({"name": name, "status": status, "detail": detail})
-
-if beginner_mode:
-    # Beginner mode intentionally selects BUY setups only. Option selling can
-    # involve materially different margin and tail-risk characteristics and is
-    # therefore kept visible in the engine result but cannot become the primary
-    # beginner execution decision.
-    if decision in {"CALL SELL", "PUT SELL"}:
-        beginner_safety_reasons.append("Option-selling strategy is disabled in Beginner Safety mode")
-        decision = "NO TRADE"
-        best_plan = None
-
-    candidate = strategy_plans.get(decision) if decision in {"CALL BUY", "PUT BUY"} else None
-    if candidate:
-        score = safe_float(candidate.get("score"), 0)
-        pop = safe_float(candidate.get("pop"), np.nan)
-        alignment = int(candidate.get("alignment", 0) or 0)
-        rr1 = safe_float(candidate.get("rr1"), 0)
-        delta = abs(safe_float(candidate.get("delta"), np.nan))
-        spread_pct = safe_float(candidate.get("spread_pct"), 999)
-        volume = safe_float(candidate.get("volume"), 0)
-        iv = safe_float(candidate.get("iv"), np.nan)
-        hard_fail = candidate.get("fail_reasons") or []
-        trigger_hit = bool(candidate.get("trigger_hit"))
-        candle_confirmed = bool(candidate.get("candle_confirmed"))
-        volume_confirmed = bool(candidate.get("volume_confirmed"))
-
-        _add_beginner_check("Quality score", "pass" if score >= 70 else "fail", f"{score:.0f}/100 · beginner threshold 70")
-        _add_beginner_check("Model PoP", "pass" if np.isfinite(pop) and pop >= 60 else "fail", f"{pop:.1f}% · beginner threshold 60%" if np.isfinite(pop) else "Unavailable")
-        _add_beginner_check("Timeframe alignment", "pass" if alignment >= 2 else "fail", f"{alignment}/3 timeframes aligned")
-        _add_beginner_check("Entry confirmation", "pass" if trigger_hit and candle_confirmed and volume_confirmed else "wait", "Breakout + candle + volume confirmation required")
-        _add_beginner_check("Risk / reward", "pass" if rr1 >= 1.0 else "fail", f"T1 R:R {rr1:.2f} · minimum 1.00")
-        _add_beginner_check("Option liquidity", "pass" if spread_pct <= 2 and volume >= 1000 else "fail", f"Spread {spread_pct:.1f}% · Volume {volume:,.0f}")
-        _add_beginner_check("Delta", "pass" if np.isfinite(delta) and 0.35 <= delta <= 0.70 else "fail", f"|Delta| {delta:.2f} · preferred 0.35–0.70" if np.isfinite(delta) else "Unavailable")
-        _add_beginner_check("Existing engine gates", "pass" if not hard_fail else "fail", "All hard checks passed" if not hard_fail else "; ".join(hard_fail))
-
-        safety_fail = (
-            score < 70 or not np.isfinite(pop) or pop < 60 or alignment < 2 or
-            not (trigger_hit and candle_confirmed and volume_confirmed) or
-            rr1 < 1.0 or spread_pct > 2 or volume < 1000 or
-            not np.isfinite(delta) or delta < 0.35 or delta > 0.70 or
-            bool(hard_fail)
-        )
-        if safety_fail:
-            beginner_safety_reasons.append("One or more beginner safety checks did not pass")
-            decision = "NO TRADE"
-            best_plan = None
-
-    # If no BUY candidate survived, make the reason explicit rather than
-    # presenting the best SELL candidate as a beginner trade.
-    if decision == "NO TRADE" and not beginner_checks:
-        _add_beginner_check("Trade candidate", "fail", "No BUY setup passed the existing engine gates")
-
-# The decision remains binary at the primary UI level: an executable setup or
-# NO TRADE. Beginner Safety adds an additional layer; it never guarantees a
-# winning trade.
+# The decision is intentionally binary at the action level: one of four trades
+# or NO TRADE. There are no WAIT/WATCHLIST states in the primary UI.
 
 # Forward-test logging is intentionally backend-only. It does not change the UI.
 if decision != "NO TRADE" and best_plan:
@@ -2733,14 +2378,6 @@ for title, value, note, cls in metric_html:
 metrics += "</div>"
 st.markdown(metrics, unsafe_allow_html=True)
 
-if beginner_mode:
-    st.markdown("""
-    <div class="fo-safety-banner">
-      <div><b>🛡️ BEGINNER SAFETY + EXPLAINABILITY IS ON</b><span>The app is using a stricter execution filter, BUY setups only, stronger confirmation and a plain-English checklist. This is decision support — not a guarantee of profit.</span></div>
-      <div class="fo-safety-badge">SAFETY ON</div>
-    </div>
-    """, unsafe_allow_html=True)
-
 st.markdown("<div class='fo-section'>TRADE DECISION</div>", unsafe_allow_html=True)
 trend_name = overall_trend(tf5, tf30, daily_tech)[0].upper()
 decision_class = "call" if "CALL" in decision else "put" if "PUT" in decision else "neutral"
@@ -2751,14 +2388,12 @@ else:
     action_pop = np.nan; action_score = max([safe_float(p.get("score"),0) for p in strategy_plans.values() if p] or [0]); contract = "No executable setup"
 
 decision_note = {
-    "CALL BUY":"Directional upside setup — use only after the displayed confirmation and safety checks are satisfied.",
+    "CALL BUY":"Directional upside setup — execute only when the displayed confirmation conditions are satisfied.",
     "CALL SELL":"Premium-selling setup — requires price to remain below resistance and pass the seller risk gates.",
-    "PUT BUY":"Directional downside setup — use only after the displayed confirmation and safety checks are satisfied.",
+    "PUT BUY":"Directional downside setup — execute only when the displayed confirmation conditions are satisfied.",
     "PUT SELL":"Premium-selling setup — requires price to remain above support and pass the seller risk gates.",
-    "NO TRADE":"No executable setup currently passes the active quality and safety gates."
+    "NO TRADE":"No strategy currently meets the minimum quality, alignment, liquidity and PoP gates."
 }[decision]
-if beginner_mode and decision == "NO TRADE" and beginner_safety_reasons:
-    decision_note = "Beginner Safety stopped the setup: " + "; ".join(beginner_safety_reasons) + "."
 
 st.markdown(f"""
 <div class="fo-decision {decision_class}">
@@ -2774,37 +2409,6 @@ st.markdown(f"""
   </div>
 </div>
 """, unsafe_allow_html=True)
-
-# ============================================================
-# BEGINNER EXPLAINABILITY / TRADE CHECK
-# ============================================================
-if beginner_mode:
-    st.markdown("<div class='fo-section'>BEGINNER TRADE CHECK</div>", unsafe_allow_html=True)
-    if decision != "NO TRADE" and best_plan:
-        risk_per_unit = max(safe_float(best_plan.get("entry"), 0) - safe_float(best_plan.get("sl"), 0), 0)
-        max_loss = risk_per_unit * safe_float(lot_size, 0)
-        reward_t1 = max(safe_float(best_plan.get("target1"), 0) - safe_float(best_plan.get("entry"), 0), 0) * safe_float(lot_size, 0)
-        reward_t2 = max(safe_float(best_plan.get("target2"), 0) - safe_float(best_plan.get("entry"), 0), 0) * safe_float(lot_size, 0)
-        checks_html = "<div class='fo-explain-grid'>"
-        for item in beginner_checks:
-            label = {"pass":"PASS","wait":"WAIT","fail":"STOP"}.get(item["status"], item["status"].upper())
-            checks_html += f"<div class='fo-explain-card {item['status']}'><div class='fo-explain-top'><div class='fo-explain-name'>{item['name']}</div><div class='fo-explain-status'>{label}</div></div><div class='fo-explain-detail'>{item['detail']}</div></div>"
-        checks_html += "</div>"
-        st.markdown(checks_html, unsafe_allow_html=True)
-        st.markdown(f"""<div class='fo-risk-box'>
-          <div class='fo-risk-cell'><span>PLANNED MAX LOSS · 1 LOT</span><b>₹{max_loss:,.0f}</b></div>
-          <div class='fo-risk-cell'><span>TARGET 1 · 1 LOT</span><b>₹{reward_t1:,.0f}</b></div>
-          <div class='fo-risk-cell'><span>TARGET 2 · 1 LOT</span><b>₹{reward_t2:,.0f}</b></div>
-        </div>""", unsafe_allow_html=True)
-        st.markdown("<div class='fo-beginner-note'>⚠️ Planned loss is based on the displayed entry and stop-loss for one lot. Real execution can differ because of slippage, spread, taxes, brokerage and fast market movement. Never treat the model PoP as a guarantee.</div>", unsafe_allow_html=True)
-    else:
-        checks_html = "<div class='fo-explain-grid'>"
-        for item in beginner_checks:
-            label = {"pass":"PASS","wait":"WAIT","fail":"STOP"}.get(item["status"], item["status"].upper())
-            checks_html += f"<div class='fo-explain-card {item['status']}'><div class='fo-explain-top'><div class='fo-explain-name'>{item['name']}</div><div class='fo-explain-status'>{label}</div></div><div class='fo-explain-detail'>{item['detail']}</div></div>"
-        checks_html += "</div>"
-        st.markdown(checks_html, unsafe_allow_html=True)
-        st.markdown("<div class='fo-beginner-note'>⛔ No trade is displayed because the setup did not satisfy the beginner safety requirements. Waiting is a valid outcome.</div>", unsafe_allow_html=True)
 
 st.markdown("<div class='fo-section'>ENGINE RESULT · ALL 4 STRATEGIES</div>", unsafe_allow_html=True)
 
@@ -2959,17 +2563,6 @@ section[data-testid="stSidebar"] .stCaption { color:#64748b !important; }
 .tab-danger { background:#ffe4e6 !important; border-color:#fb7185 !important; color:#9f1239 !important; }
 </style>""", unsafe_allow_html=True)
 
-st.markdown("""<style>
-.fo-safety-banner{display:flex;align-items:center;justify-content:space-between;gap:14px;background:linear-gradient(135deg,#eff6ff,#f8fbff);border:1px solid #93c5fd;border-left:6px solid #2563eb;border-radius:14px;padding:14px 16px;margin:12px 0 16px;}
-.fo-safety-banner b{font-size:16px;color:#12395b;}.fo-safety-banner span{font-size:13px;color:#52657a;display:block;margin-top:3px;line-height:1.45;}.fo-safety-badge{background:#dbeafe;color:#1d4ed8;border:1px solid #93c5fd;padding:7px 10px;border-radius:20px;font-size:12px;font-weight:900;white-space:nowrap;}
-.fo-explain-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px;}
-.fo-explain-card{background:#fff;border:1px solid #e7ebf0;border-radius:12px;padding:12px 13px;}.fo-explain-card.pass{border-left:5px solid #16a34a;background:#f7fff9;}.fo-explain-card.wait{border-left:5px solid #f59e0b;background:#fffdf5;}.fo-explain-card.fail{border-left:5px solid #dc2626;background:#fff8f8;}
-.fo-explain-top{display:flex;justify-content:space-between;gap:8px;align-items:center;}.fo-explain-name{font-size:13px;font-weight:900;color:#344054;}.fo-explain-status{font-size:11px;font-weight:900;letter-spacing:.5px;}.fo-explain-card.pass .fo-explain-status{color:#087f3e}.fo-explain-card.wait .fo-explain-status{color:#b45309}.fo-explain-card.fail .fo-explain-status{color:#c81e3a}.fo-explain-detail{font-size:12px;color:#667085;margin-top:6px;line-height:1.4;}
-.fo-risk-box{display:grid;grid-template-columns:repeat(3,1fr);gap:10px;background:#fff;border:1px solid #e7ebf0;border-radius:14px;padding:13px;margin-top:12px;}.fo-risk-cell{background:#f8fafc;border-radius:10px;padding:10px;text-align:center;}.fo-risk-cell span{display:block;font-size:11px;font-weight:900;color:#98a2b3;letter-spacing:.6px;}.fo-risk-cell b{display:block;font-size:18px;color:#182230;margin-top:4px;}
-.fo-beginner-note{background:#fffbeb;border:1px solid #fbbf24;border-radius:12px;padding:12px 14px;color:#92400e;font-size:13px;line-height:1.5;margin-top:10px;}
-@media(max-width:720px){.fo-explain-grid,.fo-risk-box{grid-template-columns:1fr}.fo-safety-banner{align-items:flex-start;flex-direction:column}.fo-safety-badge{align-self:flex-start}}
-</style>""", unsafe_allow_html=True)
-
 engine_html = "<div class='fo-engine fo-engine-grid'>"
 for action in ["CALL BUY","CALL SELL","PUT BUY","PUT SELL"]:
     plan = strategy_plans[action]
@@ -3079,172 +2672,5 @@ else:
     st.markdown("<div class='fo-why'><div class='fo-why-line' style='color:#98a2b3;text-align:center;'>No option is currently selected for execution.</div></div>",unsafe_allow_html=True)
 
 st.markdown(f"""
-<div class="fo-footer">Live Upstox snapshot · Expiry {selected_expiry} · Updated {now_ist.strftime('%d-%b-%Y %H:%M:%S IST')}<br>Beginner Safety: {'ON' if beginner_mode else 'OFF'} · PoP is a model input from the Upstox option chain; it is not a guaranteed win probability. Option selling can carry substantial risk.</div>
+<div class="fo-footer">Live Upstox snapshot · Expiry {selected_expiry} · Updated {now_ist.strftime('%d-%b-%Y %H:%M:%S IST')}<br>PoP is a model input from the Upstox option chain; it is not a guaranteed win probability. Option selling can carry substantial risk.</div>
 """,unsafe_allow_html=True)
-
-# ============================================================
-# RESET RIGHT-SIDE ANALYZER SCROLL AFTER EVERY ANALYZE CLICK
-# ============================================================
-# IMPORTANT: This is deliberately installed on every Streamlit rerun, but the
-# browser-side controller itself is installed only once.  The controller hooks
-# the actual "Analyze Live Market" button and therefore survives repeated
-# searches/reruns instead of depending on a one-shot session_state flag.
-scroll_js = r"""
-<script>
-(() => {
-    if (window.__FO_PRO_SCROLL_CONTROLLER__) return;
-    window.__FO_PRO_SCROLL_CONTROLLER__ = true;
-
-    const BUTTON_TEXT = 'analyze live market';
-
-    function mainSurfaces() {
-        const selectors = [
-            '[data-testid="stMainBlockContainer"]',
-            '[data-testid="stMain"]',
-            'section[data-testid="stMain"]',
-            'section.main',
-            '[data-testid="stAppViewContainer"]',
-            '.main'
-        ];
-        const result = [];
-        const seen = new Set();
-        for (const selector of selectors) {
-            try {
-                document.querySelectorAll(selector).forEach(el => {
-                    if (!seen.has(el)) {
-                        seen.add(el);
-                        result.push(el);
-                    }
-                });
-            } catch (_) {}
-        }
-        return result;
-    }
-
-    function reset(el) {
-        if (!el) return;
-        try {
-            el.scrollTop = 0;
-            el.scrollLeft = 0;
-        } catch (_) {}
-    }
-
-    function resetScrollableDescendants(root) {
-        if (!root) return;
-        try {
-            const nodes = root.querySelectorAll('*');
-            for (const el of nodes) {
-                const cs = getComputedStyle(el);
-                if (el.scrollHeight > el.clientHeight + 2 &&
-                    (cs.overflowY === 'auto' || cs.overflowY === 'scroll' || cs.overflowY === 'overlay')) {
-                    reset(el);
-                }
-            }
-        } catch (_) {}
-    }
-
-    function scrollRightPaneTop() {
-        try {
-            // Browser/document scroll.
-            reset(document.scrollingElement);
-            reset(document.documentElement);
-            reset(document.body);
-            window.scrollTo(0, 0);
-
-            // Streamlit main/right-side content surfaces.
-            for (const surface of mainSurfaces()) {
-                reset(surface);
-                resetScrollableDescendants(surface);
-            }
-
-            // The analyzer itself and all of its scrollable ancestors.
-            const hero = document.querySelector('.fo-hero');
-            if (hero) {
-                reset(hero);
-                let parent = hero.parentElement;
-                while (parent) {
-                    try {
-                        const cs = getComputedStyle(parent);
-                        if (parent.scrollHeight > parent.clientHeight + 2 ||
-                            cs.overflowY === 'auto' || cs.overflowY === 'scroll' || cs.overflowY === 'overlay') {
-                            reset(parent);
-                        }
-                    } catch (_) {}
-                    parent = parent.parentElement;
-                }
-                try {
-                    hero.scrollIntoView({behavior: 'auto', block: 'start', inline: 'nearest'});
-                } catch (_) {}
-            }
-        } catch (_) {}
-    }
-
-    function resetAfterAnalyzeClick() {
-        // One immediate reset plus repeated resets while Streamlit performs
-        // the rerun and React reconstructs the analyzer DOM.
-        scrollRightPaneTop();
-        [0, 20, 50, 100, 200, 350, 500, 750, 1000, 1500, 2000].forEach(ms => {
-            setTimeout(scrollRightPaneTop, ms);
-        });
-    }
-
-    function isAnalyzeButton(button) {
-        if (!button) return false;
-        const text = (button.innerText || button.textContent || '')
-            .replace(/\s+/g, ' ')
-            .trim()
-            .toLowerCase();
-        return text.includes(BUTTON_TEXT);
-    }
-
-    function attachToAnalyzeButtons(root) {
-        const scope = root || document;
-        let buttons = [];
-        try {
-            if (scope.matches && scope.matches('button')) buttons.push(scope);
-            if (scope.querySelectorAll) {
-                buttons = buttons.concat(Array.from(scope.querySelectorAll('button')));
-            }
-        } catch (_) {}
-
-        for (const button of buttons) {
-            if (!isAnalyzeButton(button)) continue;
-            if (button.__FO_PRO_SCROLL_HANDLER__) continue;
-
-            const handler = () => resetAfterAnalyzeClick();
-            button.addEventListener('click', handler, true);
-            button.__FO_PRO_SCROLL_HANDLER__ = handler;
-        }
-    }
-
-    // Attach now if the button already exists.
-    attachToAnalyzeButtons(document);
-
-    // Streamlit replaces DOM nodes during every rerun.  Keep watching for the
-    // newly-created Analyze button and attach the same click handler to it.
-    if (window.MutationObserver) {
-        const observer = new MutationObserver(mutations => {
-            for (const mutation of mutations) {
-                for (const node of mutation.addedNodes) {
-                    if (node.nodeType === 1) attachToAnalyzeButtons(node);
-                }
-            }
-        });
-        observer.observe(document.body, {childList: true, subtree: true});
-    }
-
-    // Safety net: if a Streamlit version replaces the button without a normal
-    // mutation sequence, periodically look for it and attach the handler.
-    setInterval(() => attachToAnalyzeButtons(document), 1000);
-})();
-</script>
-"""
-
-if hasattr(st, "html"):
-    try:
-        st.html(scroll_js, unsafe_allow_javascript=True)
-    except TypeError:
-        st.markdown('<div id="fo-analysis-scroll-controller"></div>', unsafe_allow_html=True)
-else:
-    st.markdown('<div id="fo-analysis-scroll-controller"></div>', unsafe_allow_html=True)
-
