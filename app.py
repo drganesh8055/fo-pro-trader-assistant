@@ -19,7 +19,7 @@ except Exception:
 # ============================================================
 # FO PRO TRADER ASSISTANT — LIVE UPSTOX VERSION
 # Restored fuller trade-plan design:
-# PoP, Entry, SL, Target 1, Target 2, Exit, Delta, IV,
+# PoP, Entry, SL, Target 1-4, Exit, Delta, IV,
 # PCR, OI support/resistance, live option chain and analysis.
 # ============================================================
 
@@ -1296,18 +1296,28 @@ def adaptive_buy_levels(entry, side, spot, support, resistance, tf5, delta, iv, 
 
     t1_risk = premium_risk * {"Conservative": 1.15, "Balanced": 1.30, "Aggressive": 1.45}.get(risk_profile, 1.30)
     t2_risk = premium_risk * {"Conservative": 1.70, "Balanced": 2.00, "Aggressive": 2.30}.get(risk_profile, 2.00)
+    t3_risk = premium_risk * {"Conservative": 2.30, "Balanced": 2.70, "Aggressive": 3.10}.get(risk_profile, 2.70)
+    t4_risk = premium_risk * {"Conservative": 2.85, "Balanced": 3.40, "Aggressive": 4.00}.get(risk_profile, 3.40)
     target1 = entry + t1_risk
     target2 = entry + t2_risk
+    target3 = entry + t3_risk
+    target4 = entry + t4_risk
 
     # Do not advertise an impossible target if the underlying barrier is extremely close.
     barrier = resistance if side == "CE" else support
     room = max((barrier - spot) if side == "CE" else (spot - barrier), 0)
     if room > 0 and room < atr * 0.80:
         target2 = min(target2, entry + premium_risk * 1.55)
+        target3 = min(target3, entry + premium_risk * 1.90)
+        target4 = min(target4, entry + premium_risk * 2.25)
     if target2 <= target1:
         target2 = target1 + max(entry * 0.08, premium_risk * 0.35)
+    if target3 <= target2:
+        target3 = target2 + max(entry * 0.08, premium_risk * 0.35)
+    if target4 <= target3:
+        target4 = target3 + max(entry * 0.08, premium_risk * 0.35)
 
-    return round(sl, 2), round(target1, 2), round(target2, 2)
+    return round(sl, 2), round(target1, 2), round(target2, 2), round(target3, 2), round(target4, 2)
 
 
 def build_plan(row, side, spot, support, resistance, pcr, tf5, tf30, daily,
@@ -1323,10 +1333,12 @@ def build_plan(row, side, spot, support, resistance, pcr, tf5, tf30, daily,
     if not np.isfinite(entry) or entry <= 0:
         return None
 
-    sl, target1, target2 = adaptive_buy_levels(entry, side, spot, support, resistance,
-                                                tf5, scored["delta"], scored["iv"], risk_profile)
+    sl, target1, target2, target3, target4 = adaptive_buy_levels(entry, side, spot, support, resistance,
+                                                                    tf5, scored["delta"], scored["iv"], risk_profile)
     rr1 = (target1 - entry) / max(entry - sl, 0.01)
     rr2 = (target2 - entry) / max(entry - sl, 0.01)
+    rr3 = (target3 - entry) / max(entry - sl, 0.01)
+    rr4 = (target4 - entry) / max(entry - sl, 0.01)
 
     atr = max(tf5.get("atr", spot * 0.01), spot * 0.001)
     trigger_buffer = max(atr * 0.12, spot * 0.001)
@@ -1412,9 +1424,9 @@ def build_plan(row, side, spot, support, resistance, pcr, tf5, tf30, daily,
 
     return {
         "side": side, "strike": float(row["Strike"]), "entry": float(entry),
-        "sl": sl, "target1": target1, "target2": target2,
+        "sl": sl, "target1": target1, "target2": target2, "target3": target3, "target4": target4,
         "pop": scored["pop"], "delta": scored["delta"], "iv": scored["iv"],
-        "score": adjusted_score, "rr1": rr1, "rr2": rr2,
+        "score": adjusted_score, "rr1": rr1, "rr2": rr2, "rr3": rr3, "rr4": rr4,
         "trigger": trigger, "trigger_level": trigger_level, "trigger_hit": trigger_hit,
         "candle_confirmed": candle_confirmed, "volume_confirmed": volume_confirmed,
         "readiness": readiness, "fail_reasons": hard_fail,
@@ -1500,11 +1512,19 @@ def build_sell_plan(row, side, spot, support, resistance, pcr, tf5, tf30, daily,
     sl = round(entry + premium_risk, 2)
     target1 = round(max(entry - premium_risk * 0.90, entry * 0.45), 2)
     target2 = round(max(entry - premium_risk * 1.35, entry * 0.25), 2)
+    target3 = round(max(entry - premium_risk * 1.80, entry * 0.15), 2)
+    target4 = round(max(entry - premium_risk * 2.25, entry * 0.05), 2)
     if target2 >= target1:
         target2 = round(max(entry * 0.30, target1 - entry * 0.10), 2)
+    if target3 >= target2:
+        target3 = round(max(entry * 0.15, target2 - entry * 0.10), 2)
+    if target4 >= target3:
+        target4 = round(max(entry * 0.05, target3 - entry * 0.10), 2)
 
     rr1 = (entry - target1) / max(sl - entry, 0.01)
     rr2 = (entry - target2) / max(sl - entry, 0.01)
+    rr3 = (entry - target3) / max(sl - entry, 0.01)
+    rr4 = (entry - target4) / max(sl - entry, 0.01)
 
     # Seller-specific quality penalties. These are the main calibration change:
     # a setup with a near wall or poor T1 reward cannot remain in the 90s.
@@ -1573,10 +1593,10 @@ def build_sell_plan(row, side, spot, support, resistance, pcr, tf5, tf30, daily,
     return {
         "side": side, "strike": float(row["Strike"]),
         "action": "CALL SELL" if side == "CE" else "PUT SELL",
-        "entry": entry, "sl": sl, "target1": target1, "target2": target2,
+        "entry": entry, "sl": sl, "target1": target1, "target2": target2, "target3": target3, "target4": target4,
         "pop": short_pop, "long_pop": long_pop, "delta": delta, "iv": iv,
         "oi_behavior": oi_behavior, "gamma": gamma, "theta": theta, "vega": vega,
-        "score": score, "rr1": rr1, "rr2": rr2,
+        "score": score, "rr1": rr1, "rr2": rr2, "rr3": rr3, "rr4": rr4,
         "trigger": trigger, "trigger_level": resistance if side == "CE" else support,
         "trigger_hit": not hard_fail, "fail_reasons": hard_fail,
         "oi": oi, "chg_oi": chg_oi, "volume": volume, "spread_pct": spread_pct,
@@ -1905,6 +1925,8 @@ def _scanner_plan_for_candidate(candidate, symbol, expiry, risk_profile):
         "SL": safe_float(plan.get("sl")),
         "Target1": safe_float(plan.get("target1")),
         "Target2": safe_float(plan.get("target2")),
+        "Target3": safe_float(plan.get("target3")),
+        "Target4": safe_float(plan.get("target4")),
         "Exit": plan.get("exit", ""),
         "Delta": safe_float(plan.get("delta")),
         "IV": safe_float(plan.get("iv")),
@@ -2678,7 +2700,7 @@ st.markdown("""
 .fo-decision-note{font-size:14px;color:#667085;margin-top:6px;}.fo-score-ring{min-width:100px;text-align:center;border-radius:15px;background:rgba(255,255,255,.72);border:1px solid rgba(0,0,0,.06);padding:11px 13px;}.fo-score-ring b{display:block;font-size:28px;color:#182230;line-height:1;}.fo-score-ring span{font-size:12px;color:#98a2b3;font-weight:800;letter-spacing:.6px;}
 .fo-decision-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:9px;margin-top:17px;}.fo-decision-cell{background:rgba(255,255,255,.72);border:1px solid rgba(16,42,67,.07);border-radius:11px;padding:11px;text-align:center;}.fo-decision-cell span{display:block;font-size:12px;font-weight:900;color:#98a2b3;letter-spacing:.7px;}.fo-decision-cell b{display:block;font-size:18px;color:#182230;margin-top:5px;}
 .fo-engine{display:grid;grid-template-columns:repeat(4,1fr);gap:10px;}.fo-engine-card{background:#fff;border:1px solid #e7ebf0;border-radius:14px;padding:14px;box-shadow:0 3px 12px rgba(16,42,67,.03);position:relative;overflow:hidden;}.fo-engine-card.selected{border-color:#8fcfa1;box-shadow:0 5px 18px rgba(20,122,61,.09);}.fo-engine-card.rejected{opacity:.82;}.fo-engine-top{display:flex;justify-content:space-between;gap:8px;align-items:center;}.fo-engine-action{font-size:15px;font-weight:900;color:#182230;}.fo-engine-status{font-size:11px;font-weight:900;padding:5px 7px;border-radius:10px;letter-spacing:.5px;background:#f2f4f7;color:#667085;}.fo-engine-card.selected{background:#eaf8ef;border-color:#8fcfa1;box-shadow:0 5px 18px rgba(20,122,61,.12);}.fo-engine-card.selected .fo-engine-status{background:#16a34a;color:#fff;}.fo-engine-card.rejected{background:#fff0f1;border-color:#f2c5c8;opacity:1;}.fo-engine-card.rejected .fo-engine-status{background:#dc2626;color:#fff;}.fo-engine-contract{font-size:25px;font-weight:900;margin:10px 0 12px;color:#182230;}.fo-engine-stats{display:grid;grid-template-columns:1fr 1fr;gap:7px;}.fo-engine-stats div{background:#f8fafc;border-radius:9px;padding:8px;}.fo-engine-stats span{display:block;font-size:11px;color:#98a2b3;font-weight:900;}.fo-engine-stats b{display:block;font-size:16px;margin-top:3px;color:#182230;}.fo-engine-reason{font-size:12px;color:#98a2b3;line-height:1.45;margin-top:10px;min-height:26px;}
-.fo-plan-head{display:flex;align-items:center;justify-content:space-between;gap:14px;background:#fff;border:1px solid #e7ebf0;border-radius:16px 16px 0 0;padding:17px 19px;}.fo-plan-action{font-size:13px;font-weight:900;color:#98a2b3;letter-spacing:.8px;}.fo-plan-contract{font-size:25px;font-weight:900;color:#182230;margin-top:3px;}.fo-plan-pop{font-size:24px;font-weight:900;color:#147a3d;white-space:nowrap;}.fo-levels{display:grid;grid-template-columns:repeat(5,1fr);gap:9px;margin-top:9px;}.fo-level{background:#fff;border:1px solid #e7ebf0;border-radius:13px;padding:14px;min-height:86px;}.fo-level span{display:block;font-size:12px;color:#98a2b3;font-weight:900;letter-spacing:.6px;}.fo-level b{display:block;font-size:21px;color:#182230;margin-top:7px;}.fo-level small{display:block;font-size:12px;color:#98a2b3;margin-top:4px;}.fo-level.entry{border-top:3px solid #3b82f6;}.fo-level.sl{border-top:3px solid #dc2626;}.fo-level.t1{border-top:3px solid #16a34a;}.fo-level.t2{border-top:3px solid #0f766e;}.fo-level.greeks{border-top:3px solid #7c3aed;}.fo-level-pct{font-weight:800!important;font-size:14px!important;}.fo-level-lot{font-weight:900!important;font-size:14px!important;margin-top:2px!important;}.fo-level.entry .fo-level-pct,.fo-level.entry .fo-level-lot{color:#475467;}.fo-level.sl .fo-level-pct,.fo-level.sl .fo-level-lot{color:#b4232f;}.fo-level.t1 .fo-level-pct,.fo-level.t1 .fo-level-lot,.fo-level.t2 .fo-level-pct,.fo-level.t2 .fo-level-lot{color:#147a3d;}
+.fo-plan-head{display:flex;align-items:center;justify-content:space-between;gap:14px;background:#fff;border:1px solid #e7ebf0;border-radius:16px 16px 0 0;padding:17px 19px;}.fo-plan-action{font-size:13px;font-weight:900;color:#98a2b3;letter-spacing:.8px;}.fo-plan-contract{font-size:25px;font-weight:900;color:#182230;margin-top:3px;}.fo-plan-pop{font-size:24px;font-weight:900;color:#147a3d;white-space:nowrap;}.fo-levels{display:grid;grid-template-columns:repeat(7,minmax(0,1fr));gap:7px;margin-top:9px;}.fo-level{background:#fff;border:1px solid #e7ebf0;border-radius:13px;padding:11px 9px;min-height:94px;min-width:0;box-sizing:border-box;overflow:hidden;}.fo-level span{display:block;font-size:11px;color:#98a2b3;font-weight:900;letter-spacing:.45px;white-space:nowrap;}.fo-level b{display:block;font-size:18px;color:#182230;margin-top:7px;white-space:nowrap;}.fo-level small{display:block;font-size:11px;color:#98a2b3;margin-top:4px;line-height:1.25;}.fo-level.entry{border-top:3px solid #3b82f6;}.fo-level.sl{border-top:3px solid #dc2626;}.fo-level.t1{border-top:3px solid #16a34a;}.fo-level.t2{border-top:3px solid #0f766e;}.fo-level.t3{border-top:3px solid #059669;}.fo-level.t4{border-top:3px solid #047857;}.fo-level.greeks{border-top:3px solid #7c3aed;}.fo-level-pct{font-weight:800!important;font-size:13px!important;}.fo-level-lot{font-weight:900!important;font-size:13px!important;margin-top:2px!important;}.fo-level.entry .fo-level-pct,.fo-level.entry .fo-level-lot{color:#475467;}.fo-level.sl .fo-level-pct,.fo-level.sl .fo-level-lot{color:#b4232f;}.fo-level.t1 .fo-level-pct,.fo-level.t1 .fo-level-lot,.fo-level.t2 .fo-level-pct,.fo-level.t2 .fo-level-lot,.fo-level.t3 .fo-level-pct,.fo-level.t3 .fo-level-lot,.fo-level.t4 .fo-level-pct,.fo-level.t4 .fo-level-lot{color:#147a3d;}
 .fo-exit{background:#fff;border:1px solid #e7ebf0;border-radius:13px;padding:13px 16px;margin-top:9px;display:flex;gap:12px;align-items:flex-start;}.fo-exit-icon{font-size:21px;}.fo-exit span{display:block;font-size:12px;color:#98a2b3;font-weight:900;letter-spacing:.6px;}.fo-exit b{display:block;font-size:14px;color:#344054;line-height:1.5;margin-top:3px;}
 .fo-sr{display:grid;grid-template-columns:1fr 1.2fr 1fr;border:1px solid #e7ebf0;border-radius:16px;overflow:hidden;background:#fff;box-shadow:0 3px 12px rgba(16,42,67,.03);}.fo-sr-side{padding:20px;text-align:center;display:flex;flex-direction:column;justify-content:center;}.fo-sr-side.support{background:#f4fbf6;}.fo-sr-side.resistance{background:#fff6f6;}.fo-sr-side span{font-size:12px;font-weight:900;letter-spacing:.7px;}.fo-sr-side.support span{color:#147a3d;}.fo-sr-side.resistance span{color:#b4232f;}.fo-sr-side b{font-size:28px;margin-top:7px;color:#182230;}.fo-sr-side small{font-size:13px;color:#98a2b3;margin-top:4px;}.fo-sr-mid{display:flex;align-items:center;justify-content:center;flex-direction:column;gap:8px;border-left:1px dashed #dfe3e8;border-right:1px dashed #dfe3e8;padding:15px;}.fo-sr-mid span{font-size:12px;color:#98a2b3;font-weight:800;}.fo-current{font-size:21px;font-weight:900;background:#f5f7f9;border:1px solid #e5e7eb;border-radius:22px;padding:8px 15px;color:#182230;}
 .fo-why{background:#fff;border:1px solid #e7ebf0;border-radius:15px;padding:6px 17px;box-shadow:0 3px 12px rgba(16,42,67,.03);}.fo-why-line{padding:10px 2px;border-bottom:1px solid #eef0f2;font-size:14px;color:#344054;line-height:1.5;}.fo-why-line:last-child{border-bottom:0;}
@@ -2692,8 +2714,8 @@ st.markdown("""
 
 /* Hide Streamlit's dataframe chrome when we no longer use it for the engine panel. */
 .fo-hide{display:none;}
-@media(max-width:1100px){.fo-metrics{grid-template-columns:repeat(4,1fr)}.fo-engine{grid-template-columns:repeat(2,1fr)}.fo-levels{grid-template-columns:repeat(3,1fr)}}
-@media(max-width:720px){.fo-hero-top,.fo-instrument,.fo-decision-row{align-items:flex-start;flex-direction:column}.fo-live{width:100%;text-align:left}.fo-metrics{grid-template-columns:repeat(2,1fr)}.fo-engine{grid-template-columns:1fr}.fo-decision-grid{grid-template-columns:repeat(2,1fr)}.fo-levels{grid-template-columns:repeat(2,1fr)}.fo-sr{grid-template-columns:1fr}.fo-sr-mid{border-left:0;border-right:0;border-top:1px dashed #dfe3e8;border-bottom:1px dashed #dfe3e8}.fo-brand{font-size:27px}}
+@media(max-width:1100px){.fo-metrics{grid-template-columns:repeat(4,1fr)}.fo-engine{grid-template-columns:repeat(2,1fr)}.fo-levels{grid-template-columns:repeat(4,minmax(0,1fr))}}
+@media(max-width:720px){.fo-hero-top,.fo-instrument,.fo-decision-row{align-items:flex-start;flex-direction:column}.fo-live{width:100%;text-align:left}.fo-metrics{grid-template-columns:repeat(2,1fr)}.fo-engine{grid-template-columns:1fr}.fo-decision-grid{grid-template-columns:repeat(2,1fr)}.fo-levels{grid-template-columns:repeat(2,minmax(0,1fr))}.fo-sr{grid-template-columns:1fr}.fo-sr-mid{border-left:0;border-right:0;border-top:1px dashed #dfe3e8;border-bottom:1px dashed #dfe3e8}.fo-brand{font-size:27px}}
 </style>
 """, unsafe_allow_html=True)
 
@@ -2803,10 +2825,16 @@ if beginner_mode:
         max_loss = max(entry_v - sl_v, 0) * qty
         reward_t1 = max(t1_v - entry_v, 0) * qty
         reward_t2 = max(t2_v - entry_v, 0) * qty
+        t3_v = safe_float(best_plan.get("target3"), 0)
+        t4_v = safe_float(best_plan.get("target4"), 0)
+        reward_t3 = max(t3_v - entry_v, 0) * qty
+        reward_t4 = max(t4_v - entry_v, 0) * qty
         st.markdown(f"""<div class='fo-risk-box'>
           <div class='fo-risk-cell'><span>PLANNED MAX LOSS · 1 LOT</span><b>₹{max_loss:,.0f}</b></div>
           <div class='fo-risk-cell'><span>TARGET 1 · 1 LOT</span><b>₹{reward_t1:,.0f}</b></div>
           <div class='fo-risk-cell'><span>TARGET 2 · 1 LOT</span><b>₹{reward_t2:,.0f}</b></div>
+          <div class='fo-risk-cell'><span>TARGET 3 · 1 LOT</span><b>₹{reward_t3:,.0f}</b></div>
+          <div class='fo-risk-cell'><span>TARGET 4 · 1 LOT</span><b>₹{reward_t4:,.0f}</b></div>
         </div>""", unsafe_allow_html=True)
         st.markdown("<div class='fo-beginner-note'>⚠️ Planned loss is based on the displayed entry and stop-loss for one lot. Real execution can differ because of slippage, spread, taxes, brokerage and fast market movement. Never treat the model PoP as a guarantee.</div>", unsafe_allow_html=True)
     else:
@@ -2905,6 +2933,10 @@ section[data-testid="stSidebar"] .stCaption { color:#64748b !important; }
 .fo-level.t1 span,.fo-level.t1 b,.fo-level.t1 .fo-level-pct,.fo-level.t1 .fo-level-lot { color:#15803d !important; }
 .fo-level.t2 { background:linear-gradient(180deg,#ecfeff,#fff); border-top:5px solid #0f766e; }
 .fo-level.t2 span,.fo-level.t2 b,.fo-level.t2 .fo-level-pct,.fo-level.t2 .fo-level-lot { color:#0f766e !important; }
+.fo-level.t3 { background:linear-gradient(180deg,#ecfdf5,#fff); border-top:5px solid #059669; }
+.fo-level.t3 span,.fo-level.t3 b,.fo-level.t3 .fo-level-pct,.fo-level.t3 .fo-level-lot { color:#047857 !important; }
+.fo-level.t4 { background:linear-gradient(180deg,#d1fae5,#fff); border-top:5px solid #047857; }
+.fo-level.t4 span,.fo-level.t4 b,.fo-level.t4 .fo-level-pct,.fo-level.t4 .fo-level-lot { color:#065f46 !important; }
 .fo-level.greeks { background:linear-gradient(180deg,#f5f3ff,#fff); border-top:5px solid #7c3aed; }
 .fo-level.greeks span,.fo-level.greeks b { color:#6d28d9; }
 .fo-level-pct { font-size:15px !important; }
@@ -3036,6 +3068,8 @@ if decision != "NO TRADE" and best_plan:
         ("STOP LOSS", fmt_price(best_plan.get("sl")), "Defined risk level", "sl", change_from_entry(best_plan.get("sl")), lot_pnl_from_entry(best_plan.get("sl"))),
         ("TARGET 1", fmt_price(best_plan.get("target1")), "First profit level", "t1", change_from_entry(best_plan.get("target1")), lot_pnl_from_entry(best_plan.get("target1"))),
         ("TARGET 2", fmt_price(best_plan.get("target2")), "Second profit level", "t2", change_from_entry(best_plan.get("target2")), lot_pnl_from_entry(best_plan.get("target2"))),
+        ("TARGET 3", fmt_price(best_plan.get("target3")), "Third profit level", "t3", change_from_entry(best_plan.get("target3")), lot_pnl_from_entry(best_plan.get("target3"))),
+        ("TARGET 4", fmt_price(best_plan.get("target4")), "Fourth profit level", "t4", change_from_entry(best_plan.get("target4")), lot_pnl_from_entry(best_plan.get("target4"))),
         ("DELTA / IV", f"{safe_float(best_plan.get('delta')):.2f} / {safe_float(best_plan.get('iv')):.1f}%", "Option characteristics", "greeks", "", ""),
     ]
     level_html = "<div class='fo-levels'>"
