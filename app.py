@@ -1775,8 +1775,8 @@ def build_credit_spread_plan(side, spot, support, resistance, pcr, tf5, tf30, da
             "alignment": int(scored.get("alignment", 0) or 0), "regime": regime,
             "room_pct": wall_room, "max_profit": max_profit, "max_loss": max_loss,
             "max_profit_unit": max_profit_unit, "max_loss_unit": max_loss_unit,
-            "breakeven": breakeven, "width": width, "margin_required": required_margin,
-            "margin_final": final_margin, "margin_available": bool(margin),
+            "breakeven": breakeven, "width": width, "margin_required": np.nan,
+            "margin_final": np.nan, "margin_available": False,
             "lot_size": lot_size, "position_type": "DEFINED_RISK_SPREAD",
             "short_entry": bid, "long_entry": long_ask,
         })
