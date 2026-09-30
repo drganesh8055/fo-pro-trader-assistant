@@ -2795,6 +2795,12 @@ else:
 # stricter execution gates intended to make the primary output easier to use
 # responsibly as a beginner decision-support tool.
 beginner_mode = bool(st.session_state.get("beginner_mode", True))
+# Preserve the backend result before Beginner Safety so the UI can clearly
+# distinguish "hard checks passed" from the final executable decision.
+pre_safety_decision = decision
+pre_safety_best_plan = best_plan
+engine_eligible_actions = {item[1] for item in eligible}
+beginner_blocked_action = None
 beginner_safety_reasons = []
 beginner_checks = []
 
@@ -2822,7 +2828,13 @@ if beginner_mode:
         _add_beginner_check("Quality score", "pass" if score >= 70 else "fail", f"{score:.0f}/100 · beginner threshold 70")
         _add_beginner_check("Model PoP", "pass" if np.isfinite(pop) and pop >= 60 else "fail", f"{pop:.1f}% · beginner threshold 60%" if np.isfinite(pop) else "Unavailable")
         _add_beginner_check("Timeframe alignment", "pass" if alignment >= 2 else "fail", f"{alignment}/3 timeframes aligned")
-        _add_beginner_check("Entry confirmation", "pass" if trigger_hit and candle_confirmed and volume_confirmed else "wait", "Breakout + candle + volume confirmation required")
+        if decision in {"BULL PUT SPREAD", "BEAR CALL SPREAD"}:
+            entry_detail = "OI wall/structure + timeframe confirmation required"
+            entry_ok = trigger_hit and alignment >= 2
+        else:
+            entry_detail = "Breakout/trigger + candle + volume confirmation required"
+            entry_ok = trigger_hit and candle_confirmed and volume_confirmed
+        _add_beginner_check("Entry confirmation", "pass" if entry_ok else "wait", entry_detail)
         _add_beginner_check("Risk / reward", "pass" if rr1 >= 1.0 else "fail", f"T1 R:R {rr1:.2f} · minimum 1.00")
         _add_beginner_check("Option liquidity", "pass" if spread_pct <= 2 and volume >= 1000 else "fail", f"Spread {spread_pct:.1f}% · Volume {volume:,.0f}")
         _add_beginner_check("Delta", "pass" if np.isfinite(delta) and 0.35 <= delta <= 0.70 else "fail", f"|Delta| {delta:.2f} · preferred 0.35–0.70" if np.isfinite(delta) else "Unavailable")
@@ -2848,7 +2860,16 @@ if beginner_mode:
                 bool(hard_fail)
             )
         if safety_fail:
-            beginner_safety_reasons.append("One or more beginner safety checks did not pass")
+            beginner_blocked_action = decision
+            failed_checks = [
+                item["name"] for item in beginner_checks
+                if item.get("status") == "fail"
+            ]
+            beginner_safety_reasons.append(
+                "Beginner Safety blocked this setup: " + ", ".join(failed_checks)
+                if failed_checks else
+                "Beginner Safety blocked this setup because the final confirmation gate was not satisfied"
+            )
             decision = "NO TRADE"
             best_plan = None
 
@@ -2864,6 +2885,24 @@ if beginner_mode:
 # Forward-test logging is intentionally backend-only. It does not change the UI.
 if decision != "NO TRADE" and best_plan:
     log_signal(symbol, selected_expiry, decision, best_plan, spot, pcr, support, resistance, tf5, tf30, daily_tech, regime)
+
+# Final per-strategy status used by the UI. IMPORTANT: a strategy may pass
+# hard checks while still being blocked by the final quality/confirmation or
+# Beginner Safety gate. Never label that situation simply as "PASS".
+def strategy_ui_status(action, plan):
+    if not plan:
+        return "NO DATA", "rejected", "No valid candidate was produced."
+    hard_fail = plan.get("fail_reasons") or []
+    if action == decision and decision != "NO TRADE":
+        return "EXECUTABLE", "selected", "All final execution gates passed."
+    if hard_fail:
+        return "REJECTED", "rejected", ", ".join(hard_fail)
+    if action in engine_eligible_actions:
+        if beginner_blocked_action == action:
+            reason = "; ".join(beginner_safety_reasons) or "Beginner Safety gate not met"
+            return "SAFETY BLOCKED", "rejected", reason
+        return "ELIGIBLE · NOT SELECTED", "available", "Backend gates passed, but another eligible strategy ranked higher."
+    return "QUALITY GATE FAILED", "rejected", "Hard checks passed, but the final quality/alignment/confirmation gate was not met."
 
 
 # ENGINE RESULT: 4 strategy cards in a fixed 2x2 grid.
@@ -2905,7 +2944,7 @@ st.markdown("""
 .fo-decision-row{display:flex;justify-content:space-between;align-items:center;gap:15px;}.fo-decision-label{font-size:13px;font-weight:900;color:#98a2b3;letter-spacing:1px;}.fo-decision-title{font-size:37px;font-weight:950;letter-spacing:-1px;margin-top:4px;}.fo-decision.call .fo-decision-title{color:#147a3d}.fo-decision.put .fo-decision-title{color:#b4232f}.fo-decision.neutral .fo-decision-title{color:#475467;}
 .fo-decision-note{font-size:14px;color:#667085;margin-top:6px;}.fo-score-ring{min-width:100px;text-align:center;border-radius:15px;background:rgba(255,255,255,.72);border:1px solid rgba(0,0,0,.06);padding:11px 13px;}.fo-score-ring b{display:block;font-size:28px;color:#182230;line-height:1;}.fo-score-ring span{font-size:12px;color:#98a2b3;font-weight:800;letter-spacing:.6px;}
 .fo-decision-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:9px;margin-top:17px;}.fo-decision-cell{background:rgba(255,255,255,.72);border:1px solid rgba(16,42,67,.07);border-radius:11px;padding:11px;text-align:center;}.fo-decision-cell span{display:block;font-size:12px;font-weight:900;color:#98a2b3;letter-spacing:.7px;}.fo-decision-cell b{display:block;font-size:18px;color:#182230;margin-top:5px;}
-.fo-engine{display:grid;grid-template-columns:repeat(4,1fr);gap:10px;}.fo-engine-card{background:#fff;border:1px solid #e7ebf0;border-radius:14px;padding:14px;box-shadow:0 3px 12px rgba(16,42,67,.03);position:relative;overflow:hidden;}.fo-engine-card.selected{border-color:#8fcfa1;box-shadow:0 5px 18px rgba(20,122,61,.09);}.fo-engine-card.rejected{opacity:.82;}.fo-engine-top{display:flex;justify-content:space-between;gap:8px;align-items:center;}.fo-engine-action{font-size:15px;font-weight:900;color:#182230;}.fo-engine-status{font-size:11px;font-weight:900;padding:5px 7px;border-radius:10px;letter-spacing:.5px;background:#f2f4f7;color:#667085;}.fo-engine-card.selected{background:#eaf8ef;border-color:#8fcfa1;box-shadow:0 5px 18px rgba(20,122,61,.12);}.fo-engine-card.selected .fo-engine-status{background:#16a34a;color:#fff;}.fo-engine-card.rejected{background:#fff0f1;border-color:#f2c5c8;opacity:1;}.fo-engine-card.rejected .fo-engine-status{background:#dc2626;color:#fff;}.fo-engine-contract{font-size:25px;font-weight:900;margin:10px 0 12px;color:#182230;}.fo-engine-stats{display:grid;grid-template-columns:1fr 1fr;gap:7px;}.fo-engine-stats div{background:#f8fafc;border-radius:9px;padding:8px;}.fo-engine-stats span{display:block;font-size:11px;color:#98a2b3;font-weight:900;}.fo-engine-stats b{display:block;font-size:16px;margin-top:3px;color:#182230;}.fo-engine-reason{font-size:12px;color:#98a2b3;line-height:1.45;margin-top:10px;min-height:26px;}
+.fo-engine{display:grid;grid-template-columns:repeat(4,1fr);gap:10px;}.fo-engine-card{background:#fff;border:1px solid #e7ebf0;border-radius:14px;padding:14px;box-shadow:0 3px 12px rgba(16,42,67,.03);position:relative;overflow:hidden;}.fo-engine-card.selected{border-color:#8fcfa1;box-shadow:0 5px 18px rgba(20,122,61,.09);}.fo-engine-card.rejected{opacity:.82;}.fo-engine-top{display:flex;justify-content:space-between;gap:8px;align-items:center;}.fo-engine-action{font-size:15px;font-weight:900;color:#182230;}.fo-engine-status{font-size:11px;font-weight:900;padding:5px 7px;border-radius:10px;letter-spacing:.5px;background:#f2f4f7;color:#667085;}.fo-engine-card.selected{background:#eaf8ef;border-color:#8fcfa1;box-shadow:0 5px 18px rgba(20,122,61,.12);}.fo-engine-card.selected .fo-engine-status{background:#16a34a;color:#fff;}.fo-engine-card.rejected{background:#fff0f1;border-color:#f2c5c8;opacity:1;}.fo-engine-card.rejected .fo-engine-status{background:#dc2626;color:#fff;}.fo-engine-card.available{background:#fffbeb;border-color:#fbbf24;}.fo-engine-card.available .fo-engine-status{background:#f59e0b;color:#fff;}.fo-engine-contract{font-size:25px;font-weight:900;margin:10px 0 12px;color:#182230;}.fo-engine-stats{display:grid;grid-template-columns:1fr 1fr;gap:7px;}.fo-engine-stats div{background:#f8fafc;border-radius:9px;padding:8px;}.fo-engine-stats span{display:block;font-size:11px;color:#98a2b3;font-weight:900;}.fo-engine-stats b{display:block;font-size:16px;margin-top:3px;color:#182230;}.fo-engine-reason{font-size:12px;color:#98a2b3;line-height:1.45;margin-top:10px;min-height:26px;}
 .fo-plan-head{display:flex;align-items:center;justify-content:space-between;gap:14px;background:#fff;border:1px solid #e7ebf0;border-radius:16px 16px 0 0;padding:17px 19px;}.fo-plan-action{font-size:13px;font-weight:900;color:#98a2b3;letter-spacing:.8px;}.fo-plan-contract{font-size:25px;font-weight:900;color:#182230;margin-top:3px;}.fo-plan-pop{font-size:24px;font-weight:900;color:#147a3d;white-space:nowrap;}.fo-levels{display:grid;grid-template-columns:repeat(7,minmax(0,1fr));gap:7px;margin-top:9px;}.fo-level{background:#fff;border:1px solid #e7ebf0;border-radius:13px;padding:11px 9px;min-height:94px;min-width:0;box-sizing:border-box;overflow:hidden;}.fo-level span{display:block;font-size:11px;color:#98a2b3;font-weight:900;letter-spacing:.45px;white-space:nowrap;}.fo-level b{display:block;font-size:18px;color:#182230;margin-top:7px;white-space:nowrap;}.fo-level small{display:block;font-size:11px;color:#98a2b3;margin-top:4px;line-height:1.25;}.fo-level.entry{border-top:3px solid #3b82f6;}.fo-level.sl{border-top:3px solid #dc2626;}.fo-level.t1{border-top:3px solid #16a34a;}.fo-level.t2{border-top:3px solid #0f766e;}.fo-level.t3{border-top:3px solid #059669;}.fo-level.t4{border-top:3px solid #047857;}.fo-level.greeks{border-top:3px solid #7c3aed;}.fo-level-pct{font-weight:800!important;font-size:13px!important;}.fo-level-lot{font-weight:900!important;font-size:13px!important;margin-top:2px!important;}.fo-level.entry .fo-level-pct,.fo-level.entry .fo-level-lot{color:#475467;}.fo-level.sl .fo-level-pct,.fo-level.sl .fo-level-lot{color:#b4232f;}.fo-level.t1 .fo-level-pct,.fo-level.t1 .fo-level-lot,.fo-level.t2 .fo-level-pct,.fo-level.t2 .fo-level-lot,.fo-level.t3 .fo-level-pct,.fo-level.t3 .fo-level-lot,.fo-level.t4 .fo-level-pct,.fo-level.t4 .fo-level-lot{color:#147a3d;}
 .fo-exit{background:#fff;border:1px solid #e7ebf0;border-radius:13px;padding:13px 16px;margin-top:9px;display:flex;gap:12px;align-items:flex-start;}.fo-exit-icon{font-size:21px;}.fo-exit span{display:block;font-size:12px;color:#98a2b3;font-weight:900;letter-spacing:.6px;}.fo-exit b{display:block;font-size:14px;color:#344054;line-height:1.5;margin-top:3px;}
 .fo-sr{display:grid;grid-template-columns:1fr 1.2fr 1fr;border:1px solid #e7ebf0;border-radius:16px;overflow:hidden;background:#fff;box-shadow:0 3px 12px rgba(16,42,67,.03);}.fo-sr-side{padding:20px;text-align:center;display:flex;flex-direction:column;justify-content:center;}.fo-sr-side.support{background:#f4fbf6;}.fo-sr-side.resistance{background:#fff6f6;}.fo-sr-side span{font-size:12px;font-weight:900;letter-spacing:.7px;}.fo-sr-side.support span{color:#147a3d;}.fo-sr-side.resistance span{color:#b4232f;}.fo-sr-side b{font-size:28px;margin-top:7px;color:#182230;}.fo-sr-side small{font-size:13px;color:#98a2b3;margin-top:4px;}.fo-sr-mid{display:flex;align-items:center;justify-content:center;flex-direction:column;gap:8px;border-left:1px dashed #dfe3e8;border-right:1px dashed #dfe3e8;padding:15px;}.fo-sr-mid span{font-size:12px;color:#98a2b3;font-weight:800;}.fo-current{font-size:21px;font-weight:900;background:#f5f7f9;border:1px solid #e5e7eb;border-radius:22px;padding:8px 15px;color:#182230;}
@@ -2972,7 +3011,7 @@ st.markdown(metrics, unsafe_allow_html=True)
 if beginner_mode:
     st.markdown("""
     <div class="fo-safety-banner">
-      <div><b>🛡️ BEGINNER SAFETY + EXPLAINABILITY IS ON</b><span>The app is using a stricter execution filter, BUY setups only, stronger confirmation and a plain-English checklist. This is decision support — not a guarantee of profit.</span></div>
+      <div><b>🛡️ BEGINNER SAFETY + EXPLAINABILITY IS ON</b><span>The app is using a stricter execution filter, BUY setups and defined-risk credit spreads only, stronger confirmation and a plain-English checklist. This is decision support — not a guarantee of profit.</span></div>
       <div class="fo-safety-badge">SAFETY ON</div>
     </div>
     """, unsafe_allow_html=True)
@@ -2990,19 +3029,21 @@ if decision != "NO TRADE" and best_plan:
 else:
     action_pop = np.nan; action_score = max([safe_float(p.get("score"),0) for p in strategy_plans.values() if p] or [0]); contract = "No executable setup"
 
+score_label = "QUALITY / 100" if decision != "NO TRADE" else "BEST CANDIDATE / 100"
+
 decision_note = {
     "CALL BUY":"Directional upside setup — execute only when the displayed confirmation conditions are satisfied.",
     "BULL PUT SPREAD":"Defined-risk bullish credit spread — sell a PE and buy a lower-strike PE hedge; maximum loss is capped.",
     "PUT BUY":"Directional downside setup — execute only when the displayed confirmation conditions are satisfied.",
     "BEAR CALL SPREAD":"Defined-risk bearish credit spread — sell a CE and buy a higher-strike CE hedge; maximum loss is capped.",
-    "NO TRADE":"No strategy currently meets the minimum quality, alignment, liquidity and PoP gates."
+    "NO TRADE":"No strategy survived all final execution gates. A candidate may still have passed hard checks but failed the final quality/confirmation or Beginner Safety gate."
 }[decision]
 
 st.markdown(f"""
 <div class="fo-decision {decision_class}">
   <div class="fo-decision-row">
     <div><div class="fo-decision-label">ENGINE OUTPUT</div><div class="fo-decision-title">{decision}</div><div class="fo-decision-note">{decision_note}</div></div>
-    <div class="fo-score-ring"><b>{action_score:.0f}</b><span>QUALITY / 100</span></div>
+    <div class="fo-score-ring"><b>{action_score:.0f}</b><span>{score_label}</span></div>
   </div>
   <div class="fo-decision-grid">
     <div class="fo-decision-cell"><span>OPTION</span><b>{contract}</b></div>
@@ -3032,13 +3073,27 @@ if beginner_mode:
         t1_v = safe_float(best_plan.get("target1"), 0)
         t2_v = safe_float(best_plan.get("target2"), 0)
         qty = safe_float(lot_size, 0)
-        max_loss = max(entry_v - sl_v, 0) * qty
-        reward_t1 = max(t1_v - entry_v, 0) * qty
-        reward_t2 = max(t2_v - entry_v, 0) * qty
-        t3_v = safe_float(best_plan.get("target3"), 0)
-        t4_v = safe_float(best_plan.get("target4"), 0)
-        reward_t3 = max(t3_v - entry_v, 0) * qty
-        reward_t4 = max(t4_v - entry_v, 0) * qty
+        if best_plan.get("position_type") == "DEFINED_RISK_SPREAD":
+            # For a credit spread, the displayed entry is the net credit and
+            # the targets are lower debit values. Use the engine's explicit
+            # max-loss field instead of treating the spread like a long option.
+            max_loss = safe_float(best_plan.get("max_loss"), np.nan)
+            if not np.isfinite(max_loss):
+                max_loss = max(sl_v - entry_v, 0) * qty
+            reward_t1 = max(entry_v - t1_v, 0) * qty
+            reward_t2 = max(entry_v - t2_v, 0) * qty
+            t3_v = safe_float(best_plan.get("target3"), 0)
+            t4_v = safe_float(best_plan.get("target4"), 0)
+            reward_t3 = max(entry_v - t3_v, 0) * qty
+            reward_t4 = max(entry_v - t4_v, 0) * qty
+        else:
+            max_loss = max(entry_v - sl_v, 0) * qty
+            reward_t1 = max(t1_v - entry_v, 0) * qty
+            reward_t2 = max(t2_v - entry_v, 0) * qty
+            t3_v = safe_float(best_plan.get("target3"), 0)
+            t4_v = safe_float(best_plan.get("target4"), 0)
+            reward_t3 = max(t3_v - entry_v, 0) * qty
+            reward_t4 = max(t4_v - entry_v, 0) * qty
         st.markdown(f"""<div class='fo-risk-box'>
           <div class='fo-risk-cell'><span>PLANNED MAX LOSS · 1 LOT</span><b>₹{max_loss:,.0f}</b></div>
           <div class='fo-risk-cell'><span>TARGET 1 · 1 LOT</span><b>₹{reward_t1:,.0f}</b></div>
@@ -3048,7 +3103,7 @@ if beginner_mode:
         </div>""", unsafe_allow_html=True)
         st.markdown("<div class='fo-beginner-note'>⚠️ Planned loss is based on the displayed entry and stop-loss for one lot. Real execution can differ because of slippage, spread, taxes, brokerage and fast market movement. Never treat the model PoP as a guarantee.</div>", unsafe_allow_html=True)
     else:
-        st.markdown("<div class='fo-beginner-note'>⛔ No trade is displayed because the setup did not satisfy the beginner safety requirements. Waiting is a valid outcome.</div>", unsafe_allow_html=True)
+        st.markdown("<div class='fo-beginner-note'>⛔ No trade is displayed because no setup satisfied every final execution gate. Waiting is a valid outcome.</div>", unsafe_allow_html=True)
 
 st.markdown("<div class='fo-section'>ENGINE RESULT · ALL 4 STRATEGIES</div>", unsafe_allow_html=True)
 
@@ -3213,16 +3268,13 @@ for action in ["CALL BUY","PUT BUY","BULL PUT SPREAD","BEAR CALL SPREAD"]:
     if not plan:
         engine_html += f"<div class='fo-engine-card rejected'><div class='fo-engine-top'><div class='fo-engine-action'>{action}</div><div class='fo-engine-status'>NO DATA</div></div><div class='fo-engine-contract'>—</div><div class='fo-engine-reason'>No valid candidate was produced.</div></div>"
         continue
-    fails = ", ".join(plan.get("fail_reasons") or []) or "All hard checks passed"
-    selected = action == decision
-    status = "SELECTED" if selected else ("PASS" if not plan.get("fail_reasons") and safe_float(plan.get("score"),0) >= MIN_SCORE and safe_float(plan.get("pop"),0) >= MIN_POP else "REJECTED")
-    status_class = "selected" if selected else ("" if status == "PASS" else "rejected")
+    status, status_class, status_reason = strategy_ui_status(action, plan)
     engine_html += f"""
     <div class='fo-engine-card {status_class}'>
       <div class='fo-engine-top'><div class='fo-engine-action'>{action}</div><div class='fo-engine-status'>{status}</div></div>
       <div class='fo-engine-contract'>{(f"SELL {plan['short_strike']:.0f} {'PE' if plan['side']=='PE' else 'CE'} + BUY {plan['long_strike']:.0f} {'PE' if plan['side']=='PE' else 'CE'}") if plan.get('position_type') == 'DEFINED_RISK_SPREAD' else f"{plan['strike']:.0f} {'CE' if plan['side']=='CE' else 'PE'}"}</div>
       <div class='fo-engine-stats'><div><span>PoP</span><b>{safe_float(plan.get('pop')):.1f}%</b></div><div><span>QUALITY</span><b>{safe_float(plan.get('score'),0):.0f}/100</b></div></div>
-      <div class='fo-engine-reason'>{fails}</div>
+      <div class='fo-engine-reason'>{status_reason}</div>
     </div>"""
 engine_html += "</div>"
 st.markdown(engine_html, unsafe_allow_html=True)
@@ -3308,7 +3360,7 @@ if decision != "NO TRADE" and best_plan:
     st.markdown(level_html, unsafe_allow_html=True)
     st.markdown(f"<div class='fo-exit'><div class='fo-exit-icon'>🚪</div><div><span>EXIT RULE</span><b>{best_plan.get('exit','Follow stop-loss and targets.')}</b></div></div>", unsafe_allow_html=True)
 else:
-    st.markdown("<div class='fo-exit' style='margin-top:10px;'><div class='fo-exit-icon'>⛔</div><div><span>NO TRADE</span><b>None of CALL BUY, PUT BUY, BULL PUT SPREAD or BEAR CALL SPREAD passed the backend quality + PoP gates. No executable entry, SL or target is displayed.</b></div></div>", unsafe_allow_html=True)
+    st.markdown("<div class='fo-exit' style='margin-top:10px;'><div class='fo-exit-icon'>⛔</div><div><span>NO TRADE</span><b>No strategy survived all final execution gates. Some strategies may have passed hard checks, but no executable setup cleared every required quality, alignment, confirmation and Beginner Safety check. No executable entry, SL or target is displayed.</b></div></div>", unsafe_allow_html=True)
 
 with st.expander("Why this decision?", expanded=False):
     why_lines=[]
@@ -3322,8 +3374,8 @@ with st.expander("Why this decision?", expanded=False):
         for action in ["CALL BUY","PUT BUY","BULL PUT SPREAD","BEAR CALL SPREAD"]:
             plan=strategy_plans[action]
             if plan:
-                reason=", ".join(plan.get("fail_reasons") or []) or "quality/confirmation gate not met"
-                why_lines.append(f"{action}: {reason} · PoP {safe_float(plan.get('pop')):.1f}% · Score {safe_float(plan.get('score'),0):.0f}/100.")
+                _status, _cls, reason = strategy_ui_status(action, plan)
+                why_lines.append(f"{action}: {_status} — {reason} · PoP {safe_float(plan.get('pop')):.1f}% · Score {safe_float(plan.get('score'),0):.0f}/100.")
     st.markdown("<div class='fo-why'>"+"".join(f"<div class='fo-why-line'>{x}</div>" for x in why_lines)+"</div>",unsafe_allow_html=True)
 
 st.markdown("<div class='fo-section'>OPTION DETAILS</div>", unsafe_allow_html=True)
