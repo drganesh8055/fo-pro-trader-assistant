@@ -813,6 +813,66 @@ def timeframe_score(side, tf5, tf30, daily):
     return float(np.clip(score, 0, 30)), alignment
 
 
+def oi_levels(chain, spot):
+    """Build practical OI support/resistance and OI-wall context.
+
+    Uses a local strike band, then separates the nearest meaningful wall from
+    the largest wall so a very distant strike does not dominate the decision.
+    """
+    valid = chain.dropna(subset=["Strike"]).copy()
+    if valid.empty or not np.isfinite(spot):
+        return spot, spot, np.nan, {"put_walls": [], "call_walls": [],
+                                    "major_support": spot, "major_resistance": spot,
+                                    "nearest_support": spot, "nearest_resistance": spot}
+
+    # Keep OI analysis close enough to the underlying to remain actionable.
+    band = valid[(valid["Strike"] >= spot * 0.90) & (valid["Strike"] <= spot * 1.10)].copy()
+    if band.empty:
+        band = valid.copy()
+
+    band["PE OI"] = pd.to_numeric(band["PE OI"], errors="coerce").fillna(0)
+    band["CE OI"] = pd.to_numeric(band["CE OI"], errors="coerce").fillna(0)
+    band["PE Chg OI"] = pd.to_numeric(band["PE Chg OI"], errors="coerce").fillna(0)
+    band["CE Chg OI"] = pd.to_numeric(band["CE Chg OI"], errors="coerce").fillna(0)
+
+    below = band[band["Strike"] <= spot].copy()
+    above = band[band["Strike"] >= spot].copy()
+
+    # Nearest walls provide the immediate decision barrier.
+    nearest_support = float(below["Strike"].max()) if not below.empty else float(band["Strike"].min())
+    nearest_resistance = float(above["Strike"].min()) if not above.empty else float(band["Strike"].max())
+
+    # Major walls use OI, but only among strikes on the correct side.
+    support_row = below.loc[below["PE OI"].idxmax()] if not below.empty else band.loc[band["PE OI"].idxmax()]
+    resistance_row = above.loc[above["CE OI"].idxmax()] if not above.empty else band.loc[band["CE OI"].idxmax()]
+
+    major_support = float(support_row["Strike"])
+    major_resistance = float(resistance_row["Strike"])
+
+    total_call_oi = float(band["CE OI"].sum())
+    total_put_oi = float(band["PE OI"].sum())
+    pcr = total_put_oi / total_call_oi if total_call_oi > 0 else np.nan
+
+    put_walls = band.nlargest(3, "PE OI")[["Strike", "PE OI", "PE Chg OI"]].to_dict("records")
+    call_walls = band.nlargest(3, "CE OI")[["Strike", "CE OI", "CE Chg OI"]].to_dict("records")
+
+    return (
+        major_support,
+        major_resistance,
+        pcr,
+        {
+            "put_walls": put_walls,
+            "call_walls": call_walls,
+            "major_support": major_support,
+            "major_resistance": major_resistance,
+            "nearest_support": nearest_support,
+            "nearest_resistance": nearest_resistance,
+            "support_room_pct": max((spot - major_support) / max(spot, 1) * 100, 0),
+            "resistance_room_pct": max((major_resistance - spot) / max(spot, 1) * 100, 0),
+        },
+    )
+
+
 def nearest_row(chain, strike):
     if chain.empty or not np.isfinite(strike):
         return None
@@ -975,6 +1035,14 @@ def oi_levels(chain, spot):
         "support_chg_oi": safe_float(support_row.get("PE Chg OI"), 0),
         "resistance_chg_oi": safe_float(resistance_row.get("CE Chg OI"), 0),
     }
+
+
+def nearest_row(chain, strike):
+    if chain.empty or not np.isfinite(strike):
+        return None
+    index = (chain["Strike"] - strike).abs().idxmin()
+    return chain.loc[index]
+
 
 
 def oi_price_behavior(row, prefix):
@@ -1539,271 +1607,6 @@ def build_sell_plan(row, side, spot, support, resistance, pcr, tf5, tf30, daily,
 
 
 # ============================================================
-# DEFINED-RISK OPTION SELLING — CREDIT SPREAD ENGINE
-# ============================================================
-def api_post(path, payload, timeout=20):
-    """POST to Upstox with the same pacing/error handling as api_get."""
-    global _LAST_API_REQUEST
-    with _API_REQUEST_LOCK:
-        now = time.monotonic()
-        wait_for = _MIN_API_GAP - (now - _LAST_API_REQUEST)
-        if wait_for > 0:
-            time.sleep(wait_for)
-        _LAST_API_REQUEST = time.monotonic()
-    try:
-        response = requests.post(
-            f"{API_BASE}{path}", headers=HEADERS, json=payload, timeout=timeout
-        )
-    except requests.RequestException as exc:
-        raise UpstoxError(f"Network error while contacting Upstox: {exc}") from exc
-    if response.status_code == 429:
-        raise UpstoxRateLimitError(
-            "Upstox is rate-limiting this app. Please wait before refreshing.",
-            retry_after=30,
-        )
-    if response.status_code != 200:
-        try:
-            body = response.json()
-            message = body.get("errors") or body.get("message") or body
-        except Exception:
-            message = response.text[:500]
-        raise UpstoxError(f"Upstox API {response.status_code}: {message}")
-    return response.json()
-
-
-def get_spread_margin(short_key, long_key, lot_qty, product="I", short_price=None, long_price=None):
-    """Return Upstox basket margin for a two-leg credit spread."""
-    qty = int(round(safe_float(lot_qty, 0)))
-    if qty <= 0 or not short_key or not long_key:
-        return None
-    payload = {
-        "instruments": [
-            {
-                "instrument_key": str(short_key),
-                "quantity": qty,
-                "transaction_type": "SELL",
-                "product": product,
-                **({"price": float(short_price)} if np.isfinite(safe_float(short_price)) and safe_float(short_price) > 0 else {}),
-            },
-            {
-                "instrument_key": str(long_key),
-                "quantity": qty,
-                "transaction_type": "BUY",
-                "product": product,
-                **({"price": float(long_price)} if np.isfinite(safe_float(long_price)) and safe_float(long_price) > 0 else {}),
-            },
-        ]
-    }
-    try:
-        payload_out = api_post("/v2/charges/margin", payload, timeout=20)
-        data = payload_out.get("data") or {}
-        return {
-            "required_margin": safe_float(data.get("required_margin")),
-            "final_margin": safe_float(data.get("final_margin")),
-        }
-    except Exception:
-        # Margin display must never make the live analyzer fail. The spread
-        # remains defined-risk and max loss is still calculated exactly.
-        return None
-
-
-def _spread_long_candidate(chain, side, short_strike, spot):
-    """Choose a farther OTM hedge with positive ask and usable liquidity."""
-    prefix = "PE" if side == "PE" else "CE"
-    candidates = []
-    for _, row in chain.iterrows():
-        strike = safe_float(row.get("Strike"))
-        if not np.isfinite(strike):
-            continue
-        if side == "PE" and strike >= short_strike:
-            continue
-        if side == "CE" and strike <= short_strike:
-            continue
-        ask = safe_float(row.get(f"{prefix} Ask"))
-        ltp = safe_float(row.get(f"{prefix} LTP"))
-        oi = safe_float(row.get(f"{prefix} OI"), 0)
-        vol = safe_float(row.get(f"{prefix} Volume"), 0)
-        delta = abs(safe_float(row.get(f"{prefix} Delta")))
-        key = row.get(f"{prefix} Key")
-        if not key or not np.isfinite(ask) or ask <= 0:
-            continue
-        if not np.isfinite(ltp) or ltp <= 0 or oi <= 0 or vol < 200:
-            continue
-        if not np.isfinite(delta) or delta > 0.25:
-            continue
-        width = abs(short_strike - strike)
-        if width <= 0:
-            continue
-        # Prefer a nearby hedge so the spread stays capital-efficient.
-        candidates.append((width, -oi, -vol, strike, row))
-    if not candidates:
-        return None
-    return min(candidates, key=lambda x: x[:-1])[-1]
-
-
-def build_credit_spread_plan(side, spot, support, resistance, pcr, tf5, tf30, daily,
-                             risk_profile, chain, oi_wall_info=None, regime="MIXED",
-                             lot_size=1, margin_product="I", calculate_margin=True):
-    """Build one defined-risk credit spread: Bull Put or Bear Call.
-
-    The short option is never returned as a naked trade. A farther OTM long
-    option is mandatory, making maximum loss finite by construction.
-    """
-    if chain is None or chain.empty:
-        return None
-    prefix = "PE" if side == "PE" else "CE"
-    candidates = []
-    for _, row in chain.iterrows():
-        short_strike = safe_float(row.get("Strike"))
-        if not np.isfinite(short_strike):
-            continue
-        if side == "PE" and short_strike >= spot * 0.995:
-            continue
-        if side == "CE" and short_strike <= spot * 1.005:
-            continue
-
-        bid = safe_float(row.get(f"{prefix} Bid"))
-        ltp = safe_float(row.get(f"{prefix} LTP"))
-        ask = safe_float(row.get(f"{prefix} Ask"))
-        oi = safe_float(row.get(f"{prefix} OI"), 0)
-        volume = safe_float(row.get(f"{prefix} Volume"), 0)
-        delta = abs(safe_float(row.get(f"{prefix} Delta")))
-        if not np.isfinite(bid) or bid <= 0:
-            bid = ltp
-        if not np.isfinite(bid) or bid <= 0 or oi <= 0 or volume < 500:
-            continue
-        if not np.isfinite(delta) or not (0.15 <= delta <= 0.40):
-            continue
-
-        # Selling directly into a breached wall is rejected.
-        if side == "CE" and short_strike <= resistance:
-            continue
-        if side == "PE" and short_strike >= support:
-            continue
-
-        scored = score_option(row, side, spot, pcr, tf5, tf30, daily, chain,
-                              support=support, resistance=resistance,
-                              oi_wall_info=oi_wall_info, regime=regime, mode="SELL")
-        long_row = _spread_long_candidate(chain, side, short_strike, spot)
-        if long_row is None:
-            continue
-
-        long_ask = safe_float(long_row.get(f"{prefix} Ask"))
-        long_ltp = safe_float(long_row.get(f"{prefix} LTP"))
-        if not np.isfinite(long_ask) or long_ask <= 0:
-            long_ask = long_ltp
-        credit = bid - long_ask
-        width = abs(short_strike - safe_float(long_row.get("Strike")))
-        if not np.isfinite(credit) or credit <= 0 or width <= credit:
-            continue
-
-        short_pop = 100.0 - safe_float(row.get(f"{prefix} PoP"), np.nan)
-        wall_room = ((resistance - spot) / max(spot, 1) * 100 if side == "CE"
-                     else (spot - support) / max(spot, 1) * 100)
-        score = float(scored.get("score", 0))
-        penalty = 0.0
-        if regime in {"BREAKOUT", "BREAKDOWN"}:
-            penalty += 12
-        if wall_room < 0.75:
-            penalty += 15
-        elif wall_room < 1.25:
-            penalty += 7
-        if abs(delta) > 0.35:
-            penalty += 5
-        spread_pct = safe_float(scored.get("spread_pct"), 999)
-        if spread_pct > 3:
-            penalty += 6
-        score = float(np.clip(score - penalty, 0, 100))
-
-        max_profit_unit = credit
-        max_loss_unit = width - credit
-        rr = max_profit_unit / max(max_loss_unit, 0.01)
-        hard_fail = []
-        if regime in {"BREAKOUT", "BREAKDOWN"}:
-            hard_fail.append("breakout regime unsuitable for credit spread")
-        if spread_pct > 4:
-            hard_fail.append("wide short-option spread")
-        if wall_room < 0.75:
-            hard_fail.append("insufficient room to OI wall")
-        if not np.isfinite(short_pop) or short_pop < 55:
-            hard_fail.append("low model PoP")
-        if rr < 0.20:
-            hard_fail.append("low credit relative to defined risk")
-        if scored.get("alignment", 0) < 2:
-            hard_fail.append("weak timeframe alignment")
-
-        short_key = row.get(f"{prefix} Key")
-        long_key = long_row.get(f"{prefix} Key")
-        # Margin is deliberately calculated only after the best spread is
-        # selected, not for every candidate strike. This avoids unnecessary
-        # Upstox POST requests and reduces rate-limit risk.
-        max_profit = max_profit_unit * lot_size
-        max_loss = max_loss_unit * lot_size
-        breakeven = short_strike - credit if side == "PE" else short_strike + credit
-
-        candidates.append({
-            "action": "BULL PUT SPREAD" if side == "PE" else "BEAR CALL SPREAD",
-            "side": side,
-            "short_strike": short_strike,
-            "long_strike": safe_float(long_row.get("Strike")),
-            "short_key": short_key,
-            "long_key": long_key,
-            "entry": round(credit, 2),
-            "credit": round(credit, 2),
-            "sl": round(credit * 1.75, 2),
-            "target1": round(credit * 0.60, 2),
-            "target2": round(credit * 0.35, 2),
-            "target3": round(credit * 0.20, 2),
-            "target4": round(credit * 0.10, 2),
-            "pop": short_pop,
-            "long_pop": safe_float(long_row.get(f"{prefix} PoP")),
-            "delta": delta,
-            "iv": safe_float(row.get(f"{prefix} IV")),
-            "score": score,
-            "rr1": max_profit_unit / max(max_loss_unit, 0.01),
-            "trigger": (f"Enter only while spot remains above support {fmt_price(support)} and the 5m trend is not breaking down."
-                        if side == "PE" else
-                        f"Enter only while spot remains below resistance {fmt_price(resistance)} and the 5m trend is not breaking out."),
-            "trigger_level": support if side == "PE" else resistance,
-            "trigger_hit": not hard_fail,
-            "readiness": "READY" if not hard_fail and score >= 65 and np.isfinite(short_pop) and short_pop >= 55 else "NO TRADE",
-            "fail_reasons": hard_fail,
-            "exit": (f"Exit if spot breaks below support {fmt_price(support)} or spread debit reaches {fmt_price(credit * 1.75)}."
-                     if side == "PE" else
-                     f"Exit if spot breaks above resistance {fmt_price(resistance)} or spread debit reaches {fmt_price(credit * 1.75)}."),
-            "volume": volume, "oi": oi, "spread_pct": spread_pct,
-            "alignment": int(scored.get("alignment", 0) or 0), "regime": regime,
-            "room_pct": wall_room, "max_profit": max_profit, "max_loss": max_loss,
-            "max_profit_unit": max_profit_unit, "max_loss_unit": max_loss_unit,
-            "breakeven": breakeven, "width": width, "margin_required": np.nan,
-            "margin_final": np.nan, "margin_available": False,
-            "lot_size": lot_size, "position_type": "DEFINED_RISK_SPREAD",
-            "short_entry": bid, "long_entry": long_ask,
-        })
-
-    if not candidates:
-        return None
-    selected = max(candidates, key=lambda p: (
-        safe_float(p.get("score"), 0),
-        safe_float(p.get("pop"), 0),
-        safe_float(p.get("rr1"), 0),
-    ))
-    if calculate_margin:
-        margin = get_spread_margin(
-            selected.get("short_key"), selected.get("long_key"),
-            lot_size, margin_product, selected.get("short_entry"), selected.get("long_entry")
-        )
-        selected["margin_required"] = safe_float((margin or {}).get("required_margin"))
-        selected["margin_final"] = safe_float((margin or {}).get("final_margin"))
-        selected["margin_available"] = bool(margin)
-    else:
-        selected["margin_required"] = np.nan
-        selected["margin_final"] = np.nan
-        selected["margin_available"] = False
-    return selected
-
-
-# ============================================================
 # BACKEND QUALITY / LOGGING HELPERS — NO UI CHANGES
 # ============================================================
 def _signal_log_path():
@@ -1965,9 +1768,9 @@ def _scanner_stage1_candidates(rows, spot, max_candidates=8):
 
         for side, action in (
             ("CE", "CALL BUY"),
-            ("CE", "BEAR CALL SPREAD"),
+            ("CE", "CALL SELL"),
             ("PE", "PUT BUY"),
-            ("PE", "BULL PUT SPREAD"),
+            ("PE", "PUT SELL"),
         ):
             option = raw.get("call_options" if side == "CE" else "put_options") or {}
             market = option.get("market_data") or {}
@@ -2098,15 +1901,13 @@ def _scanner_plan_for_candidate(candidate, symbol, expiry, risk_profile):
             full_chain, oi_wall_info, regime
         )
     else:
-        plan = build_credit_spread_plan(
-            side, spot, support, resistance, pcr,
+        plan = build_sell_plan(
+            row, side, spot, support, resistance, pcr,
             tf5_tech, tf30_tech, daily_tech, risk_profile,
-            full_chain, oi_wall_info, regime,
-            lot_size=safe_float(candidate.get("lot_size"), 1),
-            margin_product="I", calculate_margin=False
+            full_chain, oi_wall_info, regime
         )
 
-    if not plan or plan.get("action", action) != action:
+    if not plan or plan.get("action", action) != action and action in {"CALL SELL", "PUT SELL"}:
         return None
 
     if not _scanner_actionable(plan, action):
@@ -2116,7 +1917,7 @@ def _scanner_plan_for_candidate(candidate, symbol, expiry, risk_profile):
         "Stock": symbol,
         "Trade": action,
         "Exchange": candidate.get("exchange", "NSE"),
-        "Strike": float(plan.get("short_strike", plan.get("strike", np.nan))),
+        "Strike": float(plan["strike"]),
         "Expiry": expiry,
         "PoP": safe_float(plan.get("pop")),
         "Quality": safe_float(plan.get("score"), 0),
@@ -2126,9 +1927,6 @@ def _scanner_plan_for_candidate(candidate, symbol, expiry, risk_profile):
         "Target2": safe_float(plan.get("target2")),
         "Target3": safe_float(plan.get("target3")),
         "Target4": safe_float(plan.get("target4")),
-        "LongStrike": safe_float(plan.get("long_strike")),
-        "MaxProfit": safe_float(plan.get("max_profit")),
-        "MaxLoss": safe_float(plan.get("max_loss")),
         "Exit": plan.get("exit", ""),
         "Delta": safe_float(plan.get("delta")),
         "IV": safe_float(plan.get("iv")),
@@ -2583,24 +2381,15 @@ with st.sidebar:
         key="risk_profile",
     )
 
-    spread_margin_mode = st.selectbox(
-        "Credit Spread Margin",
-        ["Intraday", "Delivery"],
-        index=0,
-        key="spread_margin_mode",
-        help="Used only for the live Upstox margin estimate of two-leg credit spreads.",
-    )
-    st.session_state["spread_margin_product"] = "I" if spread_margin_mode == "Intraday" else "D"
-
     beginner_mode = st.checkbox(
         "🛡️ Beginner Safety + Explainability",
         value=True,
         key="beginner_mode",
-        help="Adds stricter entry filters. BUY setups remain strict, while only defined-risk two-leg credit spreads can be selected; naked option selling is never recommended. It does not guarantee profit.",
+        help="Adds stricter entry filters, blocks option-selling strategies from being selected, and shows a plain-English trade checklist. It does not guarantee profit or remove market risk.",
     )
 
     if beginner_mode:
-        st.caption("🛡️ Beginner Safety ON · BUY + defined-risk spreads only · stronger confirmation required")
+        st.caption("🛡️ Beginner Safety ON · BUY setups only · stronger confirmation required")
 
     def _analyze_live_market_callback():
         entered = str(st.session_state.get("analyzer_search_value", "")).strip()
@@ -2722,24 +2511,35 @@ def buy_candidate(side):
                       risk_profile, chain, oi_wall_info, regime)
 
 
+def sell_candidate(side):
+    candidates = []
+    for _, row in chain.iterrows():
+        prefix = "CE" if side == "CE" else "PE"
+        strike = safe_float(row["Strike"])
+        if not np.isfinite(strike):
+            continue
+        # Prefer slightly OTM options for selling rather than ATM options.
+        if side == "CE" and strike < spot * 1.005:
+            continue
+        if side == "PE" and strike > spot * 0.995:
+            continue
+        plan = build_sell_plan(row, side, spot, support, resistance, pcr, tf5, tf30,
+                               daily_tech, risk_profile, chain, oi_wall_info, regime)
+        if plan is None:
+            continue
+        candidates.append((plan["score"], plan["pop"], plan["volume"], -plan["spread_pct"], -abs(abs(plan["delta"]) - .30), plan))
+    if not candidates:
+        return None
+    return max(candidates, key=lambda x: x[:-1])[-1]
+
+
 call_buy = buy_candidate("CE")
 put_buy = buy_candidate("PE")
-
-# Defined-risk premium selling replaces naked CALL SELL / PUT SELL in the
-# primary decision engine. A short option is always paired with a farther OTM
-# long option, so maximum loss is finite by construction.
-margin_product = st.session_state.get("spread_margin_product", "I")
-bull_put_spread = build_credit_spread_plan(
-    "PE", spot, support, resistance, pcr, tf5, tf30, daily_tech,
-    risk_profile, chain, oi_wall_info, regime, lot_size, margin_product
-)
-bear_call_spread = build_credit_spread_plan(
-    "CE", spot, support, resistance, pcr, tf5, tf30, daily_tech,
-    risk_profile, chain, oi_wall_info, regime, lot_size, margin_product
-)
+call_sell = sell_candidate("CE")
+put_sell = sell_candidate("PE")
 
 # ============================================================
-# FINAL 4-WAY DECISION
+# FINAL 5-WAY DECISION
 # ============================================================
 MIN_SCORE = 65
 MIN_POP = 55
@@ -2747,9 +2547,9 @@ MIN_ALIGNMENT = 2
 
 strategy_plans = {
     "CALL BUY": call_buy,
+    "CALL SELL": call_sell,
     "PUT BUY": put_buy,
-    "BULL PUT SPREAD": bull_put_spread,
-    "BEAR CALL SPREAD": bear_call_spread,
+    "PUT SELL": put_sell,
 }
 
 eligible = []
@@ -2795,12 +2595,6 @@ else:
 # stricter execution gates intended to make the primary output easier to use
 # responsibly as a beginner decision-support tool.
 beginner_mode = bool(st.session_state.get("beginner_mode", True))
-# Preserve the backend result before Beginner Safety so the UI can clearly
-# distinguish "hard checks passed" from the final executable decision.
-pre_safety_decision = decision
-pre_safety_best_plan = best_plan
-engine_eligible_actions = {item[1] for item in eligible}
-beginner_blocked_action = None
 beginner_safety_reasons = []
 beginner_checks = []
 
@@ -2808,10 +2602,16 @@ def _add_beginner_check(name, status, detail):
     beginner_checks.append({"name": name, "status": status, "detail": detail})
 
 if beginner_mode:
-    # Beginner mode allows only the two defined-risk credit spreads in addition
-    # to BUY setups. Naked option selling is not part of this engine.
-    allowed_beginner = {"CALL BUY", "PUT BUY", "BULL PUT SPREAD", "BEAR CALL SPREAD"}
-    candidate = strategy_plans.get(decision) if decision in allowed_beginner else None
+    # Beginner mode intentionally selects BUY setups only. Option selling can
+    # involve materially different margin and tail-risk characteristics and is
+    # therefore kept visible in the engine result but cannot become the primary
+    # beginner execution decision.
+    if decision in {"CALL SELL", "PUT SELL"}:
+        beginner_safety_reasons.append("Option-selling strategy is disabled in Beginner Safety mode")
+        decision = "NO TRADE"
+        best_plan = None
+
+    candidate = strategy_plans.get(decision) if decision in {"CALL BUY", "PUT BUY"} else None
     if candidate:
         score = safe_float(candidate.get("score"), 0)
         pop = safe_float(candidate.get("pop"), np.nan)
@@ -2828,48 +2628,21 @@ if beginner_mode:
         _add_beginner_check("Quality score", "pass" if score >= 70 else "fail", f"{score:.0f}/100 · beginner threshold 70")
         _add_beginner_check("Model PoP", "pass" if np.isfinite(pop) and pop >= 60 else "fail", f"{pop:.1f}% · beginner threshold 60%" if np.isfinite(pop) else "Unavailable")
         _add_beginner_check("Timeframe alignment", "pass" if alignment >= 2 else "fail", f"{alignment}/3 timeframes aligned")
-        if decision in {"BULL PUT SPREAD", "BEAR CALL SPREAD"}:
-            entry_detail = "OI wall/structure + timeframe confirmation required"
-            entry_ok = trigger_hit and alignment >= 2
-        else:
-            entry_detail = "Breakout/trigger + candle + volume confirmation required"
-            entry_ok = trigger_hit and candle_confirmed and volume_confirmed
-        _add_beginner_check("Entry confirmation", "pass" if entry_ok else "wait", entry_detail)
+        _add_beginner_check("Entry confirmation", "pass" if trigger_hit and candle_confirmed and volume_confirmed else "wait", "Breakout + candle + volume confirmation required")
         _add_beginner_check("Risk / reward", "pass" if rr1 >= 1.0 else "fail", f"T1 R:R {rr1:.2f} · minimum 1.00")
         _add_beginner_check("Option liquidity", "pass" if spread_pct <= 2 and volume >= 1000 else "fail", f"Spread {spread_pct:.1f}% · Volume {volume:,.0f}")
         _add_beginner_check("Delta", "pass" if np.isfinite(delta) and 0.35 <= delta <= 0.70 else "fail", f"|Delta| {delta:.2f} · preferred 0.35–0.70" if np.isfinite(delta) else "Unavailable")
         _add_beginner_check("Existing engine gates", "pass" if not hard_fail else "fail", "All hard checks passed" if not hard_fail else "; ".join(hard_fail))
 
-        if decision in {"BULL PUT SPREAD", "BEAR CALL SPREAD"}:
-            margin_final = safe_float(candidate.get("margin_final"))
-            max_loss = safe_float(candidate.get("max_loss"), np.nan)
-            _add_beginner_check("Defined-risk structure", "pass", "Two-leg credit spread; maximum loss is capped")
-            _add_beginner_check("Spread risk", "pass" if np.isfinite(max_loss) and max_loss > 0 else "fail", f"Maximum loss ₹{max_loss:,.0f} for 1 lot" if np.isfinite(max_loss) else "Unavailable")
-            _add_beginner_check("Broker margin", "pass" if np.isfinite(margin_final) else "warn", f"Upstox final margin ₹{margin_final:,.0f}" if np.isfinite(margin_final) else "Live margin unavailable; max-loss figure remains available")
-            safety_fail = (
-                score < 70 or not np.isfinite(pop) or pop < 55 or alignment < 2 or
-                spread_pct > 3 or volume < 500 or bool(hard_fail) or
-                not np.isfinite(delta) or delta > 0.40
-            )
-        else:
-            safety_fail = (
-                score < 70 or not np.isfinite(pop) or pop < 60 or alignment < 2 or
-                not (trigger_hit and candle_confirmed and volume_confirmed) or
-                rr1 < 1.0 or spread_pct > 2 or volume < 1000 or
-                not np.isfinite(delta) or delta < 0.35 or delta > 0.70 or
-                bool(hard_fail)
-            )
+        safety_fail = (
+            score < 70 or not np.isfinite(pop) or pop < 60 or alignment < 2 or
+            not (trigger_hit and candle_confirmed and volume_confirmed) or
+            rr1 < 1.0 or spread_pct > 2 or volume < 1000 or
+            not np.isfinite(delta) or delta < 0.35 or delta > 0.70 or
+            bool(hard_fail)
+        )
         if safety_fail:
-            beginner_blocked_action = decision
-            failed_checks = [
-                item["name"] for item in beginner_checks
-                if item.get("status") == "fail"
-            ]
-            beginner_safety_reasons.append(
-                "Beginner Safety blocked this setup: " + ", ".join(failed_checks)
-                if failed_checks else
-                "Beginner Safety blocked this setup because the final confirmation gate was not satisfied"
-            )
+            beginner_safety_reasons.append("One or more beginner safety checks did not pass")
             decision = "NO TRADE"
             best_plan = None
 
@@ -2885,24 +2658,6 @@ if beginner_mode:
 # Forward-test logging is intentionally backend-only. It does not change the UI.
 if decision != "NO TRADE" and best_plan:
     log_signal(symbol, selected_expiry, decision, best_plan, spot, pcr, support, resistance, tf5, tf30, daily_tech, regime)
-
-# Final per-strategy status used by the UI. IMPORTANT: a strategy may pass
-# hard checks while still being blocked by the final quality/confirmation or
-# Beginner Safety gate. Never label that situation simply as "PASS".
-def strategy_ui_status(action, plan):
-    if not plan:
-        return "NO DATA", "rejected", "No valid candidate was produced."
-    hard_fail = plan.get("fail_reasons") or []
-    if action == decision and decision != "NO TRADE":
-        return "EXECUTABLE", "selected", "All final execution gates passed."
-    if hard_fail:
-        return "REJECTED", "rejected", ", ".join(hard_fail)
-    if action in engine_eligible_actions:
-        if beginner_blocked_action == action:
-            reason = "; ".join(beginner_safety_reasons) or "Beginner Safety gate not met"
-            return "SAFETY BLOCKED", "rejected", reason
-        return "ELIGIBLE · NOT SELECTED", "available", "Backend gates passed, but another eligible strategy ranked higher."
-    return "QUALITY GATE FAILED", "rejected", "Hard checks passed, but the final quality/alignment/confirmation gate was not met."
 
 
 # ENGINE RESULT: 4 strategy cards in a fixed 2x2 grid.
@@ -2944,7 +2699,7 @@ st.markdown("""
 .fo-decision-row{display:flex;justify-content:space-between;align-items:center;gap:15px;}.fo-decision-label{font-size:13px;font-weight:900;color:#98a2b3;letter-spacing:1px;}.fo-decision-title{font-size:37px;font-weight:950;letter-spacing:-1px;margin-top:4px;}.fo-decision.call .fo-decision-title{color:#147a3d}.fo-decision.put .fo-decision-title{color:#b4232f}.fo-decision.neutral .fo-decision-title{color:#475467;}
 .fo-decision-note{font-size:14px;color:#667085;margin-top:6px;}.fo-score-ring{min-width:100px;text-align:center;border-radius:15px;background:rgba(255,255,255,.72);border:1px solid rgba(0,0,0,.06);padding:11px 13px;}.fo-score-ring b{display:block;font-size:28px;color:#182230;line-height:1;}.fo-score-ring span{font-size:12px;color:#98a2b3;font-weight:800;letter-spacing:.6px;}
 .fo-decision-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:9px;margin-top:17px;}.fo-decision-cell{background:rgba(255,255,255,.72);border:1px solid rgba(16,42,67,.07);border-radius:11px;padding:11px;text-align:center;}.fo-decision-cell span{display:block;font-size:12px;font-weight:900;color:#98a2b3;letter-spacing:.7px;}.fo-decision-cell b{display:block;font-size:18px;color:#182230;margin-top:5px;}
-.fo-engine{display:grid;grid-template-columns:repeat(4,1fr);gap:10px;}.fo-engine-card{background:#fff;border:1px solid #e7ebf0;border-radius:14px;padding:14px;box-shadow:0 3px 12px rgba(16,42,67,.03);position:relative;overflow:hidden;}.fo-engine-card.selected{border-color:#8fcfa1;box-shadow:0 5px 18px rgba(20,122,61,.09);}.fo-engine-card.rejected{opacity:.82;}.fo-engine-top{display:flex;justify-content:space-between;gap:8px;align-items:center;}.fo-engine-action{font-size:15px;font-weight:900;color:#182230;}.fo-engine-status{font-size:11px;font-weight:900;padding:5px 7px;border-radius:10px;letter-spacing:.5px;background:#f2f4f7;color:#667085;}.fo-engine-card.selected{background:#eaf8ef;border-color:#8fcfa1;box-shadow:0 5px 18px rgba(20,122,61,.12);}.fo-engine-card.selected .fo-engine-status{background:#16a34a;color:#fff;}.fo-engine-card.rejected{background:#fff0f1;border-color:#f2c5c8;opacity:1;}.fo-engine-card.rejected .fo-engine-status{background:#dc2626;color:#fff;}.fo-engine-card.available{background:#fffbeb;border-color:#fbbf24;}.fo-engine-card.available .fo-engine-status{background:#f59e0b;color:#fff;}.fo-engine-contract{font-size:25px;font-weight:900;margin:10px 0 12px;color:#182230;}.fo-engine-stats{display:grid;grid-template-columns:1fr 1fr;gap:7px;}.fo-engine-stats div{background:#f8fafc;border-radius:9px;padding:8px;}.fo-engine-stats span{display:block;font-size:11px;color:#98a2b3;font-weight:900;}.fo-engine-stats b{display:block;font-size:16px;margin-top:3px;color:#182230;}.fo-engine-reason{font-size:12px;color:#98a2b3;line-height:1.45;margin-top:10px;min-height:26px;}
+.fo-engine{display:grid;grid-template-columns:repeat(4,1fr);gap:10px;}.fo-engine-card{background:#fff;border:1px solid #e7ebf0;border-radius:14px;padding:14px;box-shadow:0 3px 12px rgba(16,42,67,.03);position:relative;overflow:hidden;}.fo-engine-card.selected{border-color:#8fcfa1;box-shadow:0 5px 18px rgba(20,122,61,.09);}.fo-engine-card.rejected{opacity:.82;}.fo-engine-top{display:flex;justify-content:space-between;gap:8px;align-items:center;}.fo-engine-action{font-size:15px;font-weight:900;color:#182230;}.fo-engine-status{font-size:11px;font-weight:900;padding:5px 7px;border-radius:10px;letter-spacing:.5px;background:#f2f4f7;color:#667085;}.fo-engine-card.selected{background:#eaf8ef;border-color:#8fcfa1;box-shadow:0 5px 18px rgba(20,122,61,.12);}.fo-engine-card.selected .fo-engine-status{background:#16a34a;color:#fff;}.fo-engine-card.rejected{background:#fff0f1;border-color:#f2c5c8;opacity:1;}.fo-engine-card.rejected .fo-engine-status{background:#dc2626;color:#fff;}.fo-engine-contract{font-size:25px;font-weight:900;margin:10px 0 12px;color:#182230;}.fo-engine-stats{display:grid;grid-template-columns:1fr 1fr;gap:7px;}.fo-engine-stats div{background:#f8fafc;border-radius:9px;padding:8px;}.fo-engine-stats span{display:block;font-size:11px;color:#98a2b3;font-weight:900;}.fo-engine-stats b{display:block;font-size:16px;margin-top:3px;color:#182230;}.fo-engine-reason{font-size:12px;color:#98a2b3;line-height:1.45;margin-top:10px;min-height:26px;}
 .fo-plan-head{display:flex;align-items:center;justify-content:space-between;gap:14px;background:#fff;border:1px solid #e7ebf0;border-radius:16px 16px 0 0;padding:17px 19px;}.fo-plan-action{font-size:13px;font-weight:900;color:#98a2b3;letter-spacing:.8px;}.fo-plan-contract{font-size:25px;font-weight:900;color:#182230;margin-top:3px;}.fo-plan-pop{font-size:24px;font-weight:900;color:#147a3d;white-space:nowrap;}.fo-levels{display:grid;grid-template-columns:repeat(7,minmax(0,1fr));gap:7px;margin-top:9px;}.fo-level{background:#fff;border:1px solid #e7ebf0;border-radius:13px;padding:11px 9px;min-height:94px;min-width:0;box-sizing:border-box;overflow:hidden;}.fo-level span{display:block;font-size:11px;color:#98a2b3;font-weight:900;letter-spacing:.45px;white-space:nowrap;}.fo-level b{display:block;font-size:18px;color:#182230;margin-top:7px;white-space:nowrap;}.fo-level small{display:block;font-size:11px;color:#98a2b3;margin-top:4px;line-height:1.25;}.fo-level.entry{border-top:3px solid #3b82f6;}.fo-level.sl{border-top:3px solid #dc2626;}.fo-level.t1{border-top:3px solid #16a34a;}.fo-level.t2{border-top:3px solid #0f766e;}.fo-level.t3{border-top:3px solid #059669;}.fo-level.t4{border-top:3px solid #047857;}.fo-level.greeks{border-top:3px solid #7c3aed;}.fo-level-pct{font-weight:800!important;font-size:13px!important;}.fo-level-lot{font-weight:900!important;font-size:13px!important;margin-top:2px!important;}.fo-level.entry .fo-level-pct,.fo-level.entry .fo-level-lot{color:#475467;}.fo-level.sl .fo-level-pct,.fo-level.sl .fo-level-lot{color:#b4232f;}.fo-level.t1 .fo-level-pct,.fo-level.t1 .fo-level-lot,.fo-level.t2 .fo-level-pct,.fo-level.t2 .fo-level-lot,.fo-level.t3 .fo-level-pct,.fo-level.t3 .fo-level-lot,.fo-level.t4 .fo-level-pct,.fo-level.t4 .fo-level-lot{color:#147a3d;}
 .fo-exit{background:#fff;border:1px solid #e7ebf0;border-radius:13px;padding:13px 16px;margin-top:9px;display:flex;gap:12px;align-items:flex-start;}.fo-exit-icon{font-size:21px;}.fo-exit span{display:block;font-size:12px;color:#98a2b3;font-weight:900;letter-spacing:.6px;}.fo-exit b{display:block;font-size:14px;color:#344054;line-height:1.5;margin-top:3px;}
 .fo-sr{display:grid;grid-template-columns:1fr 1.2fr 1fr;border:1px solid #e7ebf0;border-radius:16px;overflow:hidden;background:#fff;box-shadow:0 3px 12px rgba(16,42,67,.03);}.fo-sr-side{padding:20px;text-align:center;display:flex;flex-direction:column;justify-content:center;}.fo-sr-side.support{background:#f4fbf6;}.fo-sr-side.resistance{background:#fff6f6;}.fo-sr-side span{font-size:12px;font-weight:900;letter-spacing:.7px;}.fo-sr-side.support span{color:#147a3d;}.fo-sr-side.resistance span{color:#b4232f;}.fo-sr-side b{font-size:28px;margin-top:7px;color:#182230;}.fo-sr-side small{font-size:13px;color:#98a2b3;margin-top:4px;}.fo-sr-mid{display:flex;align-items:center;justify-content:center;flex-direction:column;gap:8px;border-left:1px dashed #dfe3e8;border-right:1px dashed #dfe3e8;padding:15px;}.fo-sr-mid span{font-size:12px;color:#98a2b3;font-weight:800;}.fo-current{font-size:21px;font-weight:900;background:#f5f7f9;border:1px solid #e5e7eb;border-radius:22px;padding:8px 15px;color:#182230;}
@@ -3011,7 +2766,7 @@ st.markdown(metrics, unsafe_allow_html=True)
 if beginner_mode:
     st.markdown("""
     <div class="fo-safety-banner">
-      <div><b>🛡️ BEGINNER SAFETY + EXPLAINABILITY IS ON</b><span>The app is using a stricter execution filter, BUY setups and defined-risk credit spreads only, stronger confirmation and a plain-English checklist. This is decision support — not a guarantee of profit.</span></div>
+      <div><b>🛡️ BEGINNER SAFETY + EXPLAINABILITY IS ON</b><span>The app is using a stricter execution filter, BUY setups only, stronger confirmation and a plain-English checklist. This is decision support — not a guarantee of profit.</span></div>
       <div class="fo-safety-badge">SAFETY ON</div>
     </div>
     """, unsafe_allow_html=True)
@@ -3021,29 +2776,23 @@ trend_name = overall_trend(tf5, tf30, daily_tech)[0].upper()
 decision_class = "call" if "CALL" in decision else "put" if "PUT" in decision else "neutral"
 if decision != "NO TRADE" and best_plan:
     action_pop = safe_float(best_plan.get("pop")); action_score = safe_float(best_plan.get("score"), 0)
-    if best_plan.get("position_type") == "DEFINED_RISK_SPREAD":
-        contract = (f"SELL {best_plan['short_strike']:.0f} {'PE' if best_plan['side']=='PE' else 'CE'} + "
-                    f"BUY {best_plan['long_strike']:.0f} {'PE' if best_plan['side']=='PE' else 'CE'}")
-    else:
-        contract = f"{best_plan['strike']:.0f} {'CE' if best_plan['side']=='CE' else 'PE'}"
+    contract = f"{best_plan['strike']:.0f} {'CE' if best_plan['side']=='CE' else 'PE'}"
 else:
     action_pop = np.nan; action_score = max([safe_float(p.get("score"),0) for p in strategy_plans.values() if p] or [0]); contract = "No executable setup"
 
-score_label = "QUALITY / 100" if decision != "NO TRADE" else "BEST CANDIDATE / 100"
-
 decision_note = {
     "CALL BUY":"Directional upside setup — execute only when the displayed confirmation conditions are satisfied.",
-    "BULL PUT SPREAD":"Defined-risk bullish credit spread — sell a PE and buy a lower-strike PE hedge; maximum loss is capped.",
+    "CALL SELL":"Premium-selling setup — requires price to remain below resistance and pass the seller risk gates.",
     "PUT BUY":"Directional downside setup — execute only when the displayed confirmation conditions are satisfied.",
-    "BEAR CALL SPREAD":"Defined-risk bearish credit spread — sell a CE and buy a higher-strike CE hedge; maximum loss is capped.",
-    "NO TRADE":"No strategy survived all final execution gates. A candidate may still have passed hard checks but failed the final quality/confirmation or Beginner Safety gate."
+    "PUT SELL":"Premium-selling setup — requires price to remain above support and pass the seller risk gates.",
+    "NO TRADE":"No strategy currently meets the minimum quality, alignment, liquidity and PoP gates."
 }[decision]
 
 st.markdown(f"""
 <div class="fo-decision {decision_class}">
   <div class="fo-decision-row">
     <div><div class="fo-decision-label">ENGINE OUTPUT</div><div class="fo-decision-title">{decision}</div><div class="fo-decision-note">{decision_note}</div></div>
-    <div class="fo-score-ring"><b>{action_score:.0f}</b><span>{score_label}</span></div>
+    <div class="fo-score-ring"><b>{action_score:.0f}</b><span>QUALITY / 100</span></div>
   </div>
   <div class="fo-decision-grid">
     <div class="fo-decision-cell"><span>OPTION</span><b>{contract}</b></div>
@@ -3073,27 +2822,13 @@ if beginner_mode:
         t1_v = safe_float(best_plan.get("target1"), 0)
         t2_v = safe_float(best_plan.get("target2"), 0)
         qty = safe_float(lot_size, 0)
-        if best_plan.get("position_type") == "DEFINED_RISK_SPREAD":
-            # For a credit spread, the displayed entry is the net credit and
-            # the targets are lower debit values. Use the engine's explicit
-            # max-loss field instead of treating the spread like a long option.
-            max_loss = safe_float(best_plan.get("max_loss"), np.nan)
-            if not np.isfinite(max_loss):
-                max_loss = max(sl_v - entry_v, 0) * qty
-            reward_t1 = max(entry_v - t1_v, 0) * qty
-            reward_t2 = max(entry_v - t2_v, 0) * qty
-            t3_v = safe_float(best_plan.get("target3"), 0)
-            t4_v = safe_float(best_plan.get("target4"), 0)
-            reward_t3 = max(entry_v - t3_v, 0) * qty
-            reward_t4 = max(entry_v - t4_v, 0) * qty
-        else:
-            max_loss = max(entry_v - sl_v, 0) * qty
-            reward_t1 = max(t1_v - entry_v, 0) * qty
-            reward_t2 = max(t2_v - entry_v, 0) * qty
-            t3_v = safe_float(best_plan.get("target3"), 0)
-            t4_v = safe_float(best_plan.get("target4"), 0)
-            reward_t3 = max(t3_v - entry_v, 0) * qty
-            reward_t4 = max(t4_v - entry_v, 0) * qty
+        max_loss = max(entry_v - sl_v, 0) * qty
+        reward_t1 = max(t1_v - entry_v, 0) * qty
+        reward_t2 = max(t2_v - entry_v, 0) * qty
+        t3_v = safe_float(best_plan.get("target3"), 0)
+        t4_v = safe_float(best_plan.get("target4"), 0)
+        reward_t3 = max(t3_v - entry_v, 0) * qty
+        reward_t4 = max(t4_v - entry_v, 0) * qty
         st.markdown(f"""<div class='fo-risk-box'>
           <div class='fo-risk-cell'><span>PLANNED MAX LOSS · 1 LOT</span><b>₹{max_loss:,.0f}</b></div>
           <div class='fo-risk-cell'><span>TARGET 1 · 1 LOT</span><b>₹{reward_t1:,.0f}</b></div>
@@ -3103,7 +2838,7 @@ if beginner_mode:
         </div>""", unsafe_allow_html=True)
         st.markdown("<div class='fo-beginner-note'>⚠️ Planned loss is based on the displayed entry and stop-loss for one lot. Real execution can differ because of slippage, spread, taxes, brokerage and fast market movement. Never treat the model PoP as a guarantee.</div>", unsafe_allow_html=True)
     else:
-        st.markdown("<div class='fo-beginner-note'>⛔ No trade is displayed because no setup satisfied every final execution gate. Waiting is a valid outcome.</div>", unsafe_allow_html=True)
+        st.markdown("<div class='fo-beginner-note'>⛔ No trade is displayed because the setup did not satisfy the beginner safety requirements. Waiting is a valid outcome.</div>", unsafe_allow_html=True)
 
 st.markdown("<div class='fo-section'>ENGINE RESULT · ALL 4 STRATEGIES</div>", unsafe_allow_html=True)
 
@@ -3263,18 +2998,21 @@ section[data-testid="stSidebar"] .stCaption { color:#64748b !important; }
 </style>""", unsafe_allow_html=True)
 
 engine_html = "<div class='fo-engine fo-engine-grid'>"
-for action in ["CALL BUY","PUT BUY","BULL PUT SPREAD","BEAR CALL SPREAD"]:
+for action in ["CALL BUY","CALL SELL","PUT BUY","PUT SELL"]:
     plan = strategy_plans[action]
     if not plan:
         engine_html += f"<div class='fo-engine-card rejected'><div class='fo-engine-top'><div class='fo-engine-action'>{action}</div><div class='fo-engine-status'>NO DATA</div></div><div class='fo-engine-contract'>—</div><div class='fo-engine-reason'>No valid candidate was produced.</div></div>"
         continue
-    status, status_class, status_reason = strategy_ui_status(action, plan)
+    fails = ", ".join(plan.get("fail_reasons") or []) or "All hard checks passed"
+    selected = action == decision
+    status = "SELECTED" if selected else ("PASS" if not plan.get("fail_reasons") and safe_float(plan.get("score"),0) >= MIN_SCORE and safe_float(plan.get("pop"),0) >= MIN_POP else "REJECTED")
+    status_class = "selected" if selected else ("" if status == "PASS" else "rejected")
     engine_html += f"""
     <div class='fo-engine-card {status_class}'>
       <div class='fo-engine-top'><div class='fo-engine-action'>{action}</div><div class='fo-engine-status'>{status}</div></div>
-      <div class='fo-engine-contract'>{(f"SELL {plan['short_strike']:.0f} {'PE' if plan['side']=='PE' else 'CE'} + BUY {plan['long_strike']:.0f} {'PE' if plan['side']=='PE' else 'CE'}") if plan.get('position_type') == 'DEFINED_RISK_SPREAD' else f"{plan['strike']:.0f} {'CE' if plan['side']=='CE' else 'PE'}"}</div>
+      <div class='fo-engine-contract'>{plan['strike']:.0f} {'CE' if plan['side']=='CE' else 'PE'}</div>
       <div class='fo-engine-stats'><div><span>PoP</span><b>{safe_float(plan.get('pop')):.1f}%</b></div><div><span>QUALITY</span><b>{safe_float(plan.get('score'),0):.0f}/100</b></div></div>
-      <div class='fo-engine-reason'>{status_reason}</div>
+      <div class='fo-engine-reason'>{fails}</div>
     </div>"""
 engine_html += "</div>"
 st.markdown(engine_html, unsafe_allow_html=True)
@@ -3292,12 +3030,7 @@ st.markdown(f"""
 
 if decision != "NO TRADE" and best_plan:
     st.markdown("<div class='fo-section'>SELECTED TRADE PLAN</div>", unsafe_allow_html=True)
-    selected_contract = (
-        f"SELL {best_plan['short_strike']:.0f} {'PE' if best_plan['side']=='PE' else 'CE'} + "
-        f"BUY {best_plan['long_strike']:.0f} {'PE' if best_plan['side']=='PE' else 'CE'}"
-        if best_plan.get("position_type") == "DEFINED_RISK_SPREAD" else
-        f"{best_plan['strike']:.0f} {'CE' if best_plan['side']=='CE' else 'PE'}"
-    )
+    selected_contract = f"{best_plan['strike']:.0f} {'CE' if best_plan['side']=='CE' else 'PE'}"
     st.markdown(f"""
     <div class="fo-plan-head">
       <div><div class="fo-plan-action">SELECTED STRATEGY</div><div class="fo-plan-contract">{decision} · {selected_contract}</div></div>
@@ -3307,22 +3040,10 @@ if decision != "NO TRADE" and best_plan:
     entry_value = safe_float(best_plan.get("entry"))
 
     is_sell = (
-        best_plan.get("position_type") == "DEFINED_RISK_SPREAD"
-        or str(best_plan.get("action", decision)).upper().endswith("SELL")
+        str(best_plan.get("action", decision)).upper().endswith("SELL")
         or str(decision).upper().endswith("SELL")
     )
     lot_qty = safe_float(lot_size)
-
-    if best_plan.get("position_type") == "DEFINED_RISK_SPREAD":
-        margin_text = (f"₹{best_plan.get('margin_final'):,.0f}" if np.isfinite(safe_float(best_plan.get('margin_final'))) else "Unavailable")
-        st.markdown(f"""
-        <div class="fo-why" style="margin-bottom:12px;">
-          <div class="fo-why-line"><b>SPREAD STRUCTURE</b> · SELL {best_plan['short_strike']:.0f} {'PE' if best_plan['side']=='PE' else 'CE'} + BUY {best_plan['long_strike']:.0f} {'PE' if best_plan['side']=='PE' else 'CE'}</div>
-          <div class="fo-why-line"><b>NET CREDIT</b> · ₹{best_plan['credit']:.2f} · <b>MAX PROFIT</b> · ₹{best_plan['max_profit']:,.0f} per lot</div>
-          <div class="fo-why-line"><b>MAX LOSS</b> · ₹{best_plan['max_loss']:,.0f} per lot · <b>BREAKEVEN</b> · {best_plan['breakeven']:.2f}</div>
-          <div class="fo-why-line"><b>UPSTOX FINAL MARGIN</b> · {margin_text} · <b>WIDTH</b> · ₹{best_plan['width']:.0f}</div>
-        </div>
-        """, unsafe_allow_html=True)
 
     def change_from_entry(level_value):
         level_value = safe_float(level_value)
@@ -3360,28 +3081,28 @@ if decision != "NO TRADE" and best_plan:
     st.markdown(level_html, unsafe_allow_html=True)
     st.markdown(f"<div class='fo-exit'><div class='fo-exit-icon'>🚪</div><div><span>EXIT RULE</span><b>{best_plan.get('exit','Follow stop-loss and targets.')}</b></div></div>", unsafe_allow_html=True)
 else:
-    st.markdown("<div class='fo-exit' style='margin-top:10px;'><div class='fo-exit-icon'>⛔</div><div><span>NO TRADE</span><b>No strategy survived all final execution gates. Some strategies may have passed hard checks, but no executable setup cleared every required quality, alignment, confirmation and Beginner Safety check. No executable entry, SL or target is displayed.</b></div></div>", unsafe_allow_html=True)
+    st.markdown("<div class='fo-exit' style='margin-top:10px;'><div class='fo-exit-icon'>⛔</div><div><span>NO TRADE</span><b>None of CALL BUY, CALL SELL, PUT BUY or PUT SELL passed the backend quality + PoP gates. No executable entry, SL or target is displayed.</b></div></div>", unsafe_allow_html=True)
 
 with st.expander("Why this decision?", expanded=False):
     why_lines=[]
     if decision != "NO TRADE" and best_plan:
         why_lines += [
-            f"Selected {decision} on {((str(best_plan['short_strike']) + ' ' + ('PE' if best_plan['side']=='PE' else 'CE') + ' / ' + str(best_plan['long_strike']) + ' ' + ('PE' if best_plan['side']=='PE' else 'CE')) if best_plan.get('position_type') == 'DEFINED_RISK_SPREAD' else (str(best_plan['strike']) + ' ' + ('CE' if best_plan['side']=='CE' else 'PE')))} with strategy PoP {best_plan['pop']:.1f}% and quality score {best_plan['score']:.0f}/100.",
+            f"Selected {decision} on {best_plan['strike']:.0f} {'CE' if best_plan['side']=='CE' else 'PE'} with strategy PoP {best_plan['pop']:.1f}% and quality score {best_plan['score']:.0f}/100.",
             f"Timeframes: 5m {tf5['trend']} · 30m {tf30['trend']} · Daily {daily_tech['trend']}.",
             f"Market structure: Support {fmt_price(support)} · Resistance {fmt_price(resistance)} · VWAP {fmt_price(tf5.get('vwap'))} · Regime {regime}.",
         ]
     else:
-        for action in ["CALL BUY","PUT BUY","BULL PUT SPREAD","BEAR CALL SPREAD"]:
+        for action in ["CALL BUY","CALL SELL","PUT BUY","PUT SELL"]:
             plan=strategy_plans[action]
             if plan:
-                _status, _cls, reason = strategy_ui_status(action, plan)
-                why_lines.append(f"{action}: {_status} — {reason} · PoP {safe_float(plan.get('pop')):.1f}% · Score {safe_float(plan.get('score'),0):.0f}/100.")
+                reason=", ".join(plan.get("fail_reasons") or []) or "quality/confirmation gate not met"
+                why_lines.append(f"{action}: {reason} · PoP {safe_float(plan.get('pop')):.1f}% · Score {safe_float(plan.get('score'),0):.0f}/100.")
     st.markdown("<div class='fo-why'>"+"".join(f"<div class='fo-why-line'>{x}</div>" for x in why_lines)+"</div>",unsafe_allow_html=True)
 
 st.markdown("<div class='fo-section'>OPTION DETAILS</div>", unsafe_allow_html=True)
 if decision != "NO TRADE" and best_plan:
     st.markdown(f"""
-    <div class="fo-why"><div class="fo-why-line"><b>{decision}</b> · {((f"SELL {best_plan['short_strike']:.0f} {'PE' if best_plan['side']=='PE' else 'CE'} + BUY {best_plan['long_strike']:.0f} {'PE' if best_plan['side']=='PE' else 'CE'}") if best_plan.get('position_type') == 'DEFINED_RISK_SPREAD' else f"{best_plan['strike']:.0f} {'CE' if best_plan['side']=='CE' else 'PE'}")} · PoP {best_plan['pop']:.1f}% · Delta {safe_float(best_plan['delta']):.2f} · IV {safe_float(best_plan['iv']):.1f}% · OI {fmt_num(best_plan['oi'])} · Volume {fmt_num(best_plan['volume'])}</div></div>
+    <div class="fo-why"><div class="fo-why-line"><b>{decision}</b> · {best_plan['strike']:.0f} {'CE' if best_plan['side']=='CE' else 'PE'} · PoP {best_plan['pop']:.1f}% · Delta {safe_float(best_plan['delta']):.2f} · IV {safe_float(best_plan['iv']):.1f}% · OI {fmt_num(best_plan['oi'])} · Volume {fmt_num(best_plan['volume'])}</div></div>
     """,unsafe_allow_html=True)
 else:
     st.markdown("<div class='fo-why'><div class='fo-why-line' style='color:#98a2b3;text-align:center;'>No option is currently selected for execution.</div></div>",unsafe_allow_html=True)
