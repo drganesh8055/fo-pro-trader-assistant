@@ -3211,25 +3211,170 @@ section[data-testid="stSidebar"] .stCaption { color:#64748b !important; }
 .tab-danger { background:#ffe4e6 !important; border-color:#fb7185 !important; color:#9f1239 !important; }
 </style>""", unsafe_allow_html=True)
 
-engine_html = "<div class='fo-engine fo-engine-grid'>"
-for action in ["CALL BUY","PUT BUY","BULL PUT CREDIT SPREAD","BEAR CALL CREDIT SPREAD","IRON CONDOR"]:
-    plan = strategy_plans[action]
+# Interactive strategy cards: rejected candidates remain visible and can be opened
+# as a clearly-labelled hypothetical trade preview. This does NOT override any
+# quality/safety gate and does not turn a rejected strategy into an executable trade.
+if "engine_preview_action" not in st.session_state:
+    st.session_state.engine_preview_action = None
+
+strategy_order = [
+    "CALL BUY",
+    "PUT BUY",
+    "BULL PUT CREDIT SPREAD",
+    "BEAR CALL CREDIT SPREAD",
+    "IRON CONDOR",
+]
+
+
+def _engine_contract_text(action, plan):
     if not plan:
-        engine_html += f"<div class='fo-engine-card rejected'><div class='fo-engine-top'><div class='fo-engine-action'>{action}</div><div class='fo-engine-status'>NO DATA</div></div><div class='fo-engine-contract'>—</div><div class='fo-engine-reason'>No valid candidate was produced.</div></div>"
-        continue
-    fails = ", ".join(plan.get("fail_reasons") or []) or "All hard checks passed"
-    selected = action == decision
-    status = "SELECTED" if selected else ("PASS" if not plan.get("fail_reasons") and safe_float(plan.get("score"),0) >= MIN_SCORE and safe_float(plan.get("pop"),0) >= MIN_POP else "REJECTED")
-    status_class = "selected" if selected else ("" if status == "PASS" else "rejected")
-    engine_html += f"""
-    <div class='fo-engine-card {status_class}'>
-      <div class='fo-engine-top'><div class='fo-engine-action'>{action}</div><div class='fo-engine-status'>{status}</div></div>
-      <div class='fo-engine-contract'>{(f"{plan['short_strike']:.0f} PE / {plan['long_strike']:.0f} PE" if action == 'BULL PUT CREDIT SPREAD' else f"{plan['short_strike']:.0f} CE / {plan['long_strike']:.0f} CE" if action == 'BEAR CALL CREDIT SPREAD' else f"{plan['put_short_strike']:.0f} PE / {plan['put_long_strike']:.0f} PE · {plan['call_short_strike']:.0f} CE / {plan['call_long_strike']:.0f} CE" if action == 'IRON CONDOR' else f"{plan['strike']:.0f} {'CE' if plan['side']=='CE' else 'PE'}")}</div>
-      <div class='fo-engine-stats'><div><span>PoP</span><b>{safe_float(plan.get('pop')):.1f}%</b></div><div><span>QUALITY</span><b>{safe_float(plan.get('score'),0):.0f}/100</b></div></div>
-      <div class='fo-engine-reason'>{('Net credit ₹'+format(safe_float(plan.get('net_credit'),0), '.2f')+' · Max loss ₹'+format(safe_float(plan.get('max_loss_per_unit'),0), '.2f')+' / unit') if plan.get('defined_risk') else fails}</div>
-    </div>"""
-engine_html += "</div>"
-st.markdown(engine_html, unsafe_allow_html=True)
+        return "—"
+    if action == "BULL PUT CREDIT SPREAD":
+        return f"{safe_float(plan.get('short_strike')):.0f} PE / {safe_float(plan.get('long_strike')):.0f} PE"
+    if action == "BEAR CALL CREDIT SPREAD":
+        return f"{safe_float(plan.get('short_strike')):.0f} CE / {safe_float(plan.get('long_strike')):.0f} CE"
+    if action == "IRON CONDOR":
+        return (
+            f"{safe_float(plan.get('put_short_strike')):.0f}/{safe_float(plan.get('put_long_strike')):.0f} PE · "
+            f"{safe_float(plan.get('call_short_strike')):.0f}/{safe_float(plan.get('call_long_strike')):.0f} CE"
+        )
+    return f"{safe_float(plan.get('strike')):.0f} {'CE' if plan.get('side') == 'CE' else 'PE'}"
+
+
+# Keep the same visual 2-column engine layout, but use native Streamlit buttons
+# so every card—including REJECTED cards—can be clicked safely.
+st.markdown("""
+<style>
+/* Interactive rejected-trade preview */
+.fo-preview{border:2px solid #d7e2ee;border-radius:16px;padding:18px;margin:2px 0 16px;background:#fff;box-shadow:0 7px 20px rgba(15,23,42,.055);}
+.fo-preview.status-red{background:linear-gradient(135deg,#fff7f7,#fff);border-color:#fda4af;}
+.fo-preview.status-green{background:linear-gradient(135deg,#f3fff7,#fff);border-color:#86efac;}
+.fo-preview-head{display:flex;justify-content:space-between;align-items:flex-start;gap:15px;}
+.fo-preview-label{font-size:12px;font-weight:900;letter-spacing:.8px;color:#9f1239;}
+.fo-preview.status-green .fo-preview-label{color:#166534;}
+.fo-preview-title{font-size:25px;font-weight:950;color:#182230;margin-top:4px;}
+.fo-preview-contract{font-size:20px;font-weight:900;color:#0f3b63;text-align:right;}
+.fo-preview-note{margin-top:12px;padding:11px 13px;border-radius:11px;background:#fff7ed;border:1px solid #fed7aa;color:#9a3412;font-size:13px;line-height:1.45;}
+.fo-preview-grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:8px;margin-top:12px;}
+.fo-preview-grid>div{background:#fff;border:1px solid #dbe5ef;border-radius:10px;padding:10px;min-width:0;}
+.fo-preview-grid span{display:block;font-size:10px;font-weight:900;color:#64748b;letter-spacing:.5px;}
+.fo-preview-grid b{display:block;font-size:17px;color:#182230;margin-top:5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+.fo-preview-rule{margin-top:10px;padding:11px 13px;border-radius:10px;background:#f8fafc;border:1px solid #dbe5ef;color:#475569;font-size:13px;line-height:1.45;}
+.fo-preview-rule b{color:#0f3b63;}
+.fo-preview-reject{margin-top:10px;padding:11px 13px;border-radius:10px;background:#fff1f2;border:1px solid #fda4af;color:#9f1239;font-size:13px;line-height:1.45;}
+@media(max-width:900px){.fo-preview-grid{grid-template-columns:repeat(2,minmax(0,1fr));}.fo-preview-head{flex-direction:column;}.fo-preview-contract{text-align:left;}}
+@media(max-width:520px){.fo-preview-grid{grid-template-columns:1fr;}}
+</style>
+""", unsafe_allow_html=True)
+
+engine_cols = st.columns(2, gap="medium")
+for idx, action in enumerate(strategy_order):
+    col = engine_cols[idx % 2]
+    plan = strategy_plans.get(action)
+    with col:
+        if not plan:
+            status = "NO DATA"
+            status_class = "rejected"
+            contract_text = "—"
+            reason_text = "No valid candidate was produced."
+            pop_text = "—"
+            score_text = "—"
+        else:
+            fails = ", ".join(plan.get("fail_reasons") or []) or "All hard checks passed"
+            selected = action == decision
+            status = "SELECTED" if selected else (
+                "PASS" if not plan.get("fail_reasons")
+                and safe_float(plan.get("score"), 0) >= MIN_SCORE
+                and safe_float(plan.get("pop"), 0) >= MIN_POP
+                else "REJECTED"
+            )
+            status_class = "selected" if selected else ("" if status == "PASS" else "rejected")
+            contract_text = _engine_contract_text(action, plan)
+            reason_text = (
+                "Net credit ₹" + format(safe_float(plan.get("net_credit"), 0), ".2f")
+                + " · Max loss ₹" + format(safe_float(plan.get("max_loss_per_unit"), 0), ".2f") + " / unit"
+                if plan.get("defined_risk") else fails
+            )
+            pop_value = safe_float(plan.get("pop"))
+            pop_text = f"{pop_value:.1f}%" if np.isfinite(pop_value) else "—"
+            score_text = f"{safe_float(plan.get('score'), 0):.0f}/100"
+
+        card_html = f"""
+        <div class='fo-engine-card {status_class}' style='margin-bottom:8px;'>
+          <div class='fo-engine-top'><div class='fo-engine-action'>{action}</div><div class='fo-engine-status'>{status}</div></div>
+          <div class='fo-engine-contract'>{contract_text}</div>
+          <div class='fo-engine-stats'>
+            <div><span>PoP</span><b>{pop_text}</b></div>
+            <div><span>QUALITY</span><b>{score_text}</b></div>
+          </div>
+          <div class='fo-engine-reason'>{reason_text}</div>
+        </div>
+        """
+        st.markdown(card_html, unsafe_allow_html=True)
+        button_label = "VIEW TRADE DETAILS" if plan else "VIEW CANDIDATE DETAILS"
+        if st.button(button_label, key=f"engine_preview_{idx}", use_container_width=True):
+            st.session_state.engine_preview_action = action
+
+# Show the selected/rejected candidate preview after the cards.
+preview_action = st.session_state.get("engine_preview_action")
+preview_plan = strategy_plans.get(preview_action) if preview_action else None
+if preview_action:
+    st.markdown("<div class='fo-section'>TRADE DETAILS PREVIEW</div>", unsafe_allow_html=True)
+    if preview_plan:
+        preview_rejected = preview_action != decision or bool(preview_plan.get("fail_reasons"))
+        preview_label = "REJECTED TRADE PREVIEW · NOT AN ENTRY" if preview_rejected else "SELECTED TRADE DETAILS"
+        preview_color_class = "status-red" if preview_rejected else "status-green"
+        preview_contract = _engine_contract_text(preview_action, preview_plan)
+        preview_pop = safe_float(preview_plan.get("pop"))
+        preview_score = safe_float(preview_plan.get("score"), 0)
+        preview_entry = safe_float(preview_plan.get("entry"))
+        preview_sl = safe_float(preview_plan.get("sl"))
+        preview_t1 = safe_float(preview_plan.get("target1"))
+        preview_t2 = safe_float(preview_plan.get("target2"))
+        preview_t3 = safe_float(preview_plan.get("target3"))
+        preview_t4 = safe_float(preview_plan.get("target4"))
+        preview_delta = safe_float(preview_plan.get("delta"))
+        preview_iv = safe_float(preview_plan.get("iv"))
+        preview_max_loss = safe_float(preview_plan.get("max_loss_per_unit"))
+        preview_max_profit = safe_float(preview_plan.get("max_profit_per_unit"))
+        preview_rr = safe_float(preview_plan.get("risk_reward"))
+        fail_text = "; ".join(preview_plan.get("fail_reasons") or []) or "No hard rejection reason recorded."
+
+        def _pv(v, digits=2):
+            return fmt_price(v) if np.isfinite(v) else "—"
+
+        st.markdown(f"""
+        <div class='fo-preview {preview_color_class}'>
+          <div class='fo-preview-head'>
+            <div><div class='fo-preview-label'>{preview_label}</div><div class='fo-preview-title'>{preview_action}</div></div>
+            <div class='fo-preview-contract'>{preview_contract}</div>
+          </div>
+          <div class='fo-preview-note'>
+            This is the exact candidate generated by the engine from the current live option chain. It is shown for learning/testing only.
+            A rejected candidate remains rejected; viewing it does not bypass any safety or quality gate.
+          </div>
+          <div class='fo-preview-grid'>
+            <div><span>PoP</span><b>{f'{preview_pop:.1f}%' if np.isfinite(preview_pop) else '—'}</b></div>
+            <div><span>QUALITY</span><b>{preview_score:.0f}/100</b></div>
+            <div><span>ENTRY / CREDIT</span><b>{_pv(preview_entry)}</b></div>
+            <div><span>STOP / EXIT</span><b>{_pv(preview_sl)}</b></div>
+            <div><span>TARGET 1</span><b>{_pv(preview_t1)}</b></div>
+            <div><span>TARGET 2</span><b>{_pv(preview_t2)}</b></div>
+            <div><span>TARGET 3</span><b>{_pv(preview_t3)}</b></div>
+            <div><span>TARGET 4</span><b>{_pv(preview_t4)}</b></div>
+            <div><span>DELTA</span><b>{f'{preview_delta:.2f}' if np.isfinite(preview_delta) else '—'}</b></div>
+            <div><span>IV</span><b>{f'{preview_iv:.1f}%' if np.isfinite(preview_iv) else '—'}</b></div>
+            <div><span>MAX LOSS / UNIT</span><b>{_pv(preview_max_loss)}</b></div>
+            <div><span>MAX PROFIT / UNIT</span><b>{_pv(preview_max_profit)}</b></div>
+          </div>
+          <div class='fo-preview-rule'><b>EXIT RULE</b><br>{preview_plan.get('exit','Follow the displayed stop/targets.')}</div>
+          <div class='fo-preview-rule'><b>TRIGGER / CONFIRMATION</b><br>{preview_plan.get('trigger','Follow the strategy confirmation conditions before considering any entry.')}</div>
+          {f"<div class='fo-preview-reject'><b>WHY REJECTED</b><br>{fail_text}</div>" if preview_rejected else ""}
+        </div>
+        """, unsafe_allow_html=True)
+    else:
+        st.markdown("<div class='fo-preview status-red'><b>No candidate details are available for this strategy.</b></div>", unsafe_allow_html=True)
+
 
 # Optional visual support/resistance map. It uses the same values already calculated;
 # it does not create or alter a trading signal.
