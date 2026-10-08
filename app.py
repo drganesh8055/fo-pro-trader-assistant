@@ -1462,18 +1462,17 @@ def rsi_ok_for_breakout(tf, side):
 
 def build_sell_plan(row, side, spot, support, resistance, pcr, tf5, tf30, daily,
                     risk_profile, chain, oi_wall_info=None, regime="MIXED"):
-    """Build a premium-selling plan using the same calibrated quality framework.
+    """Legacy naked-premium SELL analysis retained only as an internal reference.
 
-    SELL scores are intentionally stricter than BUY scores. A high option PoP
-    cannot compensate for a poor market regime, weak liquidity, close wall or
-    unattractive risk/reward.
+    It is deliberately NOT used as a primary executable recommendation. The
+    user-facing SELL engine now converts suitable conditions into defined-risk
+    credit spreads / iron condors.
     """
     if row is None:
         return None
     prefix = "CE" if side == "CE" else "PE"
     ltp = safe_float(row[f"{prefix} LTP"])
     bid = safe_float(row[f"{prefix} Bid"])
-    ask = safe_float(row[f"{prefix} Ask"])
     entry = bid if np.isfinite(bid) and bid > 0 else ltp
     if not np.isfinite(entry) or entry <= 0:
         return None
@@ -1483,82 +1482,16 @@ def build_sell_plan(row, side, spot, support, resistance, pcr, tf5, tf30, daily,
                           oi_wall_info=oi_wall_info, regime=regime, mode="SELL")
     delta = scored["delta"]
     iv = scored["iv"]
-    gamma = scored["gamma"]
-    theta = scored["theta"]
-    vega = scored["vega"]
     oi = scored["oi"]
-    chg_oi = scored["chg_oi"]
     volume = scored["volume"]
     spread_pct = scored["spread_pct"]
-    depth_ratio = scored["depth_ratio"]
-    long_pop = safe_float(row[f"{prefix} PoP"])
-    # Keep the legacy display meaning, but do not treat it as a measured win rate.
-    short_pop = 100.0 - long_pop if np.isfinite(long_pop) else np.nan
     abs_delta = abs(delta) if np.isfinite(delta) else np.nan
-    oi_behavior = scored["oi_behavior"]
-
-    wall_room = ((resistance - spot) / max(spot, 1) * 100
-                 if side == "CE" else
-                 (spot - support) / max(spot, 1) * 100)
-
-    # Adaptive seller risk.
-    atr = max(safe_float(tf5.get("atr"), spot * 0.01), spot * 0.001)
-    underlying_risk = atr * {"Conservative": 0.50, "Balanced": 0.65, "Aggressive": 0.80}.get(risk_profile, 0.65)
-    premium_risk = max(
-        entry * 0.18,
-        underlying_risk * max(abs_delta if np.isfinite(abs_delta) else 0.20, 0.20)
-        * (1 + max((safe_float(iv, 20) - 30) / 200, 0))
-    )
-    sl = round(entry + premium_risk, 2)
-    target1 = round(max(entry - premium_risk * 0.90, entry * 0.45), 2)
-    target2 = round(max(entry - premium_risk * 1.35, entry * 0.25), 2)
-    target3 = round(max(entry - premium_risk * 1.80, entry * 0.15), 2)
-    target4 = round(max(entry - premium_risk * 2.25, entry * 0.05), 2)
-    if target2 >= target1:
-        target2 = round(max(entry * 0.30, target1 - entry * 0.10), 2)
-    if target3 >= target2:
-        target3 = round(max(entry * 0.15, target2 - entry * 0.10), 2)
-    if target4 >= target3:
-        target4 = round(max(entry * 0.05, target3 - entry * 0.10), 2)
-
-    rr1 = (entry - target1) / max(sl - entry, 0.01)
-    rr2 = (entry - target2) / max(sl - entry, 0.01)
-    rr3 = (entry - target3) / max(sl - entry, 0.01)
-    rr4 = (entry - target4) / max(sl - entry, 0.01)
-
-    # Seller-specific quality penalties. These are the main calibration change:
-    # a setup with a near wall or poor T1 reward cannot remain in the 90s.
-    risk_penalty = 0.0
-    if wall_room < 0.75:
-        risk_penalty += 18
-    elif wall_room < 1.00:
-        risk_penalty += 10
-    elif wall_room < 1.50:
-        risk_penalty += 5
-
-    if rr1 < 0.75:
-        risk_penalty += 8
-    elif rr1 < 1.00:
-        risk_penalty += 5
-    if rr2 < 1.20:
-        risk_penalty += 3
-
-    if regime in {"BREAKOUT", "BREAKDOWN"}:
-        risk_penalty += 8
-    if spread_pct > 3:
-        risk_penalty += 7
-    if depth_ratio < 0.20:
-        risk_penalty += 4
-    if np.isfinite(abs_delta) and abs_delta > 0.45:
-        risk_penalty += 5
-    if np.isfinite(gamma) and gamma > 0 and np.isfinite(abs_delta) and abs_delta > 0.35:
-        risk_penalty += 3
-
-    score = float(np.clip(scored["score"] - risk_penalty, 0, 100))
+    long_pop = safe_float(row[f"{prefix} PoP"])
+    short_pop = 100.0 - long_pop if np.isfinite(long_pop) else np.nan
+    wall_room = ((resistance - spot) / max(spot, 1) * 100 if side == "CE"
+                 else (spot - support) / max(spot, 1) * 100)
 
     hard_fail = []
-    if tf5.get("trend") == ("Bullish" if side == "CE" else "Bearish"):
-        hard_fail.append("5m trend conflict")
     if spread_pct > 4:
         hard_fail.append("wide option spread")
     if not np.isfinite(abs_delta) or not (0.15 <= abs_delta <= 0.55):
@@ -1573,36 +1506,286 @@ def build_sell_plan(row, side, spot, support, resistance, pcr, tf5, tf30, daily,
         hard_fail.append("resistance breached")
     if side == "PE" and spot <= support:
         hard_fail.append("support breached")
-    if wall_room < 0.75:
-        hard_fail.append("insufficient room to wall")
     if regime in {"BREAKOUT", "BREAKDOWN"}:
         hard_fail.append("breakout regime unsuitable for short premium")
-    if rr1 < 0.75:
-        hard_fail.append("poor target 1 risk/reward")
-    if score < 60:
-        hard_fail.append("quality score below threshold")
 
-    if side == "CE":
-        trigger = f"Sell only while spot remains below {fmt_price(resistance)} and 5m shows rejection/weakness; avoid fresh shorts after a breakout."
-        exit_rule = f"Exit if spot sustains above resistance {fmt_price(resistance)} or premium reaches {fmt_price(sl)}. Book profit progressively."
-    else:
-        trigger = f"Sell only while spot remains above {fmt_price(support)} and 5m shows rejection/strength; avoid fresh shorts after a breakdown."
-        exit_rule = f"Exit if spot sustains below support {fmt_price(support)} or premium reaches {fmt_price(sl)}. Book profit progressively."
-
-    readiness = "READY" if not hard_fail and score >= 65 and np.isfinite(short_pop) and short_pop >= 55 else "NO TRADE"
+    score = float(np.clip(scored["score"] - (12 if regime in {"BREAKOUT", "BREAKDOWN"} else 0), 0, 100))
     return {
         "side": side, "strike": float(row["Strike"]),
         "action": "CALL SELL" if side == "CE" else "PUT SELL",
-        "entry": entry, "sl": sl, "target1": target1, "target2": target2, "target3": target3, "target4": target4,
+        "entry": entry, "sl": entry * 1.50,
+        "target1": entry * 0.50, "target2": entry * 0.35,
+        "target3": entry * 0.20, "target4": entry * 0.10,
         "pop": short_pop, "long_pop": long_pop, "delta": delta, "iv": iv,
-        "oi_behavior": oi_behavior, "gamma": gamma, "theta": theta, "vega": vega,
-        "score": score, "rr1": rr1, "rr2": rr2, "rr3": rr3, "rr4": rr4,
-        "trigger": trigger, "trigger_level": resistance if side == "CE" else support,
+        "oi_behavior": scored["oi_behavior"], "gamma": scored["gamma"],
+        "theta": scored["theta"], "vega": scored["vega"], "score": score,
+        "rr1": 1.0, "rr2": 1.5, "rr3": 2.0, "rr4": 2.5,
+        "trigger": "Internal reference only — naked selling is not a primary recommendation.",
+        "trigger_level": resistance if side == "CE" else support,
         "trigger_hit": not hard_fail, "fail_reasons": hard_fail,
-        "oi": oi, "chg_oi": chg_oi, "volume": volume, "spread_pct": spread_pct,
-        "alignment": scored["alignment"], "vwap": scored["vwap"], "room_pct": wall_room,
-        "readiness": readiness, "exit": exit_rule, "regime": regime,
-        "depth_ratio": depth_ratio, "risk_penalty": risk_penalty,
+        "oi": oi, "chg_oi": scored["chg_oi"], "volume": volume,
+        "spread_pct": spread_pct, "alignment": scored["alignment"],
+        "vwap": scored["vwap"], "room_pct": wall_room,
+        "readiness": "READY" if not hard_fail and score >= 65 and np.isfinite(short_pop) and short_pop >= 55 else "NO TRADE",
+        "exit": "Reference only.", "regime": regime,
+        "depth_ratio": scored["depth_ratio"], "risk_penalty": 0,
+        "defined_risk": False, "strategy_type": "Naked short (reference only)",
+    }
+
+
+def _spread_width_candidates(chain, spot, risk_profile):
+    """Return practical strike-widths in index/stock price units."""
+    strikes = sorted(float(x) for x in chain["Strike"].dropna().unique() if np.isfinite(x))
+    if len(strikes) < 3:
+        return []
+    diffs = [b-a for a,b in zip(strikes, strikes[1:]) if b-a > 0]
+    if not diffs:
+        return []
+    step = float(np.median(diffs))
+    multipliers = {"Conservative": (1, 2), "Balanced": (1, 2, 3), "Aggressive": (1, 2)}.get(risk_profile, (1, 2, 3))
+    return [step * m for m in multipliers]
+
+
+def _leg_market_ok(chain_row, prefix, min_volume=800, max_spread=3.0):
+    bid = safe_float(chain_row[f"{prefix} Bid"])
+    ask = safe_float(chain_row[f"{prefix} Ask"])
+    ltp = safe_float(chain_row[f"{prefix} LTP"])
+    oi = safe_float(chain_row[f"{prefix} OI"], 0)
+    vol = safe_float(chain_row[f"{prefix} Volume"], 0)
+    if not np.isfinite(ltp) or ltp <= 0 or oi <= 0 or vol < min_volume:
+        return False
+    if not (np.isfinite(bid) and np.isfinite(ask) and bid > 0 and ask > 0):
+        return False
+    spread = max(ask-bid, 0) / max((ask+bid)/2, 0.01) * 100
+    return spread <= max_spread
+
+
+def _credit_spread_plan(short_row, long_row, short_side, spot, support, resistance,
+                        pcr, tf5, tf30, daily, risk_profile, chain, oi_wall_info, regime,
+                        strategy_name):
+    """Build a defined-risk credit spread from two live option-chain legs."""
+    prefix = "CE" if short_side == "CE" else "PE"
+    long_prefix = prefix
+    if not _leg_market_ok(short_row, prefix) or not _leg_market_ok(long_row, long_prefix):
+        return None
+
+    short_strike = safe_float(short_row["Strike"])
+    long_strike = safe_float(long_row["Strike"])
+    short_bid = safe_float(short_row[f"{prefix} Bid"])
+    long_ask = safe_float(long_row[f"{long_prefix} Ask"])
+    short_ltp = safe_float(short_row[f"{prefix} LTP"])
+    long_ltp = safe_float(long_row[f"{long_prefix} LTP"])
+    credit = short_bid - long_ask
+    width = abs(short_strike-long_strike)
+    if not np.isfinite(credit) or not np.isfinite(width) or credit <= 0 or width <= credit:
+        return None
+
+    short_delta = safe_float(short_row[f"{prefix} Delta"])
+    short_iv = safe_float(short_row[f"{prefix} IV"])
+    short_pop_long = safe_float(short_row[f"{prefix} PoP"])
+    pop = 100.0-short_pop_long if np.isfinite(short_pop_long) else np.nan
+    short_oi = safe_float(short_row[f"{prefix} OI"], 0)
+    short_volume = safe_float(short_row[f"{prefix} Volume"], 0)
+    short_spread = max(safe_float(short_row[f"{prefix} Ask"])-short_bid,0) / max((safe_float(short_row[f"{prefix} Ask"])+short_bid)/2,0.01)*100
+    long_spread = max(safe_float(long_row[f"{prefix} Ask"])-safe_float(long_row[f"{prefix} Bid"]),0) / max((safe_float(long_row[f"{prefix} Ask"])+safe_float(long_row[f"{prefix} Bid"]))/2,0.01)*100
+
+    # Defined-risk payoff. Entry is a net credit; stop is expressed as the
+    # debit needed to close the spread, and targets are remaining spread values.
+    max_loss_per_unit = width-credit
+    stop_debit = min(width*0.92, credit*2.0)
+    target1_debit = max(credit*0.50, 0.01)
+    target2_debit = max(credit*0.25, 0.01)
+    target3_debit = max(credit*0.10, 0.01)
+    rr1 = (credit-target1_debit) / max(stop_debit-credit, 0.01)
+
+    short_score = score_option(short_row, short_side, spot, pcr, tf5, tf30, daily, chain,
+                               support=support, resistance=resistance,
+                               oi_wall_info=oi_wall_info, regime=regime, mode="SELL")
+    long_score = score_option(long_row, short_side, spot, pcr, tf5, tf30, daily, chain,
+                              support=support, resistance=resistance,
+                              oi_wall_info=oi_wall_info, regime=regime, mode="SELL")
+    score = float(np.clip(short_score["score"]*0.70 + long_score["score"]*0.10 +
+                          min((credit/width)*100, 25) * 0.80, 0, 100))
+
+    hard_fail = []
+    abs_delta = abs(short_delta) if np.isfinite(short_delta) else np.nan
+    if not np.isfinite(abs_delta) or not (0.12 <= abs_delta <= 0.45):
+        hard_fail.append("short-leg delta outside defined-risk range")
+    if short_spread > 3 or long_spread > 3:
+        hard_fail.append("wide spread on one or more legs")
+    if short_volume < 800 or short_oi <= 0:
+        hard_fail.append("weak short-leg liquidity")
+    if credit/width < 0.08:
+        hard_fail.append("credit too small for spread width")
+    if regime in {"BREAKOUT", "BREAKDOWN", "HIGH VOLATILITY"}:
+        hard_fail.append("market regime unsuitable for new credit spread")
+    if strategy_name == "BULL PUT CREDIT SPREAD":
+        if spot <= support:
+            hard_fail.append("put support already breached")
+        if short_strike > support:
+            hard_fail.append("short put is above support")
+        if regime in {"TRENDING DOWN", "BREAKDOWN"}:
+            hard_fail.append("market direction is unfavorable for bull put spread")
+        alignment = short_score["alignment"] if short_side == "PE" else 0
+    else:
+        if spot >= resistance:
+            hard_fail.append("call resistance already breached")
+        if short_strike < resistance:
+            hard_fail.append("short call is below resistance")
+        if regime in {"TRENDING UP", "BREAKOUT"}:
+            hard_fail.append("market direction is unfavorable for bear call spread")
+        alignment = short_score["alignment"] if short_side == "CE" else 0
+
+    if rr1 < 0.75:
+        hard_fail.append("defined-risk reward too small")
+    if pop < 60 if np.isfinite(pop) else True:
+        hard_fail.append("strategy PoP below 60%")
+
+    # In a RANGE, directional timeframe alignment is intentionally neutral;
+    # do not reject a range credit spread merely because the timeframes are not
+    # bullish/bearish. Require the 5m/30m structure to be non-opposite instead.
+    if regime == "RANGE":
+        opposing = (tf5.get("trend") == ("Bearish" if short_side == "PE" else "Bullish") or
+                    tf30.get("trend") == ("Bearish" if short_side == "PE" else "Bullish"))
+        alignment = 2 if not opposing else 0
+    readiness = "READY" if not hard_fail and score >= 68 and alignment >= 2 else "NO TRADE"
+    lot_size = np.nan
+    max_loss = max_loss_per_unit
+    max_profit = credit
+    return {
+        "side": short_side, "short_side": short_side, "short_strike": short_strike,
+        "long_strike": long_strike, "strike": short_strike,
+        "short_key": short_row[f"{prefix} Key"], "long_key": long_row[f"{prefix} Key"],
+        "short_entry": short_bid, "long_entry": long_ask,
+        "short_ltp": short_ltp, "long_ltp": long_ltp,
+        "entry": credit, "sl": stop_debit, "target1": target1_debit,
+        "target2": target2_debit, "target3": target3_debit, "target4": 0.01,
+        "pop": pop, "delta": short_delta, "iv": short_iv,
+        "oi": short_oi, "chg_oi": safe_float(short_row[f"{prefix} Chg OI"],0),
+        "volume": short_volume, "spread_pct": max(short_spread,long_spread),
+        "score": score, "rr1": rr1, "rr2": rr1*1.35, "rr3": rr1*1.55, "rr4": rr1*1.70,
+        "alignment": alignment, "readiness": readiness, "fail_reasons": hard_fail,
+        "trigger_hit": True, "candle_confirmed": True, "volume_confirmed": True,
+        "regime": regime, "strategy_type": strategy_name, "action": strategy_name,
+        "defined_risk": True, "spread_width": width, "net_credit": credit,
+        "max_loss_per_unit": max_loss, "max_profit_per_unit": max_profit,
+        "max_loss": max_loss, "max_profit": max_profit,
+        "capital_proxy": max_loss, "risk_reward_defined": max_profit/max_loss if max_loss>0 else np.nan,
+        "short_pop": pop, "long_pop": short_pop_long,
+        "short_delta": short_delta, "short_iv": short_iv,
+        "trigger": (
+            f"Enter {strategy_name} only while the underlying respects the relevant OI barrier; "
+            f"receive at least ₹{credit:.2f} net credit and avoid new entries during breakout/breakdown."
+        ),
+        "exit": (
+            f"Exit if the underlying breaks the protected structure or the spread debit reaches "
+            f"₹{stop_debit:.2f}. Prefer taking 50%+ of the credit before expiry rather than holding blindly to expiry."
+        ),
+        "vwap": short_score["vwap"], "room_pct": short_score["room_pct"],
+        "depth_ratio": short_score["depth_ratio"], "gamma": short_score["gamma"],
+        "theta": short_score["theta"], "vega": short_score["vega"],
+    }
+
+
+def build_bull_put_spread(chain, spot, support, resistance, pcr, tf5, tf30, daily,
+                          risk_profile, oi_wall_info, regime):
+    candidates=[]
+    widths=_spread_width_candidates(chain,spot,risk_profile)
+    puts=chain[chain["Strike"] < spot].sort_values("Strike", ascending=False)
+    for _, short_row in puts.iterrows():
+        short_strike=safe_float(short_row["Strike"])
+        if not np.isfinite(short_strike) or short_strike > support:
+            continue
+        for width in widths:
+            target=short_strike-width
+            if target <= 0: continue
+            idx=(chain["Strike"]-target).abs().idxmin()
+            long_row=chain.loc[idx]
+            if safe_float(long_row["Strike"]) >= short_strike:
+                continue
+            plan=_credit_spread_plan(short_row,long_row,"PE",spot,support,resistance,pcr,tf5,tf30,daily,risk_profile,chain,oi_wall_info,regime,"BULL PUT CREDIT SPREAD")
+            if plan: candidates.append(plan)
+    if not candidates: return None
+    return max(candidates,key=lambda p:(-len(p.get("fail_reasons",[])),p["score"],p["pop"],p["net_credit"]/max(p["spread_width"],0.01)))
+
+
+def build_bear_call_spread(chain, spot, support, resistance, pcr, tf5, tf30, daily,
+                           risk_profile, oi_wall_info, regime):
+    candidates=[]
+    widths=_spread_width_candidates(chain,spot,risk_profile)
+    calls=chain[chain["Strike"] > spot].sort_values("Strike")
+    for _, short_row in calls.iterrows():
+        short_strike=safe_float(short_row["Strike"])
+        if not np.isfinite(short_strike) or short_strike < resistance:
+            continue
+        for width in widths:
+            target=short_strike+width
+            idx=(chain["Strike"]-target).abs().idxmin()
+            long_row=chain.loc[idx]
+            if safe_float(long_row["Strike"]) <= short_strike:
+                continue
+            plan=_credit_spread_plan(short_row,long_row,"CE",spot,support,resistance,pcr,tf5,tf30,daily,risk_profile,chain,oi_wall_info,regime,"BEAR CALL CREDIT SPREAD")
+            if plan: candidates.append(plan)
+    if not candidates: return None
+    return max(candidates,key=lambda p:(-len(p.get("fail_reasons",[])),p["score"],p["pop"],p["net_credit"]/max(p["spread_width"],0.01)))
+
+
+def build_iron_condor(chain, spot, support, resistance, pcr, tf5, tf30, daily,
+                      risk_profile, oi_wall_info, regime):
+    if regime != "RANGE":
+        return None
+    bull=build_bull_put_spread(chain,spot,support,resistance,pcr,tf5,tf30,daily,risk_profile,oi_wall_info,regime)
+    bear=build_bear_call_spread(chain,spot,support,resistance,pcr,tf5,tf30,daily,risk_profile,oi_wall_info,regime)
+    if not bull or not bear:
+        return None
+    if bull.get("fail_reasons") or bear.get("fail_reasons"):
+        return None
+    credit=bull["net_credit"]+bear["net_credit"]
+    width=max(bull["spread_width"],bear["spread_width"])
+    max_loss=max(width-credit,0)
+    if credit<=0 or max_loss<=0:
+        return None
+    score=float(np.clip((bull["score"]+bear["score"])/2+5,0,100))
+    pop=min(bull["pop"],bear["pop"])
+    ic_alignment = 2 if regime == "RANGE" else min(bull.get("alignment",0), bear.get("alignment",0))
+    hard_fail=[]
+    if pop < 60: hard_fail.append("iron condor PoP below 60%")
+    if score < 68: hard_fail.append("iron condor quality below threshold")
+    return {
+        "side":"BOTH", "short_strike":bull["short_strike"], "long_strike":bull["long_strike"],
+        "call_short_strike":bear["short_strike"], "call_long_strike":bear["long_strike"],
+        "put_short_strike":bull["short_strike"], "put_long_strike":bull["long_strike"],
+        "strike":bull["short_strike"], "entry":credit, "sl":min(width*0.92,credit*2),
+        "target1":max(credit*0.50,0.01), "target2":max(credit*0.25,0.01),
+        "target3":max(credit*0.10,0.01), "target4":0.01,
+        "pop":pop, "delta":(safe_float(bull["delta"])+safe_float(bear["delta"]))/2,
+        "iv":(safe_float(bull["iv"])+safe_float(bear["iv"]))/2,
+        "oi":bull["oi"]+bear["oi"], "volume":min(bull["volume"],bear["volume"]),
+        "spread_pct":max(bull["spread_pct"],bear["spread_pct"]), "score":score,
+        "rr1":(credit-max(credit*0.5,0.01))/max(min(width*0.92,credit*2)-credit,0.01),
+        "rr2":1.0,"rr3":1.2,"rr4":1.4,"alignment":ic_alignment,
+        "readiness":"READY" if not hard_fail else "NO TRADE", "fail_reasons":hard_fail,
+        "trigger_hit":True,"candle_confirmed":True,"volume_confirmed":True,
+        "regime":regime,"strategy_type":"IRON CONDOR","action":"IRON CONDOR",
+        "defined_risk":True,"spread_width":width,"net_credit":credit,
+        "max_loss_per_unit":max_loss,"max_profit_per_unit":credit,"max_loss":max_loss,
+        "max_profit":credit,"capital_proxy":max_loss,
+        "risk_reward_defined":credit/max_loss if max_loss>0 else np.nan,
+        "trigger":f"Use only in a confirmed range: sell {bull['short_strike']:.0f} PE / buy {bull['long_strike']:.0f} PE and sell {bear['short_strike']:.0f} CE / buy {bear['long_strike']:.0f} CE.",
+        "exit":f"Exit if the range breaks, or if the condor debit reaches ₹{min(width*0.92,credit*2):.2f}. Prefer taking profit before expiry.",
+        "vwap":tf5.get("vwap",spot),"room_pct":min(bull["room_pct"],bear["room_pct"]),
+        "depth_ratio":min(bull["depth_ratio"],bear["depth_ratio"]),"gamma":0,"theta":0,"vega":0,
+        "long_pop":pop,"short_pop":pop,
+    }
+
+
+def build_defined_risk_sell_strategies(chain, spot, support, resistance, pcr, tf5, tf30, daily,
+                                       risk_profile, oi_wall_info, regime):
+    """Return the best defined-risk selling strategies for current conditions."""
+    return {
+        "BULL PUT CREDIT SPREAD": build_bull_put_spread(chain,spot,support,resistance,pcr,tf5,tf30,daily,risk_profile,oi_wall_info,regime),
+        "BEAR CALL CREDIT SPREAD": build_bear_call_spread(chain,spot,support,resistance,pcr,tf5,tf30,daily,risk_profile,oi_wall_info,regime),
+        "IRON CONDOR": build_iron_condor(chain,spot,support,resistance,pcr,tf5,tf30,daily,risk_profile,oi_wall_info,regime),
     }
 
 
@@ -1849,7 +2032,7 @@ def _scanner_actionable(plan, action):
     if action in {"CALL BUY", "PUT BUY"}:
         return bool(plan.get("candle_confirmed") and plan.get("volume_confirmed"))
 
-    return safe_float(plan.get("rr1"), 0) >= 0.75
+    return bool(plan.get("defined_risk")) and safe_float(plan.get("rr1"), 0) >= 0.75 and safe_float(plan.get("max_loss_per_unit"), 0) > 0
 
 
 def _scanner_plan_for_candidate(candidate, symbol, expiry, risk_profile):
@@ -1901,21 +2084,23 @@ def _scanner_plan_for_candidate(candidate, symbol, expiry, risk_profile):
             full_chain, oi_wall_info, regime
         )
     else:
-        plan = build_sell_plan(
-            row, side, spot, support, resistance, pcr,
-            tf5_tech, tf30_tech, daily_tech, risk_profile,
-            full_chain, oi_wall_info, regime
+        spread_plans = build_defined_risk_sell_strategies(
+            full_chain, spot, support, resistance, pcr,
+            tf5_tech, tf30_tech, daily_tech, risk_profile, oi_wall_info, regime
         )
+        plan = (spread_plans.get("BULL PUT CREDIT SPREAD") if action == "PUT SELL"
+                else spread_plans.get("BEAR CALL CREDIT SPREAD"))
 
-    if not plan or plan.get("action", action) != action and action in {"CALL SELL", "PUT SELL"}:
+    if not plan:
         return None
 
-    if not _scanner_actionable(plan, action):
+    actionable_action = plan.get("action", action)
+    if not _scanner_actionable(plan, actionable_action):
         return None
 
     return {
         "Stock": symbol,
-        "Trade": action,
+        "Trade": actionable_action,
         "Exchange": candidate.get("exchange", "NSE"),
         "Strike": float(plan["strike"]),
         "Expiry": expiry,
@@ -1948,7 +2133,7 @@ def scan_fno_trade_alerts(risk_profile, top_alerts=5):
     Stage 1: option-chain filter only.
     Stage 2: existing technical + OI + quality + readiness gates.
 
-    Only final actionable 4-way strategies are returned.
+    Only final actionable BUY or defined-risk selling strategies are returned.
     """
     universe = get_fno_underlyings()
     stage1 = []
@@ -2385,11 +2570,11 @@ with st.sidebar:
         "🛡️ Beginner Safety + Explainability",
         value=True,
         key="beginner_mode",
-        help="Adds stricter entry filters, blocks option-selling strategies from being selected, and shows a plain-English trade checklist. It does not guarantee profit or remove market risk.",
+        help="Adds stricter entry filters. Naked option selling is blocked; only defined-risk credit spreads / iron condors may qualify on the selling side. It does not guarantee profit or remove market risk.",
     )
 
     if beginner_mode:
-        st.caption("🛡️ Beginner Safety ON · BUY setups only · stronger confirmation required")
+        st.caption("🛡️ Beginner Safety ON · BUY + defined-risk spreads only · stronger confirmation required")
 
     def _analyze_live_market_callback():
         entered = str(st.session_state.get("analyzer_search_value", "")).strip()
@@ -2535,8 +2720,18 @@ def sell_candidate(side):
 
 call_buy = buy_candidate("CE")
 put_buy = buy_candidate("PE")
-call_sell = sell_candidate("CE")
-put_sell = sell_candidate("PE")
+
+# Naked CALL SELL / PUT SELL remain internal diagnostics only. They are NOT
+# eligible for the primary recommendation. Defined-risk spreads replace them.
+naked_call_sell = sell_candidate("CE")
+naked_put_sell = sell_candidate("PE")
+sell_strategies = build_defined_risk_sell_strategies(
+    chain, spot, support, resistance, pcr, tf5, tf30, daily_tech,
+    risk_profile, oi_wall_info, regime
+)
+bull_put_spread = sell_strategies.get("BULL PUT CREDIT SPREAD")
+bear_call_spread = sell_strategies.get("BEAR CALL CREDIT SPREAD")
+iron_condor = sell_strategies.get("IRON CONDOR")
 
 # ============================================================
 # FINAL 5-WAY DECISION
@@ -2547,9 +2742,10 @@ MIN_ALIGNMENT = 2
 
 strategy_plans = {
     "CALL BUY": call_buy,
-    "CALL SELL": call_sell,
     "PUT BUY": put_buy,
-    "PUT SELL": put_sell,
+    "BULL PUT CREDIT SPREAD": bull_put_spread,
+    "BEAR CALL CREDIT SPREAD": bear_call_spread,
+    "IRON CONDOR": iron_condor,
 }
 
 eligible = []
@@ -2561,39 +2757,36 @@ for action, plan in strategy_plans.items():
     score = safe_float(plan.get("score"), 0)
     alignment = int(plan.get("alignment", 0) or 0)
     if action in {"CALL BUY", "PUT BUY"}:
-        # BUYs need actual trigger + confirmation, alignment and enough quality.
         ready = (
             score >= MIN_SCORE and pop >= MIN_POP and alignment >= MIN_ALIGNMENT and
             not hard_fail and plan.get("readiness") == "READY" and
             plan.get("candle_confirmed") and plan.get("volume_confirmed")
         )
     else:
-        # SELLs need stronger structure and are never selected during a breakout regime.
+        # Defined-risk selling requires stronger quality and explicitly rejects
+        # breakout/breakdown/high-volatility conditions.
         ready = (
-            score >= MIN_SCORE and pop >= MIN_POP and alignment >= 2 and
+            score >= 68 and pop >= 60 and alignment >= MIN_ALIGNMENT and
             not hard_fail and plan.get("readiness") == "READY" and
-            safe_float(plan.get("rr1"), 0) >= 0.75
+            safe_float(plan.get("rr1"), 0) >= 0.75 and
+            bool(plan.get("defined_risk")) and
+            safe_float(plan.get("max_loss_per_unit"), np.inf) > 0 and
+            safe_float(plan.get("max_profit_per_unit"), 0) > 0
         )
     if ready:
-        # Small tie-breaker for score, then PoP, then option liquidity.
-        eligible.append((score + pop * 0.20 + min(safe_float(plan.get("volume"), 0) / 100000, 3), action, plan))
+        capital_efficiency = safe_float(plan.get("max_profit_per_unit"), 0) / max(safe_float(plan.get("max_loss_per_unit"), 1), 0.01) if action not in {"CALL BUY","PUT BUY"} else 0
+        eligible.append((score + pop * 0.20 + min(safe_float(plan.get("volume"), 0) / 100000, 3) + capital_efficiency * 2, action, plan))
 
 if eligible:
     _, decision, best_plan = max(eligible, key=lambda x: x[0])
 else:
     decision = "NO TRADE"
-    # Show the best reference candidate internally for diagnostics, but do not
-    # label it as a recommendation.
     available = [(safe_float(p.get("score"), 0), action, p) for action, p in strategy_plans.items() if p]
     best_plan = max(available, key=lambda x: x[0])[2] if available else None
 
 # ============================================================
 # BEGINNER SAFETY + EXPLAINABILITY LAYER
 # ============================================================
-# This layer sits above the existing engine. It does not alter the underlying
-# indicators, option-chain calculations or Upstox data. When enabled, it adds
-# stricter execution gates intended to make the primary output easier to use
-# responsibly as a beginner decision-support tool.
 beginner_mode = bool(st.session_state.get("beginner_mode", True))
 beginner_safety_reasons = []
 beginner_checks = []
@@ -2602,58 +2795,55 @@ def _add_beginner_check(name, status, detail):
     beginner_checks.append({"name": name, "status": status, "detail": detail})
 
 if beginner_mode:
-    # Beginner mode intentionally selects BUY setups only. Option selling can
-    # involve materially different margin and tail-risk characteristics and is
-    # therefore kept visible in the engine result but cannot become the primary
-    # beginner execution decision.
-    if decision in {"CALL SELL", "PUT SELL"}:
-        beginner_safety_reasons.append("Option-selling strategy is disabled in Beginner Safety mode")
-        decision = "NO TRADE"
-        best_plan = None
-
-    candidate = strategy_plans.get(decision) if decision in {"CALL BUY", "PUT BUY"} else None
+    candidate = strategy_plans.get(decision)
     if candidate:
         score = safe_float(candidate.get("score"), 0)
         pop = safe_float(candidate.get("pop"), np.nan)
         alignment = int(candidate.get("alignment", 0) or 0)
-        rr1 = safe_float(candidate.get("rr1"), 0)
-        delta = abs(safe_float(candidate.get("delta"), np.nan))
+        hard_fail = candidate.get("fail_reasons") or []
         spread_pct = safe_float(candidate.get("spread_pct"), 999)
         volume = safe_float(candidate.get("volume"), 0)
-        hard_fail = candidate.get("fail_reasons") or []
-        trigger_hit = bool(candidate.get("trigger_hit"))
-        candle_confirmed = bool(candidate.get("candle_confirmed"))
-        volume_confirmed = bool(candidate.get("volume_confirmed"))
+        defined_risk = bool(candidate.get("defined_risk"))
 
-        _add_beginner_check("Quality score", "pass" if score >= 70 else "fail", f"{score:.0f}/100 · beginner threshold 70")
-        _add_beginner_check("Model PoP", "pass" if np.isfinite(pop) and pop >= 60 else "fail", f"{pop:.1f}% · beginner threshold 60%" if np.isfinite(pop) else "Unavailable")
-        _add_beginner_check("Timeframe alignment", "pass" if alignment >= 2 else "fail", f"{alignment}/3 timeframes aligned")
-        _add_beginner_check("Entry confirmation", "pass" if trigger_hit and candle_confirmed and volume_confirmed else "wait", "Breakout + candle + volume confirmation required")
-        _add_beginner_check("Risk / reward", "pass" if rr1 >= 1.0 else "fail", f"T1 R:R {rr1:.2f} · minimum 1.00")
-        _add_beginner_check("Option liquidity", "pass" if spread_pct <= 2 and volume >= 1000 else "fail", f"Spread {spread_pct:.1f}% · Volume {volume:,.0f}")
-        _add_beginner_check("Delta", "pass" if np.isfinite(delta) and 0.35 <= delta <= 0.70 else "fail", f"|Delta| {delta:.2f} · preferred 0.35–0.70" if np.isfinite(delta) else "Unavailable")
-        _add_beginner_check("Existing engine gates", "pass" if not hard_fail else "fail", "All hard checks passed" if not hard_fail else "; ".join(hard_fail))
-
-        safety_fail = (
-            score < 70 or not np.isfinite(pop) or pop < 60 or alignment < 2 or
-            not (trigger_hit and candle_confirmed and volume_confirmed) or
-            rr1 < 1.0 or spread_pct > 2 or volume < 1000 or
-            not np.isfinite(delta) or delta < 0.35 or delta > 0.70 or
-            bool(hard_fail)
-        )
+        if decision in {"CALL BUY", "PUT BUY"}:
+            rr1 = safe_float(candidate.get("rr1"), 0)
+            delta = abs(safe_float(candidate.get("delta"), np.nan))
+            trigger_hit = bool(candidate.get("trigger_hit"))
+            candle_confirmed = bool(candidate.get("candle_confirmed"))
+            volume_confirmed = bool(candidate.get("volume_confirmed"))
+            _add_beginner_check("Strategy type", "pass", "Directional option BUY — no naked option selling")
+            _add_beginner_check("Quality score", "pass" if score >= 70 else "fail", f"{score:.0f}/100 · beginner threshold 70")
+            _add_beginner_check("Model PoP", "pass" if np.isfinite(pop) and pop >= 60 else "fail", f"{pop:.1f}% · threshold 60%" if np.isfinite(pop) else "Unavailable")
+            _add_beginner_check("Timeframe alignment", "pass" if alignment >= 2 else "fail", f"{alignment}/3 timeframes aligned")
+            _add_beginner_check("Entry confirmation", "pass" if trigger_hit and candle_confirmed and volume_confirmed else "wait", "Breakout + candle + volume confirmation required")
+            _add_beginner_check("Risk / reward", "pass" if rr1 >= 1.0 else "fail", f"T1 R:R {rr1:.2f} · minimum 1.00")
+            _add_beginner_check("Option liquidity", "pass" if spread_pct <= 2 and volume >= 1000 else "fail", f"Spread {spread_pct:.1f}% · Volume {volume:,.0f}")
+            _add_beginner_check("Delta", "pass" if np.isfinite(delta) and 0.35 <= delta <= 0.70 else "fail", f"|Delta| {delta:.2f} · preferred 0.35–0.70" if np.isfinite(delta) else "Unavailable")
+            safety_fail = score < 70 or not np.isfinite(pop) or pop < 60 or alignment < 2 or not (trigger_hit and candle_confirmed and volume_confirmed) or rr1 < 1.0 or spread_pct > 2 or volume < 1000 or not np.isfinite(delta) or delta < 0.35 or delta > 0.70 or bool(hard_fail)
+        else:
+            # Beginner mode permits only DEFINED-RISK selling strategies.
+            rr1 = safe_float(candidate.get("rr1"), 0)
+            max_loss = safe_float(candidate.get("max_loss_per_unit"), np.nan)
+            max_profit = safe_float(candidate.get("max_profit_per_unit"), np.nan)
+            risk_reward = safe_float(candidate.get("risk_reward_defined"), np.nan)
+            _add_beginner_check("Strategy type", "pass" if defined_risk else "fail", "Defined-risk spread only; naked selling is blocked")
+            _add_beginner_check("Quality score", "pass" if score >= 70 else "fail", f"{score:.0f}/100 · spread threshold 70")
+            _add_beginner_check("Model PoP", "pass" if np.isfinite(pop) and pop >= 60 else "fail", f"{pop:.1f}% · spread threshold 60%" if np.isfinite(pop) else "Unavailable")
+            _add_beginner_check("Timeframe alignment", "pass" if alignment >= 2 else "fail", f"{alignment}/3 timeframes aligned")
+            _add_beginner_check("Defined maximum loss", "pass" if np.isfinite(max_loss) and max_loss > 0 else "fail", f"₹{max_loss:,.2f} per option unit")
+            _add_beginner_check("Risk / reward", "pass" if rr1 >= 0.75 else "fail", f"T1 R:R {rr1:.2f} · minimum 0.75")
+            _add_beginner_check("Liquidity", "pass" if spread_pct <= 2.5 and volume >= 800 else "fail", f"Worst leg spread {spread_pct:.1f}% · short-leg volume {volume:,.0f}")
+            _add_beginner_check("Capital efficiency", "pass" if np.isfinite(risk_reward) and risk_reward >= 0.20 else "fail", f"Reward / defined max loss {risk_reward:.2f}" if np.isfinite(risk_reward) else "Unavailable")
+            _add_beginner_check("Existing strategy gates", "pass" if not hard_fail else "fail", "All spread gates passed" if not hard_fail else "; ".join(hard_fail))
+            safety_fail = (not defined_risk or score < 70 or not np.isfinite(pop) or pop < 60 or alignment < 2 or not np.isfinite(max_loss) or max_loss <= 0 or not np.isfinite(max_profit) or max_profit <= 0 or rr1 < 0.75 or spread_pct > 2.5 or volume < 800 or not np.isfinite(risk_reward) or risk_reward < 0.20 or bool(hard_fail))
         if safety_fail:
-            beginner_safety_reasons.append("One or more beginner safety checks did not pass")
+            beginner_safety_reasons.append("One or more Beginner Safety checks did not pass")
             decision = "NO TRADE"
             best_plan = None
 
-    # If no BUY candidate survived, make the reason explicit rather than
-    # presenting the best SELL candidate as a beginner trade.
     if decision == "NO TRADE" and not beginner_checks:
-        _add_beginner_check("Trade candidate", "fail", "No BUY setup passed the existing engine gates")
+        _add_beginner_check("Trade candidate", "fail", "No BUY or defined-risk selling strategy passed the safety gates")
 
-# The decision remains binary at the primary UI level: an executable setup or
-# NO TRADE. Beginner Safety adds an additional layer; it never guarantees a
-# winning trade.
 
 # Forward-test logging is intentionally backend-only. It does not change the UI.
 if decision != "NO TRADE" and best_plan:
@@ -2766,7 +2956,7 @@ st.markdown(metrics, unsafe_allow_html=True)
 if beginner_mode:
     st.markdown("""
     <div class="fo-safety-banner">
-      <div><b>🛡️ BEGINNER SAFETY + EXPLAINABILITY IS ON</b><span>The app is using a stricter execution filter, BUY setups only, stronger confirmation and a plain-English checklist. This is decision support — not a guarantee of profit.</span></div>
+      <div><b>🛡️ BEGINNER SAFETY + EXPLAINABILITY IS ON</b><span>The app is using a stricter execution filter, blocks naked selling, allows only defined-risk spreads on the selling side, and shows a plain-English checklist. This is decision support — not a guarantee of profit.</span></div>
       <div class="fo-safety-badge">SAFETY ON</div>
     </div>
     """, unsafe_allow_html=True)
@@ -2776,16 +2966,24 @@ trend_name = overall_trend(tf5, tf30, daily_tech)[0].upper()
 decision_class = "call" if "CALL" in decision else "put" if "PUT" in decision else "neutral"
 if decision != "NO TRADE" and best_plan:
     action_pop = safe_float(best_plan.get("pop")); action_score = safe_float(best_plan.get("score"), 0)
-    contract = f"{best_plan['strike']:.0f} {'CE' if best_plan['side']=='CE' else 'PE'}"
+    if best_plan.get("strategy_type") == "BULL PUT CREDIT SPREAD":
+        contract = f"SELL {best_plan['short_strike']:.0f} PE / BUY {best_plan['long_strike']:.0f} PE"
+    elif best_plan.get("strategy_type") == "BEAR CALL CREDIT SPREAD":
+        contract = f"SELL {best_plan['short_strike']:.0f} CE / BUY {best_plan['long_strike']:.0f} CE"
+    elif best_plan.get("strategy_type") == "IRON CONDOR":
+        contract = f"{best_plan['put_short_strike']:.0f}/{best_plan['put_long_strike']:.0f} PE + {best_plan['call_short_strike']:.0f}/{best_plan['call_long_strike']:.0f} CE"
+    else:
+        contract = f"{best_plan['strike']:.0f} {'CE' if best_plan['side']=='CE' else 'PE'}"
 else:
     action_pop = np.nan; action_score = max([safe_float(p.get("score"),0) for p in strategy_plans.values() if p] or [0]); contract = "No executable setup"
 
 decision_note = {
     "CALL BUY":"Directional upside setup — execute only when the displayed confirmation conditions are satisfied.",
-    "CALL SELL":"Premium-selling setup — requires price to remain below resistance and pass the seller risk gates.",
     "PUT BUY":"Directional downside setup — execute only when the displayed confirmation conditions are satisfied.",
-    "PUT SELL":"Premium-selling setup — requires price to remain above support and pass the seller risk gates.",
-    "NO TRADE":"No strategy currently meets the minimum quality, alignment, liquidity and PoP gates."
+    "BULL PUT CREDIT SPREAD":"Defined-risk bullish premium strategy — sell a put and buy a lower put to cap the loss.",
+    "BEAR CALL CREDIT SPREAD":"Defined-risk bearish premium strategy — sell a call and buy a higher call to cap the loss.",
+    "IRON CONDOR":"Defined-risk range strategy — sell both sides with long protection; used only in a confirmed range.",
+    "NO TRADE":"No strategy currently meets the minimum quality, alignment, liquidity and risk gates."
 }[decision]
 
 st.markdown(f"""
@@ -2822,25 +3020,41 @@ if beginner_mode:
         t1_v = safe_float(best_plan.get("target1"), 0)
         t2_v = safe_float(best_plan.get("target2"), 0)
         qty = safe_float(lot_size, 0)
-        max_loss = max(entry_v - sl_v, 0) * qty
-        reward_t1 = max(t1_v - entry_v, 0) * qty
-        reward_t2 = max(t2_v - entry_v, 0) * qty
-        t3_v = safe_float(best_plan.get("target3"), 0)
-        t4_v = safe_float(best_plan.get("target4"), 0)
-        reward_t3 = max(t3_v - entry_v, 0) * qty
-        reward_t4 = max(t4_v - entry_v, 0) * qty
+        if best_plan.get("defined_risk"):
+            max_loss = safe_float(best_plan.get("max_loss_per_unit"), 0) * qty
+            reward_t1 = max(entry_v - t1_v, 0) * qty
+            reward_t2 = max(entry_v - t2_v, 0) * qty
+            t3_v = safe_float(best_plan.get("target3"), 0)
+            t4_v = safe_float(best_plan.get("target4"), 0)
+            reward_t3 = max(entry_v - t3_v, 0) * qty
+            reward_t4 = max(entry_v - t4_v, 0) * qty
+        else:
+            max_loss = max(entry_v - sl_v, 0) * qty
+            reward_t1 = max(t1_v - entry_v, 0) * qty
+            reward_t2 = max(t2_v - entry_v, 0) * qty
+            t3_v = safe_float(best_plan.get("target3"), 0)
+            t4_v = safe_float(best_plan.get("target4"), 0)
+            reward_t3 = max(t3_v - entry_v, 0) * qty
+            reward_t4 = max(t4_v - entry_v, 0) * qty
+        capital_proxy = max_loss
+        max_profit_1lot = safe_float(best_plan.get("max_profit_per_unit"), 0) * qty if best_plan.get("defined_risk") else 0
         st.markdown(f"""<div class='fo-risk-box'>
-          <div class='fo-risk-cell'><span>PLANNED MAX LOSS · 1 LOT</span><b>₹{max_loss:,.0f}</b></div>
+          <div class='fo-risk-cell'><span>DEFINED MAX LOSS · 1 LOT</span><b>₹{max_loss:,.0f}</b></div>
+          <div class='fo-risk-cell'><span>MAX PROFIT · 1 LOT</span><b>{('₹'+format(max_profit_1lot,',.0f')) if best_plan.get('defined_risk') else '—'}</b></div>
           <div class='fo-risk-cell'><span>TARGET 1 · 1 LOT</span><b>₹{reward_t1:,.0f}</b></div>
           <div class='fo-risk-cell'><span>TARGET 2 · 1 LOT</span><b>₹{reward_t2:,.0f}</b></div>
           <div class='fo-risk-cell'><span>TARGET 3 · 1 LOT</span><b>₹{reward_t3:,.0f}</b></div>
           <div class='fo-risk-cell'><span>TARGET 4 · 1 LOT</span><b>₹{reward_t4:,.0f}</b></div>
         </div>""", unsafe_allow_html=True)
-        st.markdown("<div class='fo-beginner-note'>⚠️ Planned loss is based on the displayed entry and stop-loss for one lot. Real execution can differ because of slippage, spread, taxes, brokerage and fast market movement. Never treat the model PoP as a guarantee.</div>", unsafe_allow_html=True)
+        note = (
+            "⚠️ For defined-risk spreads, the displayed max loss is the theoretical loss per lot if the spread reaches its maximum loss; actual broker margin/blocked funds can differ. "
+            "For BUY trades, planned loss is based on the displayed entry and stop-loss. Real execution can differ because of slippage, spread, taxes, brokerage and fast market movement. Never treat model PoP as a guarantee."
+        )
+        st.markdown(f"<div class='fo-beginner-note'>{note}</div>", unsafe_allow_html=True)
     else:
         st.markdown("<div class='fo-beginner-note'>⛔ No trade is displayed because the setup did not satisfy the beginner safety requirements. Waiting is a valid outcome.</div>", unsafe_allow_html=True)
 
-st.markdown("<div class='fo-section'>ENGINE RESULT · ALL 4 STRATEGIES</div>", unsafe_allow_html=True)
+st.markdown("<div class='fo-section'>ENGINE RESULT · BUY + DEFINED-RISK SELL STRATEGIES</div>", unsafe_allow_html=True)
 
 st.markdown("""<style>
 /* FORCE ENGINE RESULT 2x2 GRID */
@@ -2998,7 +3212,7 @@ section[data-testid="stSidebar"] .stCaption { color:#64748b !important; }
 </style>""", unsafe_allow_html=True)
 
 engine_html = "<div class='fo-engine fo-engine-grid'>"
-for action in ["CALL BUY","CALL SELL","PUT BUY","PUT SELL"]:
+for action in ["CALL BUY","PUT BUY","BULL PUT CREDIT SPREAD","BEAR CALL CREDIT SPREAD","IRON CONDOR"]:
     plan = strategy_plans[action]
     if not plan:
         engine_html += f"<div class='fo-engine-card rejected'><div class='fo-engine-top'><div class='fo-engine-action'>{action}</div><div class='fo-engine-status'>NO DATA</div></div><div class='fo-engine-contract'>—</div><div class='fo-engine-reason'>No valid candidate was produced.</div></div>"
@@ -3010,9 +3224,9 @@ for action in ["CALL BUY","CALL SELL","PUT BUY","PUT SELL"]:
     engine_html += f"""
     <div class='fo-engine-card {status_class}'>
       <div class='fo-engine-top'><div class='fo-engine-action'>{action}</div><div class='fo-engine-status'>{status}</div></div>
-      <div class='fo-engine-contract'>{plan['strike']:.0f} {'CE' if plan['side']=='CE' else 'PE'}</div>
+      <div class='fo-engine-contract'>{(f"{plan['short_strike']:.0f} PE / {plan['long_strike']:.0f} PE" if action == 'BULL PUT CREDIT SPREAD' else f"{plan['short_strike']:.0f} CE / {plan['long_strike']:.0f} CE" if action == 'BEAR CALL CREDIT SPREAD' else f"{plan['put_short_strike']:.0f} PE / {plan['put_long_strike']:.0f} PE · {plan['call_short_strike']:.0f} CE / {plan['call_long_strike']:.0f} CE" if action == 'IRON CONDOR' else f"{plan['strike']:.0f} {'CE' if plan['side']=='CE' else 'PE'}")}</div>
       <div class='fo-engine-stats'><div><span>PoP</span><b>{safe_float(plan.get('pop')):.1f}%</b></div><div><span>QUALITY</span><b>{safe_float(plan.get('score'),0):.0f}/100</b></div></div>
-      <div class='fo-engine-reason'>{fails}</div>
+      <div class='fo-engine-reason'>{('Net credit ₹'+format(safe_float(plan.get('net_credit'),0), '.2f')+' · Max loss ₹'+format(safe_float(plan.get('max_loss_per_unit'),0), '.2f')+' / unit') if plan.get('defined_risk') else fails}</div>
     </div>"""
 engine_html += "</div>"
 st.markdown(engine_html, unsafe_allow_html=True)
@@ -3030,7 +3244,14 @@ st.markdown(f"""
 
 if decision != "NO TRADE" and best_plan:
     st.markdown("<div class='fo-section'>SELECTED TRADE PLAN</div>", unsafe_allow_html=True)
-    selected_contract = f"{best_plan['strike']:.0f} {'CE' if best_plan['side']=='CE' else 'PE'}"
+    if best_plan.get("strategy_type") == "BULL PUT CREDIT SPREAD":
+        selected_contract = f"SELL {best_plan['short_strike']:.0f} PE / BUY {best_plan['long_strike']:.0f} PE"
+    elif best_plan.get("strategy_type") == "BEAR CALL CREDIT SPREAD":
+        selected_contract = f"SELL {best_plan['short_strike']:.0f} CE / BUY {best_plan['long_strike']:.0f} CE"
+    elif best_plan.get("strategy_type") == "IRON CONDOR":
+        selected_contract = f"{best_plan['put_short_strike']:.0f}/{best_plan['put_long_strike']:.0f} PE + {best_plan['call_short_strike']:.0f}/{best_plan['call_long_strike']:.0f} CE"
+    else:
+        selected_contract = f"{best_plan['strike']:.0f} {'CE' if best_plan['side']=='CE' else 'PE'}"
     st.markdown(f"""
     <div class="fo-plan-head">
       <div><div class="fo-plan-action">SELECTED STRATEGY</div><div class="fo-plan-contract">{decision} · {selected_contract}</div></div>
@@ -3039,9 +3260,11 @@ if decision != "NO TRADE" and best_plan:
     """, unsafe_allow_html=True)
     entry_value = safe_float(best_plan.get("entry"))
 
+    is_spread = bool(best_plan.get("defined_risk"))
     is_sell = (
         str(best_plan.get("action", decision)).upper().endswith("SELL")
         or str(decision).upper().endswith("SELL")
+        or is_spread
     )
     lot_qty = safe_float(lot_size)
 
@@ -3063,9 +3286,16 @@ if decision != "NO TRADE" and best_plan:
         lot_pnl = change_inr_per_unit * lot_qty
         return f"₹{lot_pnl:+,.0f} for 1 lot"
 
+    if best_plan.get("defined_risk"):
+        entry_title, entry_note = "NET CREDIT", "Credit received for the complete spread"
+        sl_title, sl_note = "STOP / EXIT DEBIT", "Debit paid to close the spread"
+    else:
+        entry_title, entry_note = "ENTRY", "Option premium"
+        sl_title, sl_note = "STOP LOSS", "Defined risk level"
+
     level_items = [
-        ("ENTRY", fmt_price(best_plan.get("entry")), "Option premium", "entry", change_from_entry(best_plan.get("entry")), ""),
-        ("STOP LOSS", fmt_price(best_plan.get("sl")), "Defined risk level", "sl", change_from_entry(best_plan.get("sl")), lot_pnl_from_entry(best_plan.get("sl"))),
+        (entry_title, fmt_price(best_plan.get("entry")), entry_note, "entry", change_from_entry(best_plan.get("entry")), ""),
+        (sl_title, fmt_price(best_plan.get("sl")), sl_note, "sl", change_from_entry(best_plan.get("sl")), lot_pnl_from_entry(best_plan.get("sl"))),
         ("TARGET 1", fmt_price(best_plan.get("target1")), "First profit level", "t1", change_from_entry(best_plan.get("target1")), lot_pnl_from_entry(best_plan.get("target1"))),
         ("TARGET 2", fmt_price(best_plan.get("target2")), "Second profit level", "t2", change_from_entry(best_plan.get("target2")), lot_pnl_from_entry(best_plan.get("target2"))),
         ("TARGET 3", fmt_price(best_plan.get("target3")), "Third profit level", "t3", change_from_entry(best_plan.get("target3")), lot_pnl_from_entry(best_plan.get("target3"))),
@@ -3081,18 +3311,18 @@ if decision != "NO TRADE" and best_plan:
     st.markdown(level_html, unsafe_allow_html=True)
     st.markdown(f"<div class='fo-exit'><div class='fo-exit-icon'>🚪</div><div><span>EXIT RULE</span><b>{best_plan.get('exit','Follow stop-loss and targets.')}</b></div></div>", unsafe_allow_html=True)
 else:
-    st.markdown("<div class='fo-exit' style='margin-top:10px;'><div class='fo-exit-icon'>⛔</div><div><span>NO TRADE</span><b>None of CALL BUY, CALL SELL, PUT BUY or PUT SELL passed the backend quality + PoP gates. No executable entry, SL or target is displayed.</b></div></div>", unsafe_allow_html=True)
+    st.markdown("<div class='fo-exit' style='margin-top:10px;'><div class='fo-exit-icon'>⛔</div><div><span>NO TRADE</span><b>None of the BUY or defined-risk selling strategies passed the backend quality, alignment, liquidity and risk gates. No executable entry, SL or target is displayed.</b></div></div>", unsafe_allow_html=True)
 
 with st.expander("Why this decision?", expanded=False):
     why_lines=[]
     if decision != "NO TRADE" and best_plan:
         why_lines += [
-            f"Selected {decision} on {best_plan['strike']:.0f} {'CE' if best_plan['side']=='CE' else 'PE'} with strategy PoP {best_plan['pop']:.1f}% and quality score {best_plan['score']:.0f}/100.",
+            f"Selected {decision} with strategy PoP {best_plan['pop']:.1f}% and quality score {best_plan['score']:.0f}/100.",
             f"Timeframes: 5m {tf5['trend']} · 30m {tf30['trend']} · Daily {daily_tech['trend']}.",
             f"Market structure: Support {fmt_price(support)} · Resistance {fmt_price(resistance)} · VWAP {fmt_price(tf5.get('vwap'))} · Regime {regime}.",
         ]
     else:
-        for action in ["CALL BUY","CALL SELL","PUT BUY","PUT SELL"]:
+        for action in ["CALL BUY","PUT BUY","BULL PUT CREDIT SPREAD","BEAR CALL CREDIT SPREAD","IRON CONDOR"]:
             plan=strategy_plans[action]
             if plan:
                 reason=", ".join(plan.get("fail_reasons") or []) or "quality/confirmation gate not met"
@@ -3102,7 +3332,7 @@ with st.expander("Why this decision?", expanded=False):
 st.markdown("<div class='fo-section'>OPTION DETAILS</div>", unsafe_allow_html=True)
 if decision != "NO TRADE" and best_plan:
     st.markdown(f"""
-    <div class="fo-why"><div class="fo-why-line"><b>{decision}</b> · {best_plan['strike']:.0f} {'CE' if best_plan['side']=='CE' else 'PE'} · PoP {best_plan['pop']:.1f}% · Delta {safe_float(best_plan['delta']):.2f} · IV {safe_float(best_plan['iv']):.1f}% · OI {fmt_num(best_plan['oi'])} · Volume {fmt_num(best_plan['volume'])}</div></div>
+    <div class="fo-why"><div class="fo-why-line"><b>{decision}</b> · {contract} · PoP {best_plan['pop']:.1f}% · Delta {safe_float(best_plan['delta']):.2f} · IV {safe_float(best_plan['iv']):.1f}% · OI {fmt_num(best_plan['oi'])} · Volume {fmt_num(best_plan['volume'])}{(' · Net credit ₹'+format(safe_float(best_plan.get('net_credit'),0),'.2f')+' · Defined max loss ₹'+format(safe_float(best_plan.get('max_loss_per_unit'),0),'.2f')+'/unit') if best_plan.get('defined_risk') else ''}</div></div>
     """,unsafe_allow_html=True)
 else:
     st.markdown("<div class='fo-why'><div class='fo-why-line' style='color:#98a2b3;text-align:center;'>No option is currently selected for execution.</div></div>",unsafe_allow_html=True)
