@@ -2035,6 +2035,28 @@ def _scanner_actionable(plan, action):
     return bool(plan.get("defined_risk")) and safe_float(plan.get("rr1"), 0) >= 0.75 and safe_float(plan.get("max_loss_per_unit"), 0) > 0
 
 
+def _scanner_status_for_plan(plan, action):
+    """Classify a scanner candidate without weakening the main trade gates."""
+    if not plan:
+        return "REJECTED"
+
+    if _scanner_actionable(plan, action):
+        return "READY"
+
+    score = safe_float(plan.get("score"), 0)
+    pop = safe_float(plan.get("pop"))
+    alignment = int(plan.get("alignment", 0) or 0)
+    hard_fail = plan.get("fail_reasons") or []
+
+    # WATCH means the candidate is reasonably strong but is missing one or more
+    # final confirmation/execution requirements. It is NOT an executable trade.
+    if (score >= 65 and np.isfinite(pop) and pop >= 55 and alignment >= 2
+            and not hard_fail):
+        return "WATCH"
+
+    return "REJECTED"
+
+
 def _scanner_plan_for_candidate(candidate, symbol, expiry, risk_profile):
     """Run this file's existing scoring/build-plan logic on one shortlisted option."""
     rows = [candidate["raw"]]
@@ -2095,8 +2117,28 @@ def _scanner_plan_for_candidate(candidate, symbol, expiry, risk_profile):
         return None
 
     actionable_action = plan.get("action", action)
-    if not _scanner_actionable(plan, actionable_action):
-        return None
+    status = _scanner_status_for_plan(plan, actionable_action)
+    fail_reasons = [str(x) for x in (plan.get("fail_reasons") or []) if str(x).strip()]
+
+    # Keep the scanner informational: a WATCH/REJECTED result never changes the
+    # main analyzer's gates and is never presented as an executable trade.
+    reason_parts = []
+    if fail_reasons:
+        reason_parts.extend(fail_reasons)
+    if plan.get("readiness") and plan.get("readiness") != "READY":
+        reason_parts.append(f"Readiness: {plan.get('readiness')}")
+    if actionable_action in {"CALL BUY", "PUT BUY"}:
+        if not plan.get("candle_confirmed"):
+            reason_parts.append("candle confirmation pending")
+        if not plan.get("volume_confirmed"):
+            reason_parts.append("volume confirmation pending")
+    if actionable_action not in {"CALL BUY", "PUT BUY"}:
+        if not plan.get("defined_risk"):
+            reason_parts.append("defined-risk structure not confirmed")
+        if safe_float(plan.get("rr1"), 0) < 0.75:
+            reason_parts.append("defined-risk reward below minimum")
+    if not reason_parts:
+        reason_parts.append("Candidate passed the available checks; wait for the final live confirmation.")
 
     return {
         "Stock": symbol,
@@ -2119,10 +2161,9 @@ def _scanner_plan_for_candidate(candidate, symbol, expiry, risk_profile):
         "OI": safe_float(plan.get("oi"), 0),
         "Alignment": int(plan.get("alignment", 0) or 0),
         "Regime": regime,
-        "reason": (
-            f"{regime} · {plan.get('readiness','')} · "
-            f"{int(plan.get('alignment',0) or 0)}/3 timeframe alignment"
-        ),
+        "Status": status,
+        "FailReasons": reason_parts,
+        "reason": " · ".join(reason_parts),
     }
 
 
@@ -2162,8 +2203,10 @@ def scan_fno_trade_alerts(risk_profile, top_alerts=5):
             failed += 1
 
 
-    # Do not run expensive technical analysis on hundreds of candidates.
-    # Keep the strongest chain candidates, with a per-stock cap.
+    # Do not run expensive technical analysis on the whole universe, but give
+    # the scanner a materially larger candidate pool than the old 25-candidate
+    # cap. The purpose here is to find the best opportunities, not only the few
+    # trades that happen to pass every final execution gate.
     stage1.sort(
         key=lambda x: (
             -x["pop"],
@@ -2175,11 +2218,11 @@ def scan_fno_trade_alerts(risk_profile, top_alerts=5):
 
     shortlist = []
     per_stock = {}
-    max_stage2 = max(24, top_alerts * 5)
+    max_stage2 = max(75, top_alerts * 15)
 
     for item in stage1:
         count = per_stock.get(item["symbol"], 0)
-        if count >= 2:
+        if count >= 3:
             continue
         shortlist.append(item)
         per_stock[item["symbol"]] = count + 1
@@ -2187,6 +2230,7 @@ def scan_fno_trade_alerts(risk_profile, top_alerts=5):
             break
 
     alerts = []
+    stage2_failed = 0
     for idx, candidate in enumerate(shortlist, start=1):
         try:
             plan = _scanner_plan_for_candidate(
@@ -2200,30 +2244,40 @@ def scan_fno_trade_alerts(risk_profile, top_alerts=5):
         except UpstoxRateLimitError:
             raise
         except Exception:
-            pass
+            # Keep the scanner alive when one symbol has malformed/incomplete
+            # live data. The failed count is surfaced in the scanner summary.
+            stage2_failed += 1
 
+    failed += stage2_failed
 
-    # One alert per stock/action combination; prefer quality first.
+    # One result per stock/action combination; prefer READY, then WATCH, then
+    # REJECTED, and only then use the existing quality/PoP/liquidity ranking.
+    status_rank = {"READY": 3, "WATCH": 2, "REJECTED": 1}
     unique = {}
     for alert in alerts:
         key = (alert["Stock"], alert["Trade"])
         old = unique.get(key)
-        if old is None or (
+        new_key = (
+            status_rank.get(alert.get("Status", "REJECTED"), 0),
             alert["Quality"],
             alert["PoP"],
             alert["Alignment"],
             alert["Volume"],
-        ) > (
+        )
+        old_key = (
+            status_rank.get(old.get("Status", "REJECTED"), 0),
             old["Quality"],
             old["PoP"],
             old["Alignment"],
             old["Volume"],
-        ):
+        ) if old else None
+        if old is None or new_key > old_key:
             unique[key] = alert
 
     alerts = list(unique.values())
     alerts.sort(
         key=lambda x: (
+            -status_rank.get(x.get("Status", "REJECTED"), 0),
             -x["Quality"],
             -x["PoP"],
             -x["Alignment"],
@@ -2385,8 +2439,9 @@ def _render_fno_scanner_panel():
 
         st.markdown("### 🔥 TOP 5 POSSIBLE TRADES")
         st.caption(
-            "Scans the NSE equity F&O universe using the same trade engine, "
-            "quality gates and risk profile as the main analyzer."
+            "Ranks the strongest live F&O opportunities using the same trade engine "
+            "and risk profile as the main analyzer. READY trades pass all gates; "
+            "WATCH/REJECTED trades are shown for inspection only."
         )
 
         scan_trades = st.button(
@@ -2481,6 +2536,7 @@ def _render_fno_scanner_panel():
 
             for rank, alert in enumerate(alert_results, start=1):
                 action = alert["Trade"]
+                status = alert.get("Status", "REJECTED")
                 is_call = "CALL" in action
                 action_class = (
                     "scanner-call-action" if is_call else "scanner-put-action"
@@ -2494,13 +2550,15 @@ def _render_fno_scanner_panel():
                 if "SELL" in action:
                     card_class += " scanner-alert-sell"
 
+                status_label = status
+                reason = alert.get("reason", "")
                 st.markdown(
                     f"""
                     <div class="scanner-alert {card_class}">
-                      <div class="scanner-rank">#{rank} · {alert['Stock']}</div>
+                      <div class="scanner-rank">#{rank} · {alert['Stock']} · {status_label}</div>
                       <div class="scanner-main">
                         <b>{alert['Trade']} · {alert['Strike']:.0f}</b>
-                        <span class="scanner-action {action_class}">{action}</span>
+                        <span class="scanner-action {action_class}">{status_label}</span>
                       </div>
                       <div class="scanner-stats">
                         <div class="scanner-stat"><span>PoP</span><b>{alert['PoP']:.1f}%</b></div>
@@ -2511,6 +2569,7 @@ def _render_fno_scanner_panel():
                         Entry {fmt_price(alert['Entry'])} · SL {fmt_price(alert['SL'])} ·
                         T1 {fmt_price(alert['Target1'])}
                       </div>
+                      <div class="scanner-note"><b>{reason}</b></div>
                     </div>
                     """,
                     unsafe_allow_html=True,
