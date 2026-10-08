@@ -3298,22 +3298,28 @@ def _render_trade_details_preview(action, plan):
         sl_title = "STOP LOSS"
         sl_note = "Candidate option stop level"
 
+    # IMPORTANT: this HTML is inserted after the main preview HTML has already
+    # closed.  Leading indentation would make Streamlit's Markdown parser treat
+    # the fragment as a literal code block.  Keep the fragment left-aligned.
     rejection_html = ""
     if failures:
-        items = "".join(f"<li>{str(reason)}</li>" for reason in failures)
-        rejection_html = f"""
-        <div class='fo-preview-rejection'>
-          <div class='fo-preview-subtitle'>WHY THIS CANDIDATE WAS REJECTED</div>
-          <ul>{items}</ul>
-        </div>
-        """
+        items = "".join(
+            f"<li>{str(reason).replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')}</li>"
+            for reason in failures
+        )
+        rejection_html = (
+            "<div class='fo-preview-rejection'>"
+            "<div class='fo-preview-subtitle'>WHY THIS CANDIDATE WAS REJECTED</div>"
+            f"<ul>{items}</ul>"
+            "</div>"
+        )
     else:
-        rejection_html = """
-        <div class='fo-preview-pass'>
-          <b>No hard rejection reason recorded.</b>
-          <span>The candidate may still fail a final quality/confirmation gate.</span>
-        </div>
-        """
+        rejection_html = (
+            "<div class='fo-preview-pass'>"
+            "<b>No hard rejection reason recorded.</b>"
+            "<span>The candidate may still fail a final quality/confirmation gate.</span>"
+            "</div>"
+        )
 
     max_loss_html = _preview_value(max_loss) if defined_risk else _preview_value(entry)
     max_profit_html = _preview_value(max_profit) if defined_risk else "Not capped by the model"
