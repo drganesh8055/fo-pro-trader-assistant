@@ -3211,170 +3211,256 @@ section[data-testid="stSidebar"] .stCaption { color:#64748b !important; }
 .tab-danger { background:#ffe4e6 !important; border-color:#fb7185 !important; color:#9f1239 !important; }
 </style>""", unsafe_allow_html=True)
 
-# Interactive strategy cards: rejected candidates remain visible and can be opened
-# as a clearly-labelled hypothetical trade preview. This does NOT override any
-# quality/safety gate and does not turn a rejected strategy into an executable trade.
-if "engine_preview_action" not in st.session_state:
-    st.session_state.engine_preview_action = None
-
-strategy_order = [
-    "CALL BUY",
-    "PUT BUY",
-    "BULL PUT CREDIT SPREAD",
-    "BEAR CALL CREDIT SPREAD",
-    "IRON CONDOR",
-]
+# ---------------------------------------------------------------------------
+# ENGINE RESULT CARDS + PERSISTENT TRADE DETAILS PREVIEW
+# ---------------------------------------------------------------------------
+# Streamlit reruns the script whenever a button is clicked.  The preview
+# selection is therefore stored in session_state so it survives that rerun.
+# This is intentionally inspection-only: it never changes the quality gates,
+# decision, eligibility, or trading calculations.
+if "selected_trade_preview" not in st.session_state:
+    st.session_state["selected_trade_preview"] = None
 
 
-def _engine_contract_text(action, plan):
+def _engine_contract_label(action, plan):
     if not plan:
         return "—"
-    if action == "BULL PUT CREDIT SPREAD":
-        return f"{safe_float(plan.get('short_strike')):.0f} PE / {safe_float(plan.get('long_strike')):.0f} PE"
-    if action == "BEAR CALL CREDIT SPREAD":
-        return f"{safe_float(plan.get('short_strike')):.0f} CE / {safe_float(plan.get('long_strike')):.0f} CE"
-    if action == "IRON CONDOR":
-        return (
-            f"{safe_float(plan.get('put_short_strike')):.0f}/{safe_float(plan.get('put_long_strike')):.0f} PE · "
-            f"{safe_float(plan.get('call_short_strike')):.0f}/{safe_float(plan.get('call_long_strike')):.0f} CE"
+    try:
+        if action == "BULL PUT CREDIT SPREAD":
+            return f"{safe_float(plan.get('short_strike')):.0f} PE / {safe_float(plan.get('long_strike')):.0f} PE"
+        if action == "BEAR CALL CREDIT SPREAD":
+            return f"{safe_float(plan.get('short_strike')):.0f} CE / {safe_float(plan.get('long_strike')):.0f} CE"
+        if action == "IRON CONDOR":
+            return (
+                f"{safe_float(plan.get('put_short_strike')):.0f} PE / "
+                f"{safe_float(plan.get('put_long_strike')):.0f} PE · "
+                f"{safe_float(plan.get('call_short_strike')):.0f} CE / "
+                f"{safe_float(plan.get('call_long_strike')):.0f} CE"
+            )
+        side = "CE" if str(plan.get("side", "")).upper() == "CE" else "PE"
+        return f"{safe_float(plan.get('strike')):.0f} {side}"
+    except Exception:
+        return "—"
+
+
+def _preview_value(value, prefix="₹"):
+    value = safe_float(value, np.nan)
+    if not np.isfinite(value):
+        return "—"
+    return f"{prefix}{value:,.2f}"
+
+
+def _preview_text(value, fallback="—"):
+    value = str(value or "").strip()
+    return value if value else fallback
+
+
+def _render_trade_details_preview(action, plan):
+    """Render an inspection-only view of the exact candidate that was scored."""
+    if not plan:
+        st.markdown(
+            "<div class='fo-trade-preview empty'><b>No candidate details are available for this strategy.</b></div>",
+            unsafe_allow_html=True,
         )
-    return f"{safe_float(plan.get('strike')):.0f} {'CE' if plan.get('side') == 'CE' else 'PE'}"
+        return
 
+    pop = safe_float(plan.get("pop"), np.nan)
+    score = safe_float(plan.get("score"), 0)
+    delta = safe_float(plan.get("delta"), np.nan)
+    iv = safe_float(plan.get("iv"), np.nan)
+    oi = safe_float(plan.get("oi"), np.nan)
+    chg_oi = safe_float(plan.get("chg_oi"), np.nan)
+    volume = safe_float(plan.get("volume"), np.nan)
+    spread_pct = safe_float(plan.get("spread_pct"), np.nan)
+    max_loss = safe_float(plan.get("max_loss_per_unit"), np.nan)
+    max_profit = safe_float(plan.get("max_profit_per_unit"), np.nan)
+    net_credit = safe_float(plan.get("net_credit"), np.nan)
+    entry = safe_float(plan.get("entry"), np.nan)
+    sl = safe_float(plan.get("sl"), np.nan)
+    target1 = safe_float(plan.get("target1"), np.nan)
+    target2 = safe_float(plan.get("target2"), np.nan)
+    target3 = safe_float(plan.get("target3"), np.nan)
+    target4 = safe_float(plan.get("target4"), np.nan)
+    rr1 = safe_float(plan.get("rr1"), np.nan)
+    alignment = plan.get("alignment", "—")
+    defined_risk = bool(plan.get("defined_risk"))
+    failures = plan.get("fail_reasons") or []
+    contract_label = _engine_contract_label(action, plan)
 
-# Keep the same visual 2-column engine layout, but use native Streamlit buttons
-# so every card—including REJECTED cards—can be clicked safely.
-st.markdown("""
-<style>
-/* Interactive rejected-trade preview */
-.fo-preview{border:2px solid #d7e2ee;border-radius:16px;padding:18px;margin:2px 0 16px;background:#fff;box-shadow:0 7px 20px rgba(15,23,42,.055);}
-.fo-preview.status-red{background:linear-gradient(135deg,#fff7f7,#fff);border-color:#fda4af;}
-.fo-preview.status-green{background:linear-gradient(135deg,#f3fff7,#fff);border-color:#86efac;}
-.fo-preview-head{display:flex;justify-content:space-between;align-items:flex-start;gap:15px;}
-.fo-preview-label{font-size:12px;font-weight:900;letter-spacing:.8px;color:#9f1239;}
-.fo-preview.status-green .fo-preview-label{color:#166534;}
-.fo-preview-title{font-size:25px;font-weight:950;color:#182230;margin-top:4px;}
-.fo-preview-contract{font-size:20px;font-weight:900;color:#0f3b63;text-align:right;}
-.fo-preview-note{margin-top:12px;padding:11px 13px;border-radius:11px;background:#fff7ed;border:1px solid #fed7aa;color:#9a3412;font-size:13px;line-height:1.45;}
-.fo-preview-grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:8px;margin-top:12px;}
-.fo-preview-grid>div{background:#fff;border:1px solid #dbe5ef;border-radius:10px;padding:10px;min-width:0;}
-.fo-preview-grid span{display:block;font-size:10px;font-weight:900;color:#64748b;letter-spacing:.5px;}
-.fo-preview-grid b{display:block;font-size:17px;color:#182230;margin-top:5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
-.fo-preview-rule{margin-top:10px;padding:11px 13px;border-radius:10px;background:#f8fafc;border:1px solid #dbe5ef;color:#475569;font-size:13px;line-height:1.45;}
-.fo-preview-rule b{color:#0f3b63;}
-.fo-preview-reject{margin-top:10px;padding:11px 13px;border-radius:10px;background:#fff1f2;border:1px solid #fda4af;color:#9f1239;font-size:13px;line-height:1.45;}
-@media(max-width:900px){.fo-preview-grid{grid-template-columns:repeat(2,minmax(0,1fr));}.fo-preview-head{flex-direction:column;}.fo-preview-contract{text-align:left;}}
-@media(max-width:520px){.fo-preview-grid{grid-template-columns:1fr;}}
-</style>
-""", unsafe_allow_html=True)
+    if defined_risk:
+        entry_title = "NET CREDIT"
+        entry_note = "Credit received for the complete defined-risk spread"
+        sl_title = "STOP / EXIT DEBIT"
+        sl_note = "Debit level used by the strategy's exit logic"
+    else:
+        entry_title = "ENTRY PREMIUM"
+        entry_note = "Candidate option premium"
+        sl_title = "STOP LOSS"
+        sl_note = "Candidate option stop level"
 
-engine_cols = st.columns(2, gap="medium")
-for idx, action in enumerate(strategy_order):
-    col = engine_cols[idx % 2]
-    plan = strategy_plans.get(action)
-    with col:
-        if not plan:
-            status = "NO DATA"
-            status_class = "rejected"
-            contract_text = "—"
-            reason_text = "No valid candidate was produced."
-            pop_text = "—"
-            score_text = "—"
-        else:
-            fails = ", ".join(plan.get("fail_reasons") or []) or "All hard checks passed"
-            selected = action == decision
-            status = "SELECTED" if selected else (
-                "PASS" if not plan.get("fail_reasons")
-                and safe_float(plan.get("score"), 0) >= MIN_SCORE
-                and safe_float(plan.get("pop"), 0) >= MIN_POP
-                else "REJECTED"
-            )
-            status_class = "selected" if selected else ("" if status == "PASS" else "rejected")
-            contract_text = _engine_contract_text(action, plan)
-            reason_text = (
-                "Net credit ₹" + format(safe_float(plan.get("net_credit"), 0), ".2f")
-                + " · Max loss ₹" + format(safe_float(plan.get("max_loss_per_unit"), 0), ".2f") + " / unit"
-                if plan.get("defined_risk") else fails
-            )
-            pop_value = safe_float(plan.get("pop"))
-            pop_text = f"{pop_value:.1f}%" if np.isfinite(pop_value) else "—"
-            score_text = f"{safe_float(plan.get('score'), 0):.0f}/100"
-
-        card_html = f"""
-        <div class='fo-engine-card {status_class}' style='margin-bottom:8px;'>
-          <div class='fo-engine-top'><div class='fo-engine-action'>{action}</div><div class='fo-engine-status'>{status}</div></div>
-          <div class='fo-engine-contract'>{contract_text}</div>
-          <div class='fo-engine-stats'>
-            <div><span>PoP</span><b>{pop_text}</b></div>
-            <div><span>QUALITY</span><b>{score_text}</b></div>
-          </div>
-          <div class='fo-engine-reason'>{reason_text}</div>
+    rejection_html = ""
+    if failures:
+        items = "".join(f"<li>{str(reason)}</li>" for reason in failures)
+        rejection_html = f"""
+        <div class='fo-preview-rejection'>
+          <div class='fo-preview-subtitle'>WHY THIS CANDIDATE WAS REJECTED</div>
+          <ul>{items}</ul>
         </div>
         """
-        st.markdown(card_html, unsafe_allow_html=True)
-        button_label = "VIEW TRADE DETAILS" if plan else "VIEW CANDIDATE DETAILS"
-        if st.button(button_label, key=f"engine_preview_{idx}", use_container_width=True):
-            st.session_state.engine_preview_action = action
-
-# Show the selected/rejected candidate preview after the cards.
-preview_action = st.session_state.get("engine_preview_action")
-preview_plan = strategy_plans.get(preview_action) if preview_action else None
-if preview_action:
-    st.markdown("<div class='fo-section'>TRADE DETAILS PREVIEW</div>", unsafe_allow_html=True)
-    if preview_plan:
-        preview_rejected = preview_action != decision or bool(preview_plan.get("fail_reasons"))
-        preview_label = "REJECTED TRADE PREVIEW · NOT AN ENTRY" if preview_rejected else "SELECTED TRADE DETAILS"
-        preview_color_class = "status-red" if preview_rejected else "status-green"
-        preview_contract = _engine_contract_text(preview_action, preview_plan)
-        preview_pop = safe_float(preview_plan.get("pop"))
-        preview_score = safe_float(preview_plan.get("score"), 0)
-        preview_entry = safe_float(preview_plan.get("entry"))
-        preview_sl = safe_float(preview_plan.get("sl"))
-        preview_t1 = safe_float(preview_plan.get("target1"))
-        preview_t2 = safe_float(preview_plan.get("target2"))
-        preview_t3 = safe_float(preview_plan.get("target3"))
-        preview_t4 = safe_float(preview_plan.get("target4"))
-        preview_delta = safe_float(preview_plan.get("delta"))
-        preview_iv = safe_float(preview_plan.get("iv"))
-        preview_max_loss = safe_float(preview_plan.get("max_loss_per_unit"))
-        preview_max_profit = safe_float(preview_plan.get("max_profit_per_unit"))
-        preview_rr = safe_float(preview_plan.get("risk_reward"))
-        fail_text = "; ".join(preview_plan.get("fail_reasons") or []) or "No hard rejection reason recorded."
-
-        def _pv(v, digits=2):
-            return fmt_price(v) if np.isfinite(v) else "—"
-
-        st.markdown(f"""
-        <div class='fo-preview {preview_color_class}'>
-          <div class='fo-preview-head'>
-            <div><div class='fo-preview-label'>{preview_label}</div><div class='fo-preview-title'>{preview_action}</div></div>
-            <div class='fo-preview-contract'>{preview_contract}</div>
-          </div>
-          <div class='fo-preview-note'>
-            This is the exact candidate generated by the engine from the current live option chain. It is shown for learning/testing only.
-            A rejected candidate remains rejected; viewing it does not bypass any safety or quality gate.
-          </div>
-          <div class='fo-preview-grid'>
-            <div><span>PoP</span><b>{f'{preview_pop:.1f}%' if np.isfinite(preview_pop) else '—'}</b></div>
-            <div><span>QUALITY</span><b>{preview_score:.0f}/100</b></div>
-            <div><span>ENTRY / CREDIT</span><b>{_pv(preview_entry)}</b></div>
-            <div><span>STOP / EXIT</span><b>{_pv(preview_sl)}</b></div>
-            <div><span>TARGET 1</span><b>{_pv(preview_t1)}</b></div>
-            <div><span>TARGET 2</span><b>{_pv(preview_t2)}</b></div>
-            <div><span>TARGET 3</span><b>{_pv(preview_t3)}</b></div>
-            <div><span>TARGET 4</span><b>{_pv(preview_t4)}</b></div>
-            <div><span>DELTA</span><b>{f'{preview_delta:.2f}' if np.isfinite(preview_delta) else '—'}</b></div>
-            <div><span>IV</span><b>{f'{preview_iv:.1f}%' if np.isfinite(preview_iv) else '—'}</b></div>
-            <div><span>MAX LOSS / UNIT</span><b>{_pv(preview_max_loss)}</b></div>
-            <div><span>MAX PROFIT / UNIT</span><b>{_pv(preview_max_profit)}</b></div>
-          </div>
-          <div class='fo-preview-rule'><b>EXIT RULE</b><br>{preview_plan.get('exit','Follow the displayed stop/targets.')}</div>
-          <div class='fo-preview-rule'><b>TRIGGER / CONFIRMATION</b><br>{preview_plan.get('trigger','Follow the strategy confirmation conditions before considering any entry.')}</div>
-          {f"<div class='fo-preview-reject'><b>WHY REJECTED</b><br>{fail_text}</div>" if preview_rejected else ""}
-        </div>
-        """, unsafe_allow_html=True)
     else:
-        st.markdown("<div class='fo-preview status-red'><b>No candidate details are available for this strategy.</b></div>", unsafe_allow_html=True)
+        rejection_html = """
+        <div class='fo-preview-pass'>
+          <b>No hard rejection reason recorded.</b>
+          <span>The candidate may still fail a final quality/confirmation gate.</span>
+        </div>
+        """
 
+    max_loss_html = _preview_value(max_loss) if defined_risk else _preview_value(entry)
+    max_profit_html = _preview_value(max_profit) if defined_risk else "Not capped by the model"
+    net_credit_html = _preview_value(net_credit) if defined_risk else "—"
+
+    st.markdown(f"""
+    <div class='fo-trade-preview'>
+      <div class='fo-preview-banner'>
+        <div>
+          <div class='fo-preview-title'>REJECTED TRADE PREVIEW · NOT AN ENTRY</div>
+          <div class='fo-preview-contract'>{action} · {contract_label}</div>
+        </div>
+        <div class='fo-preview-badge'>INSPECTION ONLY</div>
+      </div>
+
+      <div class='fo-preview-stats'>
+        <div><span>MODEL PoP</span><b>{f'{pop:.1f}%' if np.isfinite(pop) else '—'}</b></div>
+        <div><span>QUALITY</span><b>{score:.0f}/100</b></div>
+        <div><span>ALIGNMENT</span><b>{alignment}</b></div>
+        <div><span>READINESS</span><b>{_preview_text(plan.get('readiness'))}</b></div>
+      </div>
+
+      <div class='fo-preview-grid'>
+        <div class='fo-preview-item entry'><span>{entry_title}</span><b>{_preview_value(entry)}</b><small>{entry_note}</small></div>
+        <div class='fo-preview-item stop'><span>{sl_title}</span><b>{_preview_value(sl)}</b><small>{sl_note}</small></div>
+        <div class='fo-preview-item target'><span>TARGET 1</span><b>{_preview_value(target1)}</b><small>First planned level · R:R {f'{rr1:.2f}' if np.isfinite(rr1) else '—'}</small></div>
+        <div class='fo-preview-item target'><span>TARGET 2</span><b>{_preview_value(target2)}</b><small>Second planned level</small></div>
+        <div class='fo-preview-item target'><span>TARGET 3</span><b>{_preview_value(target3)}</b><small>Third planned level</small></div>
+        <div class='fo-preview-item target'><span>TARGET 4</span><b>{_preview_value(target4)}</b><small>Fourth planned level</small></div>
+      </div>
+
+      <div class='fo-preview-stats'>
+        <div><span>DELTA</span><b>{f'{delta:.2f}' if np.isfinite(delta) else '—'}</b></div>
+        <div><span>IV</span><b>{f'{iv:.1f}%' if np.isfinite(iv) else '—'}</b></div>
+        <div><span>OI</span><b>{f'{oi:,.0f}' if np.isfinite(oi) else '—'}</b></div>
+        <div><span>CHG OI</span><b>{f'{chg_oi:,.0f}' if np.isfinite(chg_oi) else '—'}</b></div>
+        <div><span>VOLUME</span><b>{f'{volume:,.0f}' if np.isfinite(volume) else '—'}</b></div>
+        <div><span>SPREAD</span><b>{f'{spread_pct:.2f}%' if np.isfinite(spread_pct) else '—'}</b></div>
+      </div>
+
+      <div class='fo-preview-risk'>
+        <div><span>DEFINED MAX LOSS / UNIT</span><b>{max_loss_html}</b></div>
+        <div><span>MAX PROFIT / UNIT</span><b>{max_profit_html}</b></div>
+        <div><span>NET CREDIT</span><b>{net_credit_html}</b></div>
+      </div>
+
+      <div class='fo-preview-rule'>
+        <span>EXIT RULE</span><b>{_preview_text(plan.get('exit'), 'Follow the strategy stop/target rules.')}</b>
+      </div>
+      <div class='fo-preview-rule'>
+        <span>TRIGGER / CONFIRMATION</span><b>{_preview_text(plan.get('trigger'), 'No separate trigger recorded.')}</b>
+      </div>
+      {rejection_html}
+      <div class='fo-preview-warning'>⚠️ This panel reconstructs the candidate produced by the current live analysis. Clicking it does not bypass any gate and does not make the trade executable.</div>
+    </div>
+    """, unsafe_allow_html=True)
+
+# Preview styling is deliberately isolated from the existing trading-engine CSS.
+st.markdown("""<style>
+.fo-trade-preview{margin-top:16px;border:2px solid #cbd5e1;border-radius:16px;padding:16px;background:linear-gradient(180deg,#ffffff,#f8fafc);box-shadow:0 8px 24px rgba(15,23,42,.07);}
+.fo-trade-preview.empty{color:#64748b;text-align:center;background:#f8fafc;}
+.fo-preview-banner{display:flex;justify-content:space-between;align-items:center;gap:12px;border-radius:12px;padding:13px 15px;background:linear-gradient(100deg,#fff7ed,#fffbeb);border:1px solid #fed7aa;}
+.fo-preview-title{font-size:12px;font-weight:950;letter-spacing:.7px;color:#c2410c;}
+.fo-preview-contract{font-size:22px;font-weight:950;color:#172b4d;margin-top:4px;}
+.fo-preview-badge{font-size:11px;font-weight:900;color:#92400e;background:#fde68a;border:1px solid #f59e0b;border-radius:999px;padding:6px 9px;white-space:nowrap;}
+.fo-preview-stats{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:8px;margin-top:12px;}
+.fo-preview-stats div,.fo-preview-risk div{background:#f8fafc;border:1px solid #e2e8f0;border-radius:10px;padding:9px;}
+.fo-preview-stats span,.fo-preview-risk span,.fo-preview-item span,.fo-preview-rule span{display:block;font-size:10px;font-weight:900;color:#64748b;letter-spacing:.45px;}
+.fo-preview-stats b,.fo-preview-risk b{display:block;margin-top:3px;font-size:15px;color:#172b4d;}
+.fo-preview-grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:9px;margin-top:12px;}
+.fo-preview-item{border:1px solid #dbe5ef;border-radius:10px;padding:10px;background:#fff;}
+.fo-preview-item b{display:block;margin-top:4px;font-size:17px;color:#172b4d;}
+.fo-preview-item small{display:block;margin-top:4px;color:#64748b;line-height:1.35;}
+.fo-preview-item.entry{border-top:4px solid #2563eb;}.fo-preview-item.stop{border-top:4px solid #dc2626;}.fo-preview-item.target{border-top:4px solid #16a34a;}
+.fo-preview-risk{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:9px;margin-top:12px;}
+.fo-preview-rule{margin-top:10px;padding:10px 12px;border-radius:10px;background:#eff6ff;border:1px solid #bfdbfe;}
+.fo-preview-rule b{display:block;margin-top:3px;color:#1e3a8a;line-height:1.45;}
+.fo-preview-rejection{margin-top:12px;padding:12px 14px;border-radius:10px;background:#fff1f2;border:1px solid #fecdd3;}
+.fo-preview-rejection .fo-preview-subtitle{font-size:11px;font-weight:950;color:#be123c;letter-spacing:.5px;}
+.fo-preview-rejection ul{margin:7px 0 0 20px;padding:0;color:#9f1239;line-height:1.55;}
+.fo-preview-pass{margin-top:12px;padding:10px 12px;border-radius:10px;background:#ecfdf5;border:1px solid #a7f3d0;color:#166534;}
+.fo-preview-pass span{display:block;margin-top:3px;}
+.fo-preview-warning{margin-top:12px;padding:10px 12px;border-radius:10px;background:#fefce8;border:1px solid #fde68a;color:#854d0e;font-size:12px;line-height:1.45;}
+@media(max-width:900px){.fo-preview-grid{grid-template-columns:repeat(2,minmax(0,1fr));}.fo-preview-stats{grid-template-columns:repeat(2,minmax(0,1fr));}}
+@media(max-width:600px){.fo-preview-banner{align-items:flex-start;flex-direction:column;}.fo-preview-contract{font-size:18px;}.fo-preview-grid,.fo-preview-risk,.fo-preview-stats{grid-template-columns:1fr;}}
+</style>""", unsafe_allow_html=True)
+
+# Render the cards as Streamlit columns so the detail button is a real Streamlit
+# widget. HTML-only cards cannot safely carry a persistent click state.
+engine_actions = ["CALL BUY","PUT BUY","BULL PUT CREDIT SPREAD","BEAR CALL CREDIT SPREAD","IRON CONDOR"]
+engine_columns = st.columns(2)
+for idx, action in enumerate(engine_actions):
+    plan = strategy_plans[action]
+    col = engine_columns[idx % 2]
+    with col:
+        if not plan:
+            st.markdown(
+                f"""<div class='fo-engine-card rejected'>
+                  <div class='fo-engine-top'><div class='fo-engine-action'>{action}</div><div class='fo-engine-status'>NO DATA</div></div>
+                  <div class='fo-engine-contract'>—</div>
+                  <div class='fo-engine-reason'>No valid candidate was produced.</div>
+                </div>""",
+                unsafe_allow_html=True,
+            )
+            continue
+
+        fails = ", ".join(plan.get("fail_reasons") or []) or "All hard checks passed"
+        selected = action == decision
+        status = "SELECTED" if selected else (
+            "PASS" if not plan.get("fail_reasons") and
+            safe_float(plan.get("score"), 0) >= MIN_SCORE and
+            safe_float(plan.get("pop"), 0) >= MIN_POP else "REJECTED"
+        )
+        status_class = "selected" if selected else ("" if status == "PASS" else "rejected")
+        contract_label = _engine_contract_label(action, plan)
+        reason_html = (
+            "Net credit ₹" + format(safe_float(plan.get("net_credit"), 0), ".2f") +
+            " · Max loss ₹" + format(safe_float(plan.get("max_loss_per_unit"), 0), ".2f") + " / unit"
+        ) if plan.get("defined_risk") else fails
+
+        st.markdown(
+            f"""<div class='fo-engine-card {status_class}'>
+              <div class='fo-engine-top'><div class='fo-engine-action'>{action}</div><div class='fo-engine-status'>{status}</div></div>
+              <div class='fo-engine-contract'>{contract_label}</div>
+              <div class='fo-engine-stats'><div><span>PoP</span><b>{safe_float(plan.get('pop'), np.nan):.1f}%</b></div><div><span>QUALITY</span><b>{safe_float(plan.get('score'),0):.0f}/100</b></div></div>
+              <div class='fo-engine-reason'>{reason_html}</div>
+            </div>""",
+            unsafe_allow_html=True,
+        )
+
+        if st.button(
+            "VIEW TRADE DETAILS",
+            key=f"view_trade_details_{idx}",
+            use_container_width=True,
+            disabled=False,
+        ):
+            st.session_state["selected_trade_preview"] = action
+
+selected_preview_action = st.session_state.get("selected_trade_preview")
+if selected_preview_action in strategy_plans:
+    st.markdown("<div class='fo-section'>TRADE DETAILS PREVIEW</div>", unsafe_allow_html=True)
+    _render_trade_details_preview(selected_preview_action, strategy_plans.get(selected_preview_action))
+else:
+    st.markdown(
+        "<div class='fo-trade-preview empty'><b>Select VIEW TRADE DETAILS on any strategy card to inspect the exact candidate, even when it was rejected.</b></div>",
+        unsafe_allow_html=True,
+    )
 
 # Optional visual support/resistance map. It uses the same values already calculated;
 # it does not create or alter a trading signal.
