@@ -1349,28 +1349,25 @@ def build_plan(row, side, spot, support, resistance, pcr, tf5, tf30, daily,
     volume_ratio = safe_float(tf5.get("volume_ratio"), 1.0)
 
     if side == "CE":
-        # Use the recent 5m swing as the immediate trigger. OI resistance remains
-        # a scored risk/barrier input, but a distant OI wall should not force the
-        # underlying to travel an unrealistic distance before a setup can qualify.
-        trigger_level = recent_high + max(atr * 0.08, spot * 0.0007)
+        trigger_level = max(resistance, recent_high) + trigger_buffer
         trigger_hit = spot >= trigger_level
         candle_confirmed = (
             tf5.get("trend") == "Bullish" and momentum_positive(tf5) and
-            rsi_ok_for_breakout(tf5, "CE") and close_location >= 0.55 and body_strength >= 0.30
+            rsi_ok_for_breakout(tf5, "CE") and close_location >= 0.60 and body_strength >= 0.35
         )
-        volume_confirmed = volume_ratio >= 1.00
+        volume_confirmed = volume_ratio >= 1.05
         extension_pct = (spot - vwap_value(tf5, spot)) / max(spot, 1) * 100
         late_entry = extension_pct > max(1.8, atr / max(spot, 1) * 100 * 1.8)
         trigger = f"Enter only after spot breaks {fmt_price(trigger_level)} with a strong 5m close and volume confirmation."
         exit_rule = f"Exit if spot loses support {fmt_price(support)} or premium hits {fmt_price(sl)}. After Target 1, trail below the latest 5m swing low."
     else:
-        trigger_level = recent_low - max(atr * 0.08, spot * 0.0007)
+        trigger_level = min(support, recent_low) - trigger_buffer
         trigger_hit = spot <= trigger_level
         candle_confirmed = (
             tf5.get("trend") == "Bearish" and momentum_negative(tf5) and
-            rsi_ok_for_breakout(tf5, "PE") and close_location <= 0.45 and body_strength >= 0.30
+            rsi_ok_for_breakout(tf5, "PE") and close_location <= 0.40 and body_strength >= 0.35
         )
-        volume_confirmed = volume_ratio >= 1.00
+        volume_confirmed = volume_ratio >= 1.05
         extension_pct = (vwap_value(tf5, spot) - spot) / max(spot, 1) * 100
         late_entry = extension_pct > max(1.8, atr / max(spot, 1) * 100 * 1.8)
         trigger = f"Enter only after spot breaks {fmt_price(trigger_level)} with a strong 5m close and volume confirmation."
@@ -1379,21 +1376,21 @@ def build_plan(row, side, spot, support, resistance, pcr, tf5, tf30, daily,
     hard_fail = []
     if tf5.get("trend") in {"Bearish" if side == "CE" else "Bullish"}:
         hard_fail.append("5m trend conflict")
-    if scored["spread_pct"] > 4:
-        hard_fail.append("wide option spread (>4%)")
-    if not np.isfinite(scored["delta"]) or not (0.25 <= abs(scored["delta"]) <= 0.85):
+    if scored["spread_pct"] > 3:
+        hard_fail.append("wide option spread")
+    if not np.isfinite(scored["delta"]) or not (0.30 <= abs(scored["delta"]) <= 0.80):
         hard_fail.append("poor delta")
-    if scored["volume"] < 500:
-        hard_fail.append("weak option liquidity (<500 contracts volume)")
+    if scored["volume"] < 1000:
+        hard_fail.append("weak option liquidity")
     if scored["oi"] <= 0:
         hard_fail.append("no option OI")
     vwap = vwap_value(tf5, spot)
-    if side == "CE" and spot < vwap * 0.995:
-        hard_fail.append("price materially below VWAP")
-    if side == "PE" and spot > vwap * 1.005:
-        hard_fail.append("price materially above VWAP")
+    if side == "CE" and spot < vwap * 0.997:
+        hard_fail.append("price below VWAP")
+    if side == "PE" and spot > vwap * 1.003:
+        hard_fail.append("price above VWAP")
     wall_room = (resistance - spot) / max(spot, 1) * 100 if side == "CE" else (spot - support) / max(spot, 1) * 100
-    if wall_room < 0.25 and not trigger_hit:
+    if wall_room < 0.50 and not trigger_hit:
         hard_fail.append("OI wall too close")
     if late_entry:
         hard_fail.append("late entry / overextended")
@@ -1433,10 +1430,10 @@ def build_plan(row, side, spot, support, resistance, pcr, tf5, tf30, daily,
         "trigger": trigger, "trigger_level": trigger_level, "trigger_hit": trigger_hit,
         "candle_confirmed": candle_confirmed, "volume_confirmed": volume_confirmed,
         "readiness": readiness, "fail_reasons": hard_fail,
-        "score_gate": scored["score"] >= 60, "watch_score_gate": scored["score"] >= 55,
+        "score_gate": scored["score"] >= 65, "watch_score_gate": scored["score"] >= 58,
         "alignment_gate": scored["alignment"] >= 2,
         "pop_ok": np.isfinite(scored["pop"]) and scored["pop"] >= 45,
-        "strong_pop": np.isfinite(scored["pop"]) and scored["pop"] >= 50,
+        "strong_pop": np.isfinite(scored["pop"]) and scored["pop"] >= 55,
         "exit": exit_rule, "oi": scored["oi"], "chg_oi": scored["chg_oi"], "oi_behavior": scored["oi_behavior"],
         "volume": scored["volume"], "spread_pct": scored["spread_pct"],
         "alignment": scored["alignment"], "vwap": scored["vwap"],
@@ -1459,10 +1456,8 @@ def momentum_negative(tf):
 
 
 def rsi_ok_for_breakout(tf, side):
-    # Slightly wider momentum bands reduce false rejections without accepting
-    # extreme overbought/oversold readings as fresh entries.
     r = safe_float(tf.get("rsi"), 50)
-    return 50 <= r <= 75 if side == "CE" else 25 <= r <= 50
+    return 52 <= r <= 72 if side == "CE" else 28 <= r <= 48
 
 
 def build_sell_plan(row, side, spot, support, resistance, pcr, tf5, tf30, daily,
@@ -1643,8 +1638,8 @@ def _credit_spread_plan(short_row, long_row, short_side, spot, support, resistan
 
     if rr1 < 0.75:
         hard_fail.append("defined-risk reward too small")
-    if pop < 55 if np.isfinite(pop) else True:
-        hard_fail.append("strategy PoP below 55%")
+    if pop < 60 if np.isfinite(pop) else True:
+        hard_fail.append("strategy PoP below 60%")
 
     # In a RANGE, directional timeframe alignment is intentionally neutral;
     # do not reject a range credit spread merely because the timeframes are not
@@ -1653,7 +1648,7 @@ def _credit_spread_plan(short_row, long_row, short_side, spot, support, resistan
         opposing = (tf5.get("trend") == ("Bearish" if short_side == "PE" else "Bullish") or
                     tf30.get("trend") == ("Bearish" if short_side == "PE" else "Bullish"))
         alignment = 2 if not opposing else 0
-    readiness = "READY" if not hard_fail and score >= 65 and alignment >= 2 else "NO TRADE"
+    readiness = "READY" if not hard_fail and score >= 68 and alignment >= 2 else "NO TRADE"
     lot_size = np.nan
     max_loss = max_loss_per_unit
     max_profit = credit
@@ -1754,8 +1749,8 @@ def build_iron_condor(chain, spot, support, resistance, pcr, tf5, tf30, daily,
     pop=min(bull["pop"],bear["pop"])
     ic_alignment = 2 if regime == "RANGE" else min(bull.get("alignment",0), bear.get("alignment",0))
     hard_fail=[]
-    if pop < 55: hard_fail.append("iron condor PoP below 55%")
-    if score < 65: hard_fail.append("iron condor quality below threshold")
+    if pop < 60: hard_fail.append("iron condor PoP below 60%")
+    if score < 68: hard_fail.append("iron condor quality below threshold")
     return {
         "side":"BOTH", "short_strike":bull["short_strike"], "long_strike":bull["long_strike"],
         "call_short_strike":bear["short_strike"], "call_long_strike":bear["long_strike"],
@@ -1841,10 +1836,9 @@ FNO_MASTER_URLS = {
 
 @st.cache_data(ttl=3600, show_spinner=False)
 def get_fno_underlyings():
-    """Build the combined NSE + BSE equity and index F&O universe from Upstox masters.
+    """Build the combined NSE + BSE equity F&O universe from Upstox BOD masters.
 
-    Includes index options as well as stock options so the manual scanner can
-    surface index setups and stock setups from the same live-data engine.
+    This is backend-only. The scanner UI remains exactly the same as before.
     """
     today = date.today().isoformat()
     universe = {}
@@ -1869,7 +1863,7 @@ def get_fno_underlyings():
                 continue
             if item.get("instrument_type") not in {"CE", "PE", "FUT"}:
                 continue
-            if str(item.get("underlying_type", "")).upper() not in {"EQUITY", "INDEX"}:
+            if item.get("underlying_type") != "EQUITY":
                 continue
 
             expiry_raw = str(item.get("expiry", "")).strip()
@@ -1974,14 +1968,13 @@ def _scanner_stage1_candidates(rows, spot, max_candidates=8):
 
             if not np.isfinite(ltp) or ltp <= 0 or oi <= 0:
                 continue
-            if not np.isfinite(pop) or pop < 48:
+            if not np.isfinite(pop) or pop < 55:
                 continue
 
-            # Stage 1 is a broad shortlist filter, not an entry signal. Final
-            # scoring, trend, trigger, liquidity and risk gates still apply.
-            if volume < 200 or spread > 5.5:
+            # Stage 1 only rejects obviously unusable contracts.
+            if volume < 300 or spread > 5:
                 continue
-            if not np.isfinite(delta) or delta < 0.08 or delta > 0.90:
+            if not np.isfinite(delta) or delta < 0.10 or delta > 0.85:
                 continue
 
             candidates.append({
@@ -2031,8 +2024,6 @@ def _scanner_actionable(plan, action):
     alignment = int(plan.get("alignment", 0) or 0)
     hard_fail = plan.get("fail_reasons") or []
 
-    # READY in the scanner must match the default Beginner Safety layer.
-    # Lower-scoring candidates can still appear as WATCH for review.
     if score < 65 or not np.isfinite(pop) or pop < 55 or alignment < 2:
         return False
     if hard_fail or plan.get("readiness") != "READY":
@@ -2059,7 +2050,7 @@ def _scanner_status_for_plan(plan, action):
 
     # WATCH means the candidate is reasonably strong but is missing one or more
     # final confirmation/execution requirements. It is NOT an executable trade.
-    if (score >= 55 and np.isfinite(pop) and pop >= 48 and alignment >= 1
+    if (score >= 65 and np.isfinite(pop) and pop >= 55 and alignment >= 2
             and not hard_fail):
         return "WATCH"
 
@@ -2539,7 +2530,7 @@ def _render_fno_scanner_panel():
             if alert_info:
                 total, scanned, failed, stage2_count = alert_info
                 st.caption(
-                    f"Scanned {scanned}/{total} F&O instruments • "
+                    f"Scanned {scanned}/{total} F&O stocks • "
                     f"{failed} unavailable • {stage2_count} shortlisted"
                 )
 
@@ -2804,10 +2795,8 @@ iron_condor = sell_strategies.get("IRON CONDOR")
 # ============================================================
 # FINAL 5-WAY DECISION
 # ============================================================
-# Balanced quality gates: widened enough to admit more valid setups, while
-# preserving confirmation, liquidity, data integrity and risk/reward checks.
-MIN_SCORE = 60
-MIN_POP = 50
+MIN_SCORE = 65
+MIN_POP = 55
 MIN_ALIGNMENT = 2
 
 strategy_plans = {
@@ -2836,7 +2825,7 @@ for action, plan in strategy_plans.items():
         # Defined-risk selling requires stronger quality and explicitly rejects
         # breakout/breakdown/high-volatility conditions.
         ready = (
-            score >= 65 and pop >= 55 and alignment >= MIN_ALIGNMENT and
+            score >= 68 and pop >= 60 and alignment >= MIN_ALIGNMENT and
             not hard_fail and plan.get("readiness") == "READY" and
             safe_float(plan.get("rr1"), 0) >= 0.75 and
             bool(plan.get("defined_risk")) and
@@ -2882,14 +2871,14 @@ if beginner_mode:
             candle_confirmed = bool(candidate.get("candle_confirmed"))
             volume_confirmed = bool(candidate.get("volume_confirmed"))
             _add_beginner_check("Strategy type", "pass", "Directional option BUY — no naked option selling")
-            _add_beginner_check("Quality score", "pass" if score >= 65 else "fail", f"{score:.0f}/100 · balanced beginner threshold 65")
-            _add_beginner_check("Model PoP", "pass" if np.isfinite(pop) and pop >= 55 else "fail", f"{pop:.1f}% · threshold 55%" if np.isfinite(pop) else "Unavailable")
+            _add_beginner_check("Quality score", "pass" if score >= 70 else "fail", f"{score:.0f}/100 · beginner threshold 70")
+            _add_beginner_check("Model PoP", "pass" if np.isfinite(pop) and pop >= 60 else "fail", f"{pop:.1f}% · threshold 60%" if np.isfinite(pop) else "Unavailable")
             _add_beginner_check("Timeframe alignment", "pass" if alignment >= 2 else "fail", f"{alignment}/3 timeframes aligned")
             _add_beginner_check("Entry confirmation", "pass" if trigger_hit and candle_confirmed and volume_confirmed else "wait", "Breakout + candle + volume confirmation required")
-            _add_beginner_check("Risk / reward", "pass" if rr1 >= 0.80 else "fail", f"T1 R:R {rr1:.2f} · minimum 0.80")
-            _add_beginner_check("Option liquidity", "pass" if spread_pct <= 3 and volume >= 500 else "fail", f"Spread {spread_pct:.1f}% · Volume {volume:,.0f}")
-            _add_beginner_check("Delta", "pass" if np.isfinite(delta) and 0.25 <= delta <= 0.85 else "fail", f"|Delta| {delta:.2f} · acceptable 0.25–0.85" if np.isfinite(delta) else "Unavailable")
-            safety_fail = score < 65 or not np.isfinite(pop) or pop < 55 or alignment < 2 or not (trigger_hit and candle_confirmed and volume_confirmed) or rr1 < 0.80 or spread_pct > 3 or volume < 500 or not np.isfinite(delta) or delta < 0.25 or delta > 0.85 or bool(hard_fail)
+            _add_beginner_check("Risk / reward", "pass" if rr1 >= 1.0 else "fail", f"T1 R:R {rr1:.2f} · minimum 1.00")
+            _add_beginner_check("Option liquidity", "pass" if spread_pct <= 2 and volume >= 1000 else "fail", f"Spread {spread_pct:.1f}% · Volume {volume:,.0f}")
+            _add_beginner_check("Delta", "pass" if np.isfinite(delta) and 0.35 <= delta <= 0.70 else "fail", f"|Delta| {delta:.2f} · preferred 0.35–0.70" if np.isfinite(delta) else "Unavailable")
+            safety_fail = score < 70 or not np.isfinite(pop) or pop < 60 or alignment < 2 or not (trigger_hit and candle_confirmed and volume_confirmed) or rr1 < 1.0 or spread_pct > 2 or volume < 1000 or not np.isfinite(delta) or delta < 0.35 or delta > 0.70 or bool(hard_fail)
         else:
             # Beginner mode permits only DEFINED-RISK selling strategies.
             rr1 = safe_float(candidate.get("rr1"), 0)
@@ -2897,15 +2886,15 @@ if beginner_mode:
             max_profit = safe_float(candidate.get("max_profit_per_unit"), np.nan)
             risk_reward = safe_float(candidate.get("risk_reward_defined"), np.nan)
             _add_beginner_check("Strategy type", "pass" if defined_risk else "fail", "Defined-risk spread only; naked selling is blocked")
-            _add_beginner_check("Quality score", "pass" if score >= 65 else "fail", f"{score:.0f}/100 · spread threshold 65")
-            _add_beginner_check("Model PoP", "pass" if np.isfinite(pop) and pop >= 55 else "fail", f"{pop:.1f}% · spread threshold 55%" if np.isfinite(pop) else "Unavailable")
+            _add_beginner_check("Quality score", "pass" if score >= 70 else "fail", f"{score:.0f}/100 · spread threshold 70")
+            _add_beginner_check("Model PoP", "pass" if np.isfinite(pop) and pop >= 60 else "fail", f"{pop:.1f}% · spread threshold 60%" if np.isfinite(pop) else "Unavailable")
             _add_beginner_check("Timeframe alignment", "pass" if alignment >= 2 else "fail", f"{alignment}/3 timeframes aligned")
             _add_beginner_check("Defined maximum loss", "pass" if np.isfinite(max_loss) and max_loss > 0 else "fail", f"₹{max_loss:,.2f} per option unit")
             _add_beginner_check("Risk / reward", "pass" if rr1 >= 0.75 else "fail", f"T1 R:R {rr1:.2f} · minimum 0.75")
             _add_beginner_check("Liquidity", "pass" if spread_pct <= 2.5 and volume >= 800 else "fail", f"Worst leg spread {spread_pct:.1f}% · short-leg volume {volume:,.0f}")
             _add_beginner_check("Capital efficiency", "pass" if np.isfinite(risk_reward) and risk_reward >= 0.20 else "fail", f"Reward / defined max loss {risk_reward:.2f}" if np.isfinite(risk_reward) else "Unavailable")
             _add_beginner_check("Existing strategy gates", "pass" if not hard_fail else "fail", "All spread gates passed" if not hard_fail else "; ".join(hard_fail))
-            safety_fail = (not defined_risk or score < 65 or not np.isfinite(pop) or pop < 55 or alignment < 2 or not np.isfinite(max_loss) or max_loss <= 0 or not np.isfinite(max_profit) or max_profit <= 0 or rr1 < 0.75 or spread_pct > 3 or volume < 500 or not np.isfinite(risk_reward) or risk_reward < 0.20 or bool(hard_fail))
+            safety_fail = (not defined_risk or score < 70 or not np.isfinite(pop) or pop < 60 or alignment < 2 or not np.isfinite(max_loss) or max_loss <= 0 or not np.isfinite(max_profit) or max_profit <= 0 or rr1 < 0.75 or spread_pct > 2.5 or volume < 800 or not np.isfinite(risk_reward) or risk_reward < 0.20 or bool(hard_fail))
         if safety_fail:
             beginner_safety_reasons.append("One or more Beginner Safety checks did not pass")
             decision = "NO TRADE"
@@ -3053,7 +3042,7 @@ decision_note = {
     "BULL PUT CREDIT SPREAD":"Defined-risk bullish premium strategy — sell a put and buy a lower put to cap the loss.",
     "BEAR CALL CREDIT SPREAD":"Defined-risk bearish premium strategy — sell a call and buy a higher call to cap the loss.",
     "IRON CONDOR":"Defined-risk range strategy — sell both sides with long protection; used only in a confirmed range.",
-    "NO TRADE":"No strategy currently meets the quality, confirmation, liquidity and risk gates."
+    "NO TRADE":"No strategy currently meets the minimum quality, alignment, liquidity and risk gates."
 }[decision]
 
 st.markdown(f"""
