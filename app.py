@@ -1,3 +1,4 @@
+
 import gzip
 import json
 from datetime import date, datetime, timedelta
@@ -1350,27 +1351,53 @@ def build_plan(row, side, spot, support, resistance, pcr, tf5, tf30, daily,
 
     if side == "CE":
         trigger_level = max(resistance, recent_high) + trigger_buffer
-        trigger_hit = spot >= trigger_level
-        candle_confirmed = (
+        breakout_hit = spot >= trigger_level
+        # Additional confirmed setup: trend continuation/pullback above VWAP.
+        # This avoids requiring every valid entry to be a fresh OI-wall breakout.
+        vwap = vwap_value(tf5, spot)
+        trend_continuation = (
+            tf5.get("trend") == "Bullish" and
+            (tf30.get("trend") == "Bullish" or daily.get("trend") == "Bullish") and
+            spot >= vwap * 0.998 and momentum_positive(tf5) and
+            close_location >= 0.52 and spot >= recent_low + 0.20 * atr
+        )
+        trigger_hit = bool(breakout_hit or trend_continuation)
+        breakout_candle = (
             tf5.get("trend") == "Bullish" and momentum_positive(tf5) and
             rsi_ok_for_breakout(tf5, "CE") and close_location >= 0.60 and body_strength >= 0.35
         )
-        volume_confirmed = volume_ratio >= 1.05
-        extension_pct = (spot - vwap_value(tf5, spot)) / max(spot, 1) * 100
+        continuation_candle = trend_continuation and close_location >= 0.52 and body_strength >= 0.20
+        candle_confirmed = bool(breakout_candle or continuation_candle)
+        volume_confirmed = bool(volume_ratio >= 1.05 or (trend_continuation and volume_ratio >= 0.80))
+        extension_pct = (spot - vwap) / max(spot, 1) * 100
         late_entry = extension_pct > max(1.8, atr / max(spot, 1) * 100 * 1.8)
-        trigger = f"Enter only after spot breaks {fmt_price(trigger_level)} with a strong 5m close and volume confirmation."
+        setup_type = "BREAKOUT" if breakout_hit else ("TREND PULLBACK / VWAP CONTINUATION" if trend_continuation else "WAIT FOR TRIGGER")
+        trigger = (f"Breakout setup: wait for spot above {fmt_price(trigger_level)} with 5m close and volume confirmation." if breakout_hit else
+                   "Trend-continuation setup: require bullish 5m structure, 30m/daily alignment, price holding VWAP and a confirming candle.")
         exit_rule = f"Exit if spot loses support {fmt_price(support)} or premium hits {fmt_price(sl)}. After Target 1, trail below the latest 5m swing low."
     else:
         trigger_level = min(support, recent_low) - trigger_buffer
-        trigger_hit = spot <= trigger_level
-        candle_confirmed = (
+        breakout_hit = spot <= trigger_level
+        vwap = vwap_value(tf5, spot)
+        trend_continuation = (
+            tf5.get("trend") == "Bearish" and
+            (tf30.get("trend") == "Bearish" or daily.get("trend") == "Bearish") and
+            spot <= vwap * 1.002 and momentum_negative(tf5) and
+            close_location <= 0.48 and spot <= recent_high - 0.20 * atr
+        )
+        trigger_hit = bool(breakout_hit or trend_continuation)
+        breakout_candle = (
             tf5.get("trend") == "Bearish" and momentum_negative(tf5) and
             rsi_ok_for_breakout(tf5, "PE") and close_location <= 0.40 and body_strength >= 0.35
         )
-        volume_confirmed = volume_ratio >= 1.05
-        extension_pct = (vwap_value(tf5, spot) - spot) / max(spot, 1) * 100
+        continuation_candle = trend_continuation and close_location <= 0.48 and body_strength >= 0.20
+        candle_confirmed = bool(breakout_candle or continuation_candle)
+        volume_confirmed = bool(volume_ratio >= 1.05 or (trend_continuation and volume_ratio >= 0.80))
+        extension_pct = (vwap - spot) / max(spot, 1) * 100
         late_entry = extension_pct > max(1.8, atr / max(spot, 1) * 100 * 1.8)
-        trigger = f"Enter only after spot breaks {fmt_price(trigger_level)} with a strong 5m close and volume confirmation."
+        setup_type = "BREAKDOWN" if breakout_hit else ("TREND PULLBACK / VWAP CONTINUATION" if trend_continuation else "WAIT FOR TRIGGER")
+        trigger = (f"Breakdown setup: wait for spot below {fmt_price(trigger_level)} with 5m close and volume confirmation." if breakout_hit else
+                   "Trend-continuation setup: require bearish 5m structure, 30m/daily alignment, price holding below VWAP and a confirming candle.")
         exit_rule = f"Exit if spot reclaims resistance {fmt_price(resistance)} or premium hits {fmt_price(sl)}. After Target 1, trail above the latest 5m swing high."
 
     hard_fail = []
@@ -1428,6 +1455,7 @@ def build_plan(row, side, spot, support, resistance, pcr, tf5, tf30, daily,
         "pop": scored["pop"], "delta": scored["delta"], "iv": scored["iv"],
         "score": adjusted_score, "rr1": rr1, "rr2": rr2, "rr3": rr3, "rr4": rr4,
         "trigger": trigger, "trigger_level": trigger_level, "trigger_hit": trigger_hit,
+        "setup_type": setup_type,
         "candle_confirmed": candle_confirmed, "volume_confirmed": volume_confirmed,
         "readiness": readiness, "fail_reasons": hard_fail,
         "score_gate": scored["score"] >= 65, "watch_score_gate": scored["score"] >= 58,
@@ -1863,7 +1891,8 @@ def get_fno_underlyings():
                 continue
             if item.get("instrument_type") not in {"CE", "PE", "FUT"}:
                 continue
-            if item.get("underlying_type") != "EQUITY":
+            underlying_type = str(item.get("underlying_type") or "").upper()
+            if underlying_type not in {"EQUITY", "INDEX"}:
                 continue
 
             expiry_raw = str(item.get("expiry", "")).strip()
@@ -1897,6 +1926,7 @@ def get_fno_underlyings():
                     "underlying_key": underlying_key,
                     "expiry": expiry_date,
                     "exchange": exchange,
+                    "asset_class": "INDEX" if underlying_type == "INDEX" else "STOCK",
                 }
 
     if not universe and errors:
@@ -1905,7 +1935,9 @@ def get_fno_underlyings():
             + " | ".join(errors)
         )
 
-    return sorted(universe.values(), key=lambda x: (x["symbol"], x["exchange"]))
+    # Scan index options first, then equity options; the visible scanner remains
+    # the same compact Top-5 panel.
+    return sorted(universe.values(), key=lambda x: (0 if x.get("asset_class") == "INDEX" else 1, x["symbol"], x["exchange"]))
 
 
 @st.cache_data(ttl=45, show_spinner=False)
@@ -2143,6 +2175,7 @@ def _scanner_plan_for_candidate(candidate, symbol, expiry, risk_profile):
     return {
         "Stock": symbol,
         "Trade": actionable_action,
+        "AssetClass": candidate.get("asset_class", "STOCK"),
         "Exchange": candidate.get("exchange", "NSE"),
         "Strike": float(plan["strike"]),
         "Expiry": expiry,
@@ -2194,6 +2227,7 @@ def scan_fno_trade_alerts(risk_profile, top_alerts=5):
                 candidate["underlying_key"] = item["underlying_key"]
                 candidate["expiry"] = item["expiry"]
                 candidate["exchange"] = item.get("exchange", "NSE")
+                candidate["asset_class"] = item.get("asset_class", "STOCK")
                 stage1.append(candidate)
 
             scanned += 1
@@ -2219,15 +2253,24 @@ def scan_fno_trade_alerts(risk_profile, top_alerts=5):
     shortlist = []
     per_stock = {}
     max_stage2 = max(75, top_alerts * 15)
+    index_quota = min(24, max(12, top_alerts * 4))
+    stock_quota = max_stage2 - index_quota
 
-    for item in stage1:
-        count = per_stock.get(item["symbol"], 0)
-        if count >= 3:
-            continue
-        shortlist.append(item)
-        per_stock[item["symbol"]] = count + 1
-        if len(shortlist) >= max_stage2:
-            break
+    # Give index chains a reserved first-pass quota (the user's primary need),
+    # while still reserving most Stage-2 capacity for stock-option candidates.
+    for asset_class, quota in (("INDEX", index_quota), ("STOCK", stock_quota)):
+        added = 0
+        for item in stage1:
+            if item.get("asset_class", "STOCK") != asset_class:
+                continue
+            count = per_stock.get(item["symbol"], 0)
+            if count >= (4 if asset_class == "INDEX" else 3):
+                continue
+            shortlist.append(item)
+            per_stock[item["symbol"]] = count + 1
+            added += 1
+            if added >= quota:
+                break
 
     alerts = []
     stage2_failed = 0
@@ -2285,7 +2328,17 @@ def scan_fno_trade_alerts(risk_profile, top_alerts=5):
         )
     )
 
-    return alerts[:top_alerts], len(universe), scanned, failed, len(shortlist)
+    index_alerts = [a for a in alerts if a.get("AssetClass") == "INDEX"]
+    stock_alerts = [a for a in alerts if a.get("AssetClass") != "INDEX"]
+    selected = index_alerts[:min(4, top_alerts)]
+    if stock_alerts and len(selected) < top_alerts:
+        selected.append(stock_alerts[0])
+    for alert in alerts:
+        if len(selected) >= top_alerts:
+            break
+        if alert not in selected:
+            selected.append(alert)
+    return selected[:top_alerts], len(universe), scanned, failed, len(shortlist)
 
 
 # ============================================================
@@ -2530,7 +2583,7 @@ def _render_fno_scanner_panel():
             if alert_info:
                 total, scanned, failed, stage2_count = alert_info
                 st.caption(
-                    f"Scanned {scanned}/{total} F&O stocks • "
+                    f"Scanned {scanned}/{total} F&O instruments • "
                     f"{failed} unavailable • {stage2_count} shortlisted"
                 )
 
@@ -2595,7 +2648,7 @@ def _render_fno_scanner_panel():
                 unsafe_allow_html=True,
             )
             st.caption(
-                "Press Scan Trades to search the full F&O universe. No automatic scan is performed."
+                "Press Scan Trades to search live index and stock F&O options. No automatic scan is performed."
             )
 
 # Manual F&O scanner lives entirely in the left sidebar.
@@ -2737,22 +2790,47 @@ band = chain.iloc[max(0, atm_index - 8):min(len(chain), atm_index + 9)].copy()
 
 
 def buy_candidate(side):
-    candidates = []
+    """Evaluate every nearby live contract; prefer executable-quality plans first."""
+    plans = []
+    prefix = "CE" if side == "CE" else "PE"
     for _, row in band.iterrows():
-        scored = score_option(row, side, spot, pcr, tf5, tf30, daily_tech, chain,
-                              support=support, resistance=resistance, oi_wall_info=oi_wall_info, regime=regime)
-        prefix = "CE" if side == "CE" else "PE"
-        pop = safe_float(row[f"{prefix} PoP"])
-        volume = safe_float(row[f"{prefix} Volume"], 0)
-        spread = scored.get("spread_pct", 999)
-        delta = abs(safe_float(row[f"{prefix} Delta"]))
-        if np.isfinite(pop) and np.isfinite(row[f"{prefix} LTP"]) and row[f"{prefix} LTP"] > 0:
-            candidates.append((scored["score"], pop, volume, -spread, -abs(delta - .55), row))
-    if not candidates:
+        ltp = safe_float(row.get(f"{prefix} LTP"))
+        if not np.isfinite(ltp) or ltp <= 0:
+            continue
+        try:
+            plan = build_plan(row, side, spot, support, resistance, pcr, tf5, tf30,
+                              daily_tech, risk_profile, chain, oi_wall_info, regime)
+        except Exception:
+            continue
+        if not plan:
+            continue
+        score = safe_float(plan.get("score"), 0)
+        pop = safe_float(plan.get("pop"))
+        delta = abs(safe_float(plan.get("delta")))
+        volume = safe_float(plan.get("volume"), 0)
+        spread = safe_float(plan.get("spread_pct"), 999)
+        rr1 = safe_float(plan.get("rr1"), 0)
+        hard_fail = bool(plan.get("fail_reasons"))
+        safety_ready = (
+            score >= 70 and np.isfinite(pop) and pop >= 60 and
+            int(plan.get("alignment", 0) or 0) >= 2 and
+            plan.get("readiness") == "READY" and
+            bool(plan.get("candle_confirmed")) and bool(plan.get("volume_confirmed")) and
+            not hard_fail and rr1 >= 1.0 and spread <= 2.0 and volume >= 1000 and
+            np.isfinite(delta) and 0.35 <= delta <= 0.70
+        )
+        # Rank by safety pass first, then readiness/quality/liquidity; a single
+        # high score cannot hide a different strike that genuinely passes gates.
+        readiness_rank = 2 if safety_ready else 1 if (
+            plan.get("readiness") == "READY" and not hard_fail and
+            score >= 60 and np.isfinite(pop) and pop >= 50
+        ) else 0
+        rank = (readiness_rank, score, pop if np.isfinite(pop) else -1,
+                volume, -spread, -abs(delta - 0.55) if np.isfinite(delta) else -1)
+        plans.append((rank, plan))
+    if not plans:
         return None
-    row = max(candidates, key=lambda x: x[:-1])[-1]
-    return build_plan(row, side, spot, support, resistance, pcr, tf5, tf30, daily_tech,
-                      risk_profile, chain, oi_wall_info, regime)
+    return max(plans, key=lambda item: item[0])[1]
 
 
 def sell_candidate(side):
