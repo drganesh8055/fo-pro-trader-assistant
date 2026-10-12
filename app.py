@@ -3582,8 +3582,36 @@ if _paper_updated:
     except Exception as _paper_save_error:
         st.warning(f"Paper-trade results were updated in this session but could not be saved to the local file: {_paper_save_error}")
 
+# A card-level PASS can still fail the stricter final decision gates. Allow it to
+# be forward-tested separately, clearly labelled experimental, without changing
+# the actual live-trade decision or relaxing any execution gates.
+_paper_pass_candidates = [
+    (action, plan) for action, plan in strategy_plans.items()
+    if plan and _engine_status(action, plan) == "PASS"
+]
+_paper_plan = None
+_paper_experimental = False
+
 if decision != "NO TRADE" and best_plan:
-    st.markdown(f"**Current eligible setup:** {symbol} · {best_plan.get('action', decision)} · {selected_expiry} · Entry {fmt_price(best_plan.get('entry'))} · SL {fmt_price(best_plan.get('sl'))} · Target 1 {fmt_price(best_plan.get('target1'))}")
+    _paper_plan = best_plan
+    st.markdown(f"**Current eligible setup:** {symbol} · {_paper_plan.get('action', decision)} · {selected_expiry} · Entry {fmt_price(_paper_plan.get('entry'))} · SL {fmt_price(_paper_plan.get('sl'))} · Target 1 {fmt_price(_paper_plan.get('target1'))}")
+elif _paper_pass_candidates:
+    _paper_candidate_labels = {
+        f"{plan.get('action', action)} · PoP {safe_float(plan.get('pop'), 0):.1f}% · Quality {safe_float(plan.get('score'), 0):.0f}/100": (action, plan)
+        for action, plan in _paper_pass_candidates
+    }
+    _paper_selected_label = st.selectbox(
+        "Choose a PASS strategy to paper-test",
+        options=list(_paper_candidate_labels.keys()),
+        key="paper_pass_candidate_choice",
+        help="These cards pass the card-level score/PoP check but may not pass every final execution gate.",
+    )
+    _paper_selected_action, _paper_plan = _paper_candidate_labels[_paper_selected_label]
+    _paper_experimental = True
+    st.warning("EXPERIMENTAL PAPER TEST ONLY: this strategy card says PASS, but the main engine's final decision is NO TRADE. Recording it here does not make it an approved live trade and does not change any live-trading safeguards.")
+    st.markdown(f"**Selected test setup:** {symbol} · {_paper_plan.get('action', _paper_selected_action)} · {selected_expiry} · Entry {fmt_price(_paper_plan.get('entry'))} · SL {fmt_price(_paper_plan.get('sl'))} · Target 1 {fmt_price(_paper_plan.get('target1'))}")
+
+if _paper_plan:
     with st.form("paper_trade_entry_form", clear_on_submit=False):
         _pc1, _pc2, _pc3 = st.columns(3)
         with _pc1:
@@ -3592,14 +3620,14 @@ if decision != "NO TRADE" and best_plan:
             _paper_cost_per_lot = st.number_input("Estimated total costs per lot (₹)", min_value=0.0, max_value=10000.0, value=100.0, step=25.0, key="paper_cost_input", help="Enter your estimated round-trip brokerage, taxes and slippage per lot. Set to 0 to exclude costs.")
         with _pc3:
             st.markdown("**Virtual order**")
-            st.caption("Uses the current eligible defined-risk spread and its displayed levels.")
+            st.caption("Uses the displayed spread levels and current live option-chain quotes. No real order is placed.")
         _paper_submit = st.form_submit_button("＋ Record as Paper Trade", type="primary", use_container_width=True)
     if _paper_submit:
-        _entry = safe_float(best_plan.get("entry"))
-        _sl = safe_float(best_plan.get("sl"))
-        _t1 = safe_float(best_plan.get("target1"))
-        _long_strike = safe_float(best_plan.get("long_strike"))
-        _short_strike = safe_float(best_plan.get("short_strike"))
+        _entry = safe_float(_paper_plan.get("entry"))
+        _sl = safe_float(_paper_plan.get("sl"))
+        _t1 = safe_float(_paper_plan.get("target1"))
+        _long_strike = safe_float(_paper_plan.get("long_strike"))
+        _short_strike = safe_float(_paper_plan.get("short_strike"))
         _qty_per_lot = safe_float(lot_size)
         _valid_plan = all(np.isfinite(x) for x in (_entry, _sl, _t1, _long_strike, _short_strike, _qty_per_lot)) and _entry > 0 and _qty_per_lot > 0
         _duplicate = False
@@ -3608,7 +3636,7 @@ if decision != "NO TRADE" and best_plan:
                 (_paper_df["status"].astype(str) == "OPEN") &
                 (_paper_df["symbol"].astype(str) == str(symbol)) &
                 (_paper_df["expiry"].astype(str) == str(selected_expiry)) &
-                (_paper_df["action"].astype(str) == str(best_plan.get("action"))) &
+                (_paper_df["action"].astype(str) == str(_paper_plan.get("action"))) &
                 (pd.to_numeric(_paper_df["long_strike"], errors="coerce") == _long_strike) &
                 (pd.to_numeric(_paper_df["short_strike"], errors="coerce") == _short_strike)
             ).any())
@@ -3617,31 +3645,31 @@ if decision != "NO TRADE" and best_plan:
         elif _duplicate:
             st.warning("An open paper trade already exists for this same spread. Review the open-trades table instead of recording a duplicate.")
         else:
-            _is_credit = bool(best_plan.get("is_credit_spread", False))
+            _is_credit = bool(_paper_plan.get("is_credit_spread", False))
             _new_trade = {
                 "trade_id": uuid.uuid4().hex[:10].upper(), "opened_at": _paper_now,
-                "symbol": str(symbol), "expiry": str(selected_expiry), "action": str(best_plan.get("action", decision)),
-                "side": str(best_plan.get("side", "CE")), "is_credit_spread": _is_credit,
+                "symbol": str(symbol), "expiry": str(selected_expiry), "action": str(_paper_plan.get("action", decision)),
+                "side": str(_paper_plan.get("side", "CE")), "is_credit_spread": _is_credit,
                 "long_strike": _long_strike, "short_strike": _short_strike,
                 "entry_value": _entry, "stop_loss": _sl,
-                "target1": _t1, "target2": safe_float(best_plan.get("target2")),
-                "target3": safe_float(best_plan.get("target3")), "target4": safe_float(best_plan.get("target4")),
+                "target1": _t1, "target2": safe_float(_paper_plan.get("target2")),
+                "target3": safe_float(_paper_plan.get("target3")), "target4": safe_float(_paper_plan.get("target4")),
                 "lot_size": int(_qty_per_lot), "lots": int(_paper_lots),
                 "quantity": int(_qty_per_lot * int(_paper_lots)), "cost_per_lot": float(_paper_cost_per_lot),
                 "status": "OPEN", "last_mark": _entry, "last_updated": _paper_now,
                 "exit_price": np.nan, "exit_reason": "", "closed_at": "",
                 "gross_pnl": 0.0, "net_pnl": -float(_paper_cost_per_lot) * int(_paper_lots),
-                "model_pop": safe_float(best_plan.get("pop")), "quality_score": safe_float(best_plan.get("score")),
+                "model_pop": safe_float(_paper_plan.get("pop")), "quality_score": safe_float(_paper_plan.get("score")),
             }
             _paper_df = pd.concat([_paper_df, pd.DataFrame([_new_trade])], ignore_index=True)
             try:
                 _save_paper_ledger(_paper_df)
-                st.success(f"Paper trade {_new_trade['trade_id']} recorded. No real order was placed.")
+                st.success(f"Paper trade {_new_trade['trade_id']} recorded. No real order was placed." + (" Marked EXPERIMENTAL because the final engine decision is NO TRADE." if _paper_experimental else ""))
                 st.rerun()
             except Exception as _paper_save_error:
                 st.error(f"Could not save the paper trade: {_paper_save_error}")
-else:
-    st.info("No eligible live spread is selected right now. A paper trade can only be recorded when the main engine produces a trade that passes its existing gates.")
+elif not _paper_pass_candidates:
+    st.info("No card-level PASS strategy is available to record right now. Analyze a live instrument and check the Engine Result again.")
 
 # Refresh the ledger after possible save/automatic exits.
 _paper_df = _load_paper_ledger()
