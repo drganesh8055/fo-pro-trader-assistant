@@ -3146,17 +3146,16 @@ for _idx, _action in enumerate(_engine_order):
           </div>
         </div>"""
         st.markdown(_card_html, unsafe_allow_html=True)
-        # The button belongs directly beneath this card and is shown ONLY for PASS.
-        if _status == "PASS":
+        if _status in {"PASS", "SELECTED"}:
             _btn_label = f"View Details · {_plan.get('action', _action)}"
-            if st.button(_btn_label, key=f"view_pass_details_{_action.replace(' ', '_')}", use_container_width=True, type="primary"):
+            if st.button(_btn_label, key=f"view_pass_details_{_action.replace(' ', '_')}", use_container_width=True):
                 st.session_state["fo_pass_details_action"] = _action
         # Rejected strategies intentionally have no View Details button or
         # misleading “details unavailable” message.
 
 _details_action = st.session_state.get("fo_pass_details_action")
 _details_plan = strategy_plans.get(_details_action) if _details_action else None
-if _details_plan and _engine_status(_details_action, _details_plan) == "PASS":
+if _details_plan and _engine_status(_details_action, _details_plan) in {"PASS", "SELECTED"}:
     st.markdown("<div class='fo-section'>PASS STRATEGY · TRADE DETAILS</div>", unsafe_allow_html=True)
     _is_credit = bool(_details_plan.get("is_credit_spread", False))
     _unit_entry = safe_float(_details_plan.get("entry"), 0)
