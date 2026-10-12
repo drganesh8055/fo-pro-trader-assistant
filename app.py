@@ -3129,6 +3129,91 @@ for action in ["CALL BUY","CALL SELL","PUT BUY","PUT SELL"]:
 engine_html += "</div>"
 st.markdown(engine_html, unsafe_allow_html=True)
 
+# Interactive details hand-off for every strategy card labelled PASS.
+# Streamlit buttons are used (rather than HTML links) so clicks reliably trigger a rerun.
+def _engine_status(action_name, candidate_plan):
+    if not candidate_plan:
+        return "NO DATA"
+    if action_name == decision:
+        return "SELECTED"
+    if (not candidate_plan.get("fail_reasons") and
+        safe_float(candidate_plan.get("score"), 0) >= MIN_SCORE and
+        safe_float(candidate_plan.get("pop"), 0) >= MIN_POP):
+        return "PASS"
+    return "REJECTED"
+
+_engine_order = ["CALL BUY", "CALL SELL", "PUT BUY", "PUT SELL"]
+_engine_rows = [st.columns(2), st.columns(2)]
+for _idx, _action in enumerate(_engine_order):
+    _plan = strategy_plans.get(_action)
+    _status = _engine_status(_action, _plan)
+    _col = _engine_rows[_idx // 2][_idx % 2]
+    with _col:
+        if _status in {"PASS", "SELECTED"} and _plan:
+            _btn_label = f"View Details: {(_plan.get('action', _action))}"
+            if st.button(_btn_label, key=f"view_pass_details_{_action.replace(' ', '_')}", use_container_width=True):
+                st.session_state["fo_pass_details_action"] = _action
+        elif _status == "REJECTED":
+            st.caption("Details unavailable · strategy rejected")
+
+_details_action = st.session_state.get("fo_pass_details_action")
+_details_plan = strategy_plans.get(_details_action) if _details_action else None
+if _details_plan and _engine_status(_details_action, _details_plan) in {"PASS", "SELECTED"}:
+    st.markdown("<div class='fo-section'>PASS STRATEGY · TRADE DETAILS</div>", unsafe_allow_html=True)
+    _is_credit = bool(_details_plan.get("is_credit_spread", False))
+    _unit_entry = safe_float(_details_plan.get("entry"), 0)
+    _lot_qty = safe_float(lot_size, 0)
+    _max_profit_lot = safe_float(_details_plan.get("max_profit_lot"), 0)
+    _max_loss_lot = safe_float(_details_plan.get("max_loss_lot"), 0)
+    # Capital estimate is the spread's defined-risk exposure, not a live broker margin quote.
+    _estimated_margin = (_max_loss_lot if _is_credit else _unit_entry * _lot_qty)
+    _opt_side = "CE" if _details_plan.get("side") == "CE" else "PE"
+    _expiry_text = str(selected_expiry)
+    st.markdown(f"""
+    <div class='fo-plan-head'>
+      <div><div class='fo-plan-action'>{_details_plan.get('action', _details_action)}</div>
+      <div class='fo-plan-contract'>{'SELL' if _is_credit else 'BUY'} {_details_plan.get('short_strike', _details_plan.get('strike', 0)):.0f} {_opt_side} / {'BUY' if _is_credit else 'SELL'} {_details_plan.get('long_strike', _details_plan.get('strike', 0)):.0f} {_opt_side}</div>
+      <div style='font-size:13px;color:#475569;margin-top:5px;'>Expiry {_expiry_text} · {int(_lot_qty) if _lot_qty > 0 else '—'} units per lot · {safe_float(_details_plan.get('pop'), 0):.1f}% model PoP · Quality {safe_float(_details_plan.get('score'), 0):.0f}/100</div></div>
+      <div class='fo-plan-pop'>ENTRY ₹{_unit_entry:,.2f}</div>
+    </div>
+    """, unsafe_allow_html=True)
+    _leg1_action = "SELL" if _is_credit else "BUY"
+    _leg2_action = "BUY" if _is_credit else "SELL"
+    _leg1_strike = safe_float(_details_plan.get("short_strike"), 0) if _is_credit else safe_float(_details_plan.get("long_strike"), 0)
+    _leg2_strike = safe_float(_details_plan.get("long_strike"), 0) if _is_credit else safe_float(_details_plan.get("short_strike"), 0)
+    _leg1_price = safe_float(_details_plan.get("short_entry"), 0) if _is_credit else safe_float(_details_plan.get("long_entry"), 0)
+    _leg2_price = safe_float(_details_plan.get("long_entry"), 0) if _is_credit else safe_float(_details_plan.get("short_entry"), 0)
+    st.markdown(f"""
+    <div class='fo-levels'>
+      <div class='fo-level entry'><span>LEG 1 · {_leg1_action}</span><b>{_leg1_strike:.0f} {_opt_side}</b><small>Quoted premium ₹{_leg1_price:,.2f}</small></div>
+      <div class='fo-level entry'><span>LEG 2 · {_leg2_action}</span><b>{_leg2_strike:.0f} {_opt_side}</b><small>Quoted premium ₹{_leg2_price:,.2f}</small></div>
+      <div class='fo-level'><span>EST. CAPITAL / MARGIN</span><b>₹{_estimated_margin:,.0f}</b><small>{'Defined-risk max-loss estimate for credit spread' if _is_credit else 'Net debit paid for debit spread'} · 1 lot</small></div>
+      <div class='fo-level'><span>MAX PROFIT · 1 LOT</span><b>₹{_max_profit_lot:,.0f}</b><small>Before costs</small></div>
+      <div class='fo-level'><span>MAX LOSS · 1 LOT</span><b>₹{_max_loss_lot:,.0f}</b><small>Theoretical defined risk before costs</small></div>
+    </div>
+    """, unsafe_allow_html=True)
+
+    def _details_change(level_value):
+        _level = safe_float(level_value, np.nan)
+        if not np.isfinite(_level) or _unit_entry <= 0:
+            return "—", "—", 0.0
+        _pnl_unit = (_unit_entry - _level) if _is_credit else (_level - _unit_entry)
+        _pct = (_pnl_unit / abs(_unit_entry)) * 100
+        return f"₹{_pnl_unit:+,.2f}", f"{_pct:+.2f}%", _pnl_unit * _lot_qty
+
+    _detail_rows = []
+    for _label, _key in [("STOP LOSS", "sl"), ("TARGET 1", "target1"), ("TARGET 2", "target2"), ("TARGET 3", "target3")]:
+        _level = safe_float(_details_plan.get(_key), np.nan)
+        _change_amount, _change_pct, _lot_change = _details_change(_level)
+        _detail_rows.append((_label, fmt_price(_level), _change_amount, _change_pct, f"₹{_lot_change:+,.0f}" if _lot_qty > 0 else "—"))
+    _detail_table = "<table><thead><tr><th>LEVEL</th><th>SPREAD VALUE</th><th>CHANGE / UNIT</th><th>CHANGE %</th><th>CHANGE · 1 LOT</th></tr></thead><tbody>"
+    for _r in _detail_rows:
+        _detail_table += "<tr>" + "".join(f"<td>{_cell}</td>" for _cell in _r) + "</tr>"
+    _detail_table += "</tbody></table>"
+    st.markdown(_detail_table, unsafe_allow_html=True)
+    st.warning("Margin shown is an estimate from the spread's theoretical risk/debit, not a live Upstox/broker margin quote. Actual funds blocked can differ by broker, exchange rules, charges and execution prices. Confirm margin in the order preview and place both legs as one defined-risk spread; do not place the short leg alone.")
+    st.info(_details_plan.get("exit", "Close both legs together if the stop-loss or invalidation condition is reached."))
+
 # Optional visual support/resistance map. It uses the same values already calculated;
 # it does not create or alter a trading signal.
 st.markdown("<div class='fo-section'>OI SUPPORT / RESISTANCE MAP</div>", unsafe_allow_html=True)
