@@ -3109,28 +3109,11 @@ section[data-testid="stSidebar"] .stCaption { color:#64748b !important; }
 .tab-danger { background:#ffe4e6 !important; border-color:#fb7185 !important; color:#9f1239 !important; }
 </style>""", unsafe_allow_html=True)
 
-engine_html = "<div class='fo-engine fo-engine-grid'>"
-for action in ["CALL BUY","CALL SELL","PUT BUY","PUT SELL"]:
-    plan = strategy_plans[action]
-    if not plan:
-        engine_html += f"<div class='fo-engine-card rejected'><div class='fo-engine-top'><div class='fo-engine-action'>{plan.get('action', action)}</div><div class='fo-engine-status'>NO DATA</div></div><div class='fo-engine-contract'>—</div><div class='fo-engine-reason'>No valid candidate was produced.</div></div>"
-        continue
-    fails = ", ".join(plan.get("fail_reasons") or []) or "All hard checks passed"
-    selected = action == decision
-    status = "SELECTED" if selected else ("PASS" if not plan.get("fail_reasons") and safe_float(plan.get("score"),0) >= MIN_SCORE and safe_float(plan.get("pop"),0) >= MIN_POP else "REJECTED")
-    status_class = "selected" if selected else ("" if status == "PASS" else "rejected")
-    engine_html += f"""
-    <div class='fo-engine-card {status_class}'>
-      <div class='fo-engine-top'><div class='fo-engine-action'>{plan.get('action', action)}</div><div class='fo-engine-status'>{status}</div></div>
-      <div class='fo-engine-contract'>{plan.get('action', action)}<br>{plan.get('long_strike', plan['strike']):.0f} / {plan.get('short_strike', plan['strike']):.0f}</div>
-      <div class='fo-engine-stats'><div><span>PoP</span><b>{safe_float(plan.get('pop')):.1f}%</b></div><div><span>QUALITY</span><b>{safe_float(plan.get('score'),0):.0f}/100</b></div></div>
-      <div class='fo-engine-reason'>{fails}</div>
-    </div>"""
-engine_html += "</div>"
-st.markdown(engine_html, unsafe_allow_html=True)
+# Render each strategy card and its action directly together. This keeps the
+# View Details button immediately below the corresponding PASS/SELECTED trade.
+_engine_order = ["CALL BUY", "CALL SELL", "PUT BUY", "PUT SELL"]
+_engine_rows = [st.columns(2), st.columns(2)]
 
-# Interactive details hand-off for every strategy card labelled PASS.
-# Streamlit buttons are used (rather than HTML links) so clicks reliably trigger a rerun.
 def _engine_status(action_name, candidate_plan):
     if not candidate_plan:
         return "NO DATA"
@@ -3142,23 +3125,38 @@ def _engine_status(action_name, candidate_plan):
         return "PASS"
     return "REJECTED"
 
-_engine_order = ["CALL BUY", "CALL SELL", "PUT BUY", "PUT SELL"]
-_engine_rows = [st.columns(2), st.columns(2)]
 for _idx, _action in enumerate(_engine_order):
     _plan = strategy_plans.get(_action)
     _status = _engine_status(_action, _plan)
     _col = _engine_rows[_idx // 2][_idx % 2]
     with _col:
-        if _status in {"PASS", "SELECTED"} and _plan:
-            _btn_label = f"View Details: {(_plan.get('action', _action))}"
-            if st.button(_btn_label, key=f"view_pass_details_{_action.replace(' ', '_')}", use_container_width=True):
+        if not _plan:
+            st.markdown("<div class='fo-engine-card rejected'><div class='fo-engine-top'><div class='fo-engine-action'>" + _action + "</div><div class='fo-engine-status'>NO DATA</div></div><div class='fo-engine-contract'>—</div><div class='fo-engine-reason'>No valid candidate was produced.</div></div>", unsafe_allow_html=True)
+            continue
+        _fails = ", ".join(_plan.get("fail_reasons") or []) or "All hard checks passed"
+        _selected = _action == decision
+        _status_class = "selected" if _selected else ("" if _status == "PASS" else "rejected")
+        _card_html = f"""
+        <div class='fo-engine fo-engine-grid' style='display:block!important;'>
+          <div class='fo-engine-card {_status_class}'>
+            <div class='fo-engine-top'><div class='fo-engine-action'>{_plan.get('action', _action)}</div><div class='fo-engine-status'>{_status}</div></div>
+            <div class='fo-engine-contract'>{_plan.get('action', _action)}<br>{_plan.get('long_strike', _plan['strike']):.0f} / {_plan.get('short_strike', _plan['strike']):.0f}</div>
+            <div class='fo-engine-stats'><div><span>PoP</span><b>{safe_float(_plan.get('pop')):.1f}%</b></div><div><span>QUALITY</span><b>{safe_float(_plan.get('score'),0):.0f}/100</b></div></div>
+            <div class='fo-engine-reason'>{_fails}</div>
+          </div>
+        </div>"""
+        st.markdown(_card_html, unsafe_allow_html=True)
+        # The button belongs directly beneath this card and is shown ONLY for PASS.
+        if _status == "PASS":
+            _btn_label = f"View Details · {_plan.get('action', _action)}"
+            if st.button(_btn_label, key=f"view_pass_details_{_action.replace(' ', '_')}", use_container_width=True, type="primary"):
                 st.session_state["fo_pass_details_action"] = _action
-        elif _status == "REJECTED":
-            st.caption("Details unavailable · strategy rejected")
+        # Rejected strategies intentionally have no View Details button or
+        # misleading “details unavailable” message.
 
 _details_action = st.session_state.get("fo_pass_details_action")
 _details_plan = strategy_plans.get(_details_action) if _details_action else None
-if _details_plan and _engine_status(_details_action, _details_plan) in {"PASS", "SELECTED"}:
+if _details_plan and _engine_status(_details_action, _details_plan) == "PASS":
     st.markdown("<div class='fo-section'>PASS STRATEGY · TRADE DETAILS</div>", unsafe_allow_html=True)
     _is_credit = bool(_details_plan.get("is_credit_spread", False))
     _unit_entry = safe_float(_details_plan.get("entry"), 0)
@@ -3193,24 +3191,93 @@ if _details_plan and _engine_status(_details_action, _details_plan) in {"PASS", 
     </div>
     """, unsafe_allow_html=True)
 
-    def _details_change(level_value):
-        _level = safe_float(level_value, np.nan)
-        if not np.isfinite(_level) or _unit_entry <= 0:
-            return "—", "—", 0.0
-        _pnl_unit = (_unit_entry - _level) if _is_credit else (_level - _unit_entry)
-        _pct = (_pnl_unit / abs(_unit_entry)) * 100
-        return f"₹{_pnl_unit:+,.2f}", f"{_pct:+.2f}%", _pnl_unit * _lot_qty
+    # Estimate where the spread is NOW using the latest option-chain quotes.
+    # Prefer executable closing-side bid/ask prices; use LTP only as a clearly
+    # labelled fallback when one of the bid/ask quotes is unavailable.
+    _current_value = np.nan
+    _current_source = "Live bid/ask estimate"
+    try:
+        _side_prefix = "CE" if _details_plan.get("side") == "CE" else "PE"
+        _current_short_row = nearest_row(chain, safe_float(_details_plan.get("short_strike"), np.nan))
+        _current_long_row = nearest_row(chain, safe_float(_details_plan.get("long_strike"), np.nan))
+        if _current_short_row is not None and _current_long_row is not None:
+            if _is_credit:
+                # Close a credit spread by buying back the short leg and selling the hedge.
+                _close_short = safe_float(_current_short_row.get(f"{_side_prefix} Ask"), np.nan)
+                _close_long = safe_float(_current_long_row.get(f"{_side_prefix} Bid"), np.nan)
+                if np.isfinite(_close_short) and _close_short > 0 and np.isfinite(_close_long) and _close_long > 0:
+                    _current_value = max(_close_short - _close_long, 0.0)
+                else:
+                    _ltp_short = safe_float(_current_short_row.get(f"{_side_prefix} LTP"), np.nan)
+                    _ltp_long = safe_float(_current_long_row.get(f"{_side_prefix} LTP"), np.nan)
+                    _current_value = max(_ltp_short - _ltp_long, 0.0) if np.isfinite(_ltp_short) and _ltp_short > 0 and np.isfinite(_ltp_long) and _ltp_long > 0 else np.nan
+                    _current_source = "Indicative LTP estimate"
+            else:
+                # Close a debit spread by selling the long leg and buying back the short leg.
+                _close_long = safe_float(_current_long_row.get(f"{_side_prefix} Bid"), np.nan)
+                _close_short = safe_float(_current_short_row.get(f"{_side_prefix} Ask"), np.nan)
+                if np.isfinite(_close_long) and _close_long > 0 and np.isfinite(_close_short) and _close_short > 0:
+                    _current_value = max(_close_long - _close_short, 0.0)
+                else:
+                    _ltp_long = safe_float(_current_long_row.get(f"{_side_prefix} LTP"), np.nan)
+                    _ltp_short = safe_float(_current_short_row.get(f"{_side_prefix} LTP"), np.nan)
+                    _current_value = max(_ltp_long - _ltp_short, 0.0) if np.isfinite(_ltp_long) and _ltp_long > 0 and np.isfinite(_ltp_short) and _ltp_short > 0 else np.nan
+                    _current_source = "Indicative LTP estimate"
+    except Exception:
+        _current_value = np.nan
+        _current_source = "Live value unavailable"
+
+    _current_pnl_unit = ((_unit_entry - _current_value) if _is_credit else (_current_value - _unit_entry)) if np.isfinite(_current_value) and _unit_entry > 0 else np.nan
+    _current_pnl_lot = _current_pnl_unit * _lot_qty if np.isfinite(_current_pnl_unit) and _lot_qty > 0 else np.nan
+    _current_pnl_pct = (_current_pnl_unit / abs(_unit_entry) * 100) if np.isfinite(_current_pnl_unit) and _unit_entry > 0 else np.nan
+    if np.isfinite(_current_value) and np.isfinite(_current_pnl_lot):
+        _current_state = "IN PROFIT" if _current_pnl_lot > 0 else ("IN LOSS" if _current_pnl_lot < 0 else "AROUND ENTRY")
+        _state_color = "#15803d" if _current_pnl_lot > 0 else ("#b42318" if _current_pnl_lot < 0 else "#475467")
+        _current_pnl_label = f"₹{_current_pnl_lot:+,.0f} for 1 lot · {_current_pnl_pct:+.1f}% of entry premium"
+        _current_value_label = fmt_price(_current_value)
+    else:
+        _current_state = "LIVE VALUE UNAVAILABLE"
+        _state_color = "#475467"
+        _current_pnl_label = "Refresh live data to estimate current profit/loss."
+        _current_value_label = "—"
+    st.markdown(f"""
+    <div style="margin:12px 0;padding:14px 16px;border:2px solid {_state_color};border-radius:12px;background:#fff;">
+      <div style="font-size:12px;font-weight:900;color:#667085;letter-spacing:.5px;">CURRENT SPREAD CHECK · ESTIMATED P/L</div>
+      <div style="font-size:12px;color:#667085;margin-top:3px;">Assumes you entered at the entry value shown. If you have not placed the trade, the P/L below is hypothetical.</div>
+      <div style="display:flex;flex-wrap:wrap;gap:20px;align-items:center;margin-top:7px;">
+        <div><div style="font-size:12px;color:#667085;">Entry spread value</div><div style="font-size:21px;font-weight:900;color:#182230;">₹{_unit_entry:,.2f}</div></div>
+        <div><div style="font-size:12px;color:#667085;">Current estimated close value</div><div style="font-size:21px;font-weight:900;color:#182230;">{_current_value_label}</div></div>
+        <div><div style="font-size:12px;color:#667085;">Estimated status · 1 lot</div><div style="font-size:18px;font-weight:900;color:{_state_color};">{_current_state}</div><div style="font-size:13px;font-weight:800;color:{_state_color};">{_current_pnl_label}</div></div>
+      </div>
+      <div style="font-size:11px;color:#667085;margin-top:7px;">{_current_source}. Estimate before brokerage, taxes and slippage; refresh to update.</div>
+    </div>
+    """, unsafe_allow_html=True)
 
     _detail_rows = []
-    for _label, _key in [("STOP LOSS", "sl"), ("TARGET 1", "target1"), ("TARGET 2", "target2"), ("TARGET 3", "target3")]:
+    for _label, _key, _meaning in [
+        ("STOP LOSS", "sl", "Exit here to limit loss"),
+        ("TARGET 1", "target1", "First profit-taking level"),
+        ("TARGET 2", "target2", "Second profit-taking level"),
+        ("TARGET 3", "target3", "Third profit-taking level"),
+    ]:
         _level = safe_float(_details_plan.get(_key), np.nan)
-        _change_amount, _change_pct, _lot_change = _details_change(_level)
-        _detail_rows.append((_label, fmt_price(_level), _change_amount, _change_pct, f"₹{_lot_change:+,.0f}" if _lot_qty > 0 else "—"))
-    _detail_table = "<table><thead><tr><th>LEVEL</th><th>SPREAD VALUE</th><th>CHANGE / UNIT</th><th>CHANGE %</th><th>CHANGE · 1 LOT</th></tr></thead><tbody>"
-    for _r in _detail_rows:
-        _detail_table += "<tr>" + "".join(f"<td>{_cell}</td>" for _cell in _r) + "</tr>"
+        if np.isfinite(_level) and _unit_entry > 0:
+            _pnl_unit = (_unit_entry - _level) if _is_credit else (_level - _unit_entry)
+            _pnl_lot = _pnl_unit * _lot_qty if _lot_qty > 0 else np.nan
+            _pnl_pct = _pnl_unit / abs(_unit_entry) * 100
+            _result = f"₹{_pnl_lot:+,.0f}" if np.isfinite(_pnl_lot) else "—"
+            _pct_label = f"({_pnl_pct:+.1f}% of entry premium)"
+            _color = "#15803d" if _pnl_unit > 0 else ("#b42318" if _pnl_unit < 0 else "#475467")
+            _result_html = f"<b style='color:{_color};'>{_result}</b><br><small style='color:{_color};'>{_pct_label}</small>"
+        else:
+            _result_html = "—"
+        _detail_rows.append((_label, fmt_price(_level), _result_html, _meaning))
+    _detail_table = "<table><thead><tr><th>WHEN THE SPREAD VALUE REACHES</th><th>SPREAD VALUE</th><th>ESTIMATED RESULT · 1 LOT</th><th>WHAT IT MEANS</th></tr></thead><tbody>"
+    for _label, _level_label, _result_html, _meaning in _detail_rows:
+        _detail_table += f"<tr><td><b>{_label}</b></td><td>{_level_label}</td><td>{_result_html}</td><td>{_meaning}</td></tr>"
     _detail_table += "</tbody></table>"
     st.markdown(_detail_table, unsafe_allow_html=True)
+    st.caption("Simple rule: for a CREDIT spread, a lower spread value is usually better; for a DEBIT spread, a higher spread value is usually better. The current P/L is an estimate, not a guaranteed exit price. Percentages are measured against the entry premium, not your total account or broker margin.")
     st.warning("Margin shown is an estimate from the spread's theoretical risk/debit, not a live Upstox/broker margin quote. Actual funds blocked can differ by broker, exchange rules, charges and execution prices. Confirm margin in the order preview and place both legs as one defined-risk spread; do not place the short leg alone.")
     st.info(_details_plan.get("exit", "Close both legs together if the stop-loss or invalidation condition is reached."))
 
