@@ -2955,10 +2955,11 @@ if beginner_mode:
 st.markdown("<div class='fo-section'>ENGINE RESULT · ALL 4 STRATEGIES</div>", unsafe_allow_html=True)
 
 st.markdown("""<style>
-/* FORCE ENGINE RESULT 2x2 GRID */
-.fo-engine.fo-engine-grid{display:grid!important;grid-template-columns:repeat(2,minmax(0,1fr))!important;grid-auto-rows:1fr!important;gap:14px!important;width:100%!important;align-items:stretch!important;}
-.fo-engine.fo-engine-grid .fo-engine-card{display:flex!important;flex-direction:column!important;min-width:0!important;width:100%!important;height:100%!important;margin:0!important;box-sizing:border-box!important;}
-@media(max-width:720px){.fo-engine.fo-engine-grid{grid-template-columns:1fr!important;}}
+/* ENGINE RESULT: each strategy card fills the same full column width as View Details */
+.fo-engine.fo-engine-grid{display:block!important;grid-template-columns:minmax(0,1fr)!important;grid-auto-rows:auto!important;gap:0!important;width:100%!important;max-width:100%!important;min-width:0!important;align-items:stretch!important;box-sizing:border-box!important;}
+.fo-engine.fo-engine-grid .fo-engine-card{display:flex!important;flex-direction:column!important;min-width:0!important;width:100%!important;max-width:100%!important;height:100%!important;margin:0!important;box-sizing:border-box!important;}
+/* Streamlit's rendered HTML wrapper must not shrink the strategy card. */
+div[data-testid="stMarkdown"]:has(.fo-engine.fo-engine-grid){width:100%!important;max-width:100%!important;min-width:0!important;}
 
 
 /* ============================================================
@@ -3137,7 +3138,7 @@ for _idx, _action in enumerate(_engine_order):
         _selected = _action == decision
         _status_class = "selected" if _selected else ("" if _status == "PASS" else "rejected")
         _card_html = f"""
-        <div class='fo-engine fo-engine-grid' style='display:block!important;grid-template-columns:minmax(0,1fr)!important;width:100%!important;'>
+        <div class='fo-engine fo-engine-grid' style='display:block!important;grid-template-columns:minmax(0,1fr)!important;width:100%!important;max-width:100%!important;min-width:0!important;box-sizing:border-box!important;'>
           <div class='fo-engine-card {_status_class}'>
             <div class='fo-engine-top'><div class='fo-engine-action'>{_plan.get('action', _action)}</div><div class='fo-engine-status'>{_status}</div></div>
             <div class='fo-engine-contract'>{_plan.get('action', _action)}<br>{_plan.get('long_strike', _plan['strike']):.0f} / {_plan.get('short_strike', _plan['strike']):.0f}</div>
