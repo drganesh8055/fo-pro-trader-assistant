@@ -3109,11 +3109,28 @@ section[data-testid="stSidebar"] .stCaption { color:#64748b !important; }
 .tab-danger { background:#ffe4e6 !important; border-color:#fb7185 !important; color:#9f1239 !important; }
 </style>""", unsafe_allow_html=True)
 
-# Render each strategy card and its action directly together. This keeps the
-# View Details button immediately below the corresponding PASS/SELECTED trade.
-_engine_order = ["CALL BUY", "CALL SELL", "PUT BUY", "PUT SELL"]
-_engine_rows = [st.columns(2), st.columns(2)]
+engine_html = "<div class='fo-engine fo-engine-grid'>"
+for action in ["CALL BUY","CALL SELL","PUT BUY","PUT SELL"]:
+    plan = strategy_plans[action]
+    if not plan:
+        engine_html += f"<div class='fo-engine-card rejected'><div class='fo-engine-top'><div class='fo-engine-action'>{plan.get('action', action)}</div><div class='fo-engine-status'>NO DATA</div></div><div class='fo-engine-contract'>—</div><div class='fo-engine-reason'>No valid candidate was produced.</div></div>"
+        continue
+    fails = ", ".join(plan.get("fail_reasons") or []) or "All hard checks passed"
+    selected = action == decision
+    status = "SELECTED" if selected else ("PASS" if not plan.get("fail_reasons") and safe_float(plan.get("score"),0) >= MIN_SCORE and safe_float(plan.get("pop"),0) >= MIN_POP else "REJECTED")
+    status_class = "selected" if selected else ("" if status == "PASS" else "rejected")
+    engine_html += f"""
+    <div class='fo-engine-card {status_class}'>
+      <div class='fo-engine-top'><div class='fo-engine-action'>{plan.get('action', action)}</div><div class='fo-engine-status'>{status}</div></div>
+      <div class='fo-engine-contract'>{plan.get('action', action)}<br>{plan.get('long_strike', plan['strike']):.0f} / {plan.get('short_strike', plan['strike']):.0f}</div>
+      <div class='fo-engine-stats'><div><span>PoP</span><b>{safe_float(plan.get('pop')):.1f}%</b></div><div><span>QUALITY</span><b>{safe_float(plan.get('score'),0):.0f}/100</b></div></div>
+      <div class='fo-engine-reason'>{fails}</div>
+    </div>"""
+engine_html += "</div>"
+st.markdown(engine_html, unsafe_allow_html=True)
 
+# Interactive details hand-off for every strategy card labelled PASS.
+# Streamlit buttons are used (rather than HTML links) so clicks reliably trigger a rerun.
 def _engine_status(action_name, candidate_plan):
     if not candidate_plan:
         return "NO DATA"
@@ -3125,33 +3142,19 @@ def _engine_status(action_name, candidate_plan):
         return "PASS"
     return "REJECTED"
 
+_engine_order = ["CALL BUY", "CALL SELL", "PUT BUY", "PUT SELL"]
+_engine_rows = [st.columns(2), st.columns(2)]
 for _idx, _action in enumerate(_engine_order):
     _plan = strategy_plans.get(_action)
     _status = _engine_status(_action, _plan)
     _col = _engine_rows[_idx // 2][_idx % 2]
     with _col:
-        if not _plan:
-            st.markdown("<div class='fo-engine-card rejected'><div class='fo-engine-top'><div class='fo-engine-action'>" + _action + "</div><div class='fo-engine-status'>NO DATA</div></div><div class='fo-engine-contract'>—</div><div class='fo-engine-reason'>No valid candidate was produced.</div></div>", unsafe_allow_html=True)
-            continue
-        _fails = ", ".join(_plan.get("fail_reasons") or []) or "All hard checks passed"
-        _selected = _action == decision
-        _status_class = "selected" if _selected else ("" if _status == "PASS" else "rejected")
-        _card_html = f"""
-        <div class='fo-engine fo-engine-grid' style='display:block!important;'>
-          <div class='fo-engine-card {_status_class}'>
-            <div class='fo-engine-top'><div class='fo-engine-action'>{_plan.get('action', _action)}</div><div class='fo-engine-status'>{_status}</div></div>
-            <div class='fo-engine-contract'>{_plan.get('action', _action)}<br>{_plan.get('long_strike', _plan['strike']):.0f} / {_plan.get('short_strike', _plan['strike']):.0f}</div>
-            <div class='fo-engine-stats'><div><span>PoP</span><b>{safe_float(_plan.get('pop')):.1f}%</b></div><div><span>QUALITY</span><b>{safe_float(_plan.get('score'),0):.0f}/100</b></div></div>
-            <div class='fo-engine-reason'>{_fails}</div>
-          </div>
-        </div>"""
-        st.markdown(_card_html, unsafe_allow_html=True)
-        if _status in {"PASS", "SELECTED"}:
-            _btn_label = f"View Details · {_plan.get('action', _action)}"
+        if _status in {"PASS", "SELECTED"} and _plan:
+            _btn_label = f"View Details: {(_plan.get('action', _action))}"
             if st.button(_btn_label, key=f"view_pass_details_{_action.replace(' ', '_')}", use_container_width=True):
                 st.session_state["fo_pass_details_action"] = _action
-        # Rejected strategies intentionally have no View Details button or
-        # misleading “details unavailable” message.
+        elif _status == "REJECTED":
+            st.caption("Details unavailable · strategy rejected")
 
 _details_action = st.session_state.get("fo_pass_details_action")
 _details_plan = strategy_plans.get(_details_action) if _details_action else None
