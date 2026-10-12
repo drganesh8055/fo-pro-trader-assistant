@@ -1678,6 +1678,16 @@ def _load_paper_ledger():
         ]
         for col in numeric_cols:
             frame[col] = pd.to_numeric(frame[col], errors="coerce").astype(float)
+        # CSV readers may infer an all-blank text column (especially
+        # exit_reason / closed_at) as float64. Pandas 3 rejects assigning a
+        # string into that column later when a paper trade is closed. Force
+        # ledger text fields to object dtype and normalize blank cells first.
+        text_cols = [
+            "trade_id", "opened_at", "symbol", "expiry", "action", "side",
+            "status", "last_updated", "exit_reason", "closed_at",
+        ]
+        for col in text_cols:
+            frame[col] = frame[col].fillna("").astype(object)
         return frame[PAPER_COLUMNS]
     except Exception:
         return pd.DataFrame(columns=PAPER_COLUMNS)
