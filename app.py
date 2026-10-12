@@ -2101,6 +2101,9 @@ class _FNOScannerManager:
             results, total, scanned, failed, stage2_count = scan_fno_trade_alerts(
                 risk_profile, top_alerts=5
             )
+            # Legacy scanner currently scores single legs, not paired vertical spreads.
+            # Do not publish those as executable trades until its results are spread-priced.
+            results = []
             now = time.time()
             with self.lock:
                 self.results = results
@@ -2538,6 +2541,119 @@ put_buy = buy_candidate("PE")
 call_sell = sell_candidate("CE")
 put_sell = sell_candidate("PE")
 
+
+def build_defined_risk_spread(plan, action, option_chain, spot_price):
+    """Convert a directional option candidate into a quoted, defined-risk vertical spread.
+
+    CALL/PUT BUY become debit spreads; CALL/PUT SELL become credit spreads.
+    Both legs must have usable live bid/ask quotes. If not, the candidate is
+    rejected rather than falling back to a naked option.
+    """
+    if not plan or option_chain is None or option_chain.empty:
+        return None
+    side = plan.get("side")
+    if side not in {"CE", "PE"}:
+        return None
+    is_credit = action in {"CALL SELL", "PUT SELL"}
+    prefix = side
+    short_strike = safe_float(plan.get("strike"))
+    if not np.isfinite(short_strike) or not np.isfinite(spot_price) or spot_price <= 0:
+        return None
+
+    # Aim for a practical spread width around 1% of spot, but use actual listed
+    # strikes from the live chain. No synthetic strikes or simulated quotes.
+    strikes = sorted(float(x) for x in option_chain["Strike"].dropna().unique())
+    if len(strikes) < 2:
+        return None
+    target_width = max(spot_price * 0.01, min(np.diff(strikes)) if len(strikes) > 1 else 0)
+    if side == "CE":
+        possible = [x for x in strikes if x > short_strike]
+    else:
+        possible = [x for x in strikes if x < short_strike]
+    if not possible:
+        return None
+    protective_strike = min(possible, key=lambda x: abs(abs(x-short_strike)-target_width))
+    width = abs(protective_strike - short_strike)
+    if width <= 0:
+        return None
+
+    short_row = nearest_row(option_chain, short_strike)
+    long_row = nearest_row(option_chain, protective_strike)
+    if short_row is None or long_row is None:
+        return None
+
+    # For debit spreads, buy the candidate and sell the farther OTM option.
+    # For credit spreads, sell the candidate and buy the farther OTM protection.
+    long_leg_row = short_row if not is_credit else long_row
+    short_leg_row = long_row if not is_credit else short_row
+    long_entry = safe_float(long_leg_row.get(f"{prefix} Ask"))
+    if not np.isfinite(long_entry) or long_entry <= 0:
+        long_entry = safe_float(long_leg_row.get(f"{prefix} LTP"))
+    short_entry = safe_float(short_leg_row.get(f"{prefix} Bid"))
+    if not np.isfinite(short_entry) or short_entry <= 0:
+        short_entry = safe_float(short_leg_row.get(f"{prefix} LTP"))
+    if not np.isfinite(long_entry) or not np.isfinite(short_entry) or long_entry <= 0 or short_entry <= 0:
+        return None
+
+    net = (short_entry - long_entry) if is_credit else (long_entry - short_entry)
+    if not np.isfinite(net) or net <= 0 or net >= width:
+        return None
+    max_profit = net if is_credit else width - net
+    max_loss = width - net if is_credit else net
+    if max_profit <= 0 or max_loss <= 0:
+        return None
+
+    if is_credit:
+        sl = min(round(net + max_loss * 0.50, 2), round(width, 2))
+        targets = [round(net * f, 2) for f in (0.70, 0.50, 0.30, 0.10)]
+        targets = [max(0.01, x) for x in targets]
+        risk_per_unit = max(sl-net, 0.01)
+        rr1 = (net-targets[0])/risk_per_unit
+        strategy_name = "BEAR CALL CREDIT SPREAD" if side == "CE" else "BULL PUT CREDIT SPREAD"
+    else:
+        sl = round(max(net * 0.50, 0.01), 2)
+        targets = [round(net + max_profit*f, 2) for f in (0.35, 0.55, 0.75, 0.95)]
+        risk_per_unit = max(net-sl, 0.01)
+        rr1 = (targets[0]-net)/risk_per_unit
+        strategy_name = "BULL CALL DEBIT SPREAD" if side == "CE" else "BEAR PUT DEBIT SPREAD"
+
+    qty_for_risk = safe_float(lot_size, 1)
+    if not np.isfinite(qty_for_risk) or qty_for_risk <= 0:
+        qty_for_risk = 1.0
+    out = dict(plan)
+    out.update({
+        "action": strategy_name, "strategy_type": "CREDIT SPREAD" if is_credit else "DEBIT SPREAD",
+        "entry": round(net, 2), "sl": sl,
+        "target1": targets[0], "target2": targets[1], "target3": targets[2], "target4": targets[3],
+        "rr1": float(rr1), "rr2": float((net-targets[1])/risk_per_unit if is_credit else (targets[1]-net)/risk_per_unit),
+        "rr3": float((net-targets[2])/risk_per_unit if is_credit else (targets[2]-net)/risk_per_unit),
+        "rr4": float((net-targets[3])/risk_per_unit if is_credit else (targets[3]-net)/risk_per_unit),
+        "long_strike": float(long_leg_row["Strike"]), "short_strike": float(short_leg_row["Strike"]),
+        "long_entry": round(long_entry, 2), "short_entry": round(short_entry, 2),
+        "spread_width": float(width), "max_profit_per_unit": round(max_profit, 2),
+        "max_loss_per_unit": round(max_loss, 2), "max_profit_lot": round(max_profit*qty_for_risk, 2),
+        "max_loss_lot": round(max_loss*qty_for_risk, 2), "is_credit_spread": bool(is_credit),
+        "fail_reasons": list(plan.get("fail_reasons") or []),
+        "exit": (f"Defined-risk {strategy_name}: close both legs together. Planned max loss is approximately ₹{max_loss*safe_float(lot_size,1):,.0f} per lot before costs; exit if net spread value reaches {fmt_price(sl)} or the underlying invalidates the setup."
+                 if is_credit else f"Defined-risk {strategy_name}: close both legs together. Planned max loss is approximately ₹{net*safe_float(lot_size,1):,.0f} per lot before costs; exit if net spread value falls to {fmt_price(sl)} or the underlying invalidates the setup."),
+        "trigger": str(plan.get("trigger", "")) + " Use both legs as one spread; never enter the short leg alone.",
+    })
+    # Explicitly fail if either leg is not actually quoted/liquid.
+    for legrow in (long_leg_row, short_leg_row):
+        if safe_float(legrow.get(f"{prefix} LTP"), 0) <= 0:
+            out["fail_reasons"].append("missing live quote on one spread leg")
+    if out["fail_reasons"]:
+        out["readiness"] = "NO TRADE"
+    return out
+
+
+# Convert every main-engine candidate before it can be selected or displayed.
+# If a valid two-leg spread cannot be priced from live chain quotes, it is not a trade.
+call_buy = build_defined_risk_spread(call_buy, "CALL BUY", chain, spot)
+call_sell = build_defined_risk_spread(call_sell, "CALL SELL", chain, spot)
+put_buy = build_defined_risk_spread(put_buy, "PUT BUY", chain, spot)
+put_sell = build_defined_risk_spread(put_sell, "PUT SELL", chain, spot)
+
 # ============================================================
 # FINAL 5-WAY DECISION
 # ============================================================
@@ -2601,16 +2717,12 @@ beginner_checks = []
 def _add_beginner_check(name, status, detail):
     beginner_checks.append({"name": name, "status": status, "detail": detail})
 
-if beginner_mode:
-    # Beginner mode intentionally selects BUY setups only. Option selling can
+if beginner_mode and decision in {"CALL BUY", "PUT BUY"}:
+    # Debit spreads retain the additional beginner confirmation checks. Credit spreads
+    # are allowed only after the defined-risk spread conversion and base engine gates. Option selling can
     # involve materially different margin and tail-risk characteristics and is
     # therefore kept visible in the engine result but cannot become the primary
     # beginner execution decision.
-    if decision in {"CALL SELL", "PUT SELL"}:
-        beginner_safety_reasons.append("Option-selling strategy is disabled in Beginner Safety mode")
-        decision = "NO TRADE"
-        best_plan = None
-
     candidate = strategy_plans.get(decision) if decision in {"CALL BUY", "PUT BUY"} else None
     if candidate:
         score = safe_float(candidate.get("score"), 0)
@@ -2766,7 +2878,7 @@ st.markdown(metrics, unsafe_allow_html=True)
 if beginner_mode:
     st.markdown("""
     <div class="fo-safety-banner">
-      <div><b>🛡️ BEGINNER SAFETY + EXPLAINABILITY IS ON</b><span>The app is using a stricter execution filter, BUY setups only, stronger confirmation and a plain-English checklist. This is decision support — not a guarantee of profit.</span></div>
+      <div><b>🛡️ BEGINNER SAFETY + EXPLAINABILITY IS ON</b><span>The app requires a priced two-leg defined-risk spread, live quotes for both legs, quality checks and plain-English risk details. This is decision support — not a guarantee of profit.</span></div>
       <div class="fo-safety-badge">SAFETY ON</div>
     </div>
     """, unsafe_allow_html=True)
@@ -2776,15 +2888,15 @@ trend_name = overall_trend(tf5, tf30, daily_tech)[0].upper()
 decision_class = "call" if "CALL" in decision else "put" if "PUT" in decision else "neutral"
 if decision != "NO TRADE" and best_plan:
     action_pop = safe_float(best_plan.get("pop")); action_score = safe_float(best_plan.get("score"), 0)
-    contract = f"{best_plan['strike']:.0f} {'CE' if best_plan['side']=='CE' else 'PE'}"
+    contract = f"BUY {best_plan.get('long_strike', best_plan['strike']):.0f} / SELL {best_plan.get('short_strike', best_plan['strike']):.0f} {'CE' if best_plan['side']=='CE' else 'PE'}"
 else:
     action_pop = np.nan; action_score = max([safe_float(p.get("score"),0) for p in strategy_plans.values() if p] or [0]); contract = "No executable setup"
 
 decision_note = {
-    "CALL BUY":"Directional upside setup — execute only when the displayed confirmation conditions are satisfied.",
-    "CALL SELL":"Premium-selling setup — requires price to remain below resistance and pass the seller risk gates.",
-    "PUT BUY":"Directional downside setup — execute only when the displayed confirmation conditions are satisfied.",
-    "PUT SELL":"Premium-selling setup — requires price to remain above support and pass the seller risk gates.",
+    "CALL BUY":"Bull call debit spread — defined-risk bullish setup using a long call and a higher-strike short call.",
+    "CALL SELL":"Bear call credit spread — short call protected by a higher-strike long call; defined risk.",
+    "PUT BUY":"Bear put debit spread — defined-risk bearish setup using a long put and a lower-strike short put.",
+    "PUT SELL":"Bull put credit spread — short put protected by a lower-strike long put; defined risk.",
     "NO TRADE":"No strategy currently meets the minimum quality, alignment, liquidity and PoP gates."
 }[decision]
 
@@ -3001,7 +3113,7 @@ engine_html = "<div class='fo-engine fo-engine-grid'>"
 for action in ["CALL BUY","CALL SELL","PUT BUY","PUT SELL"]:
     plan = strategy_plans[action]
     if not plan:
-        engine_html += f"<div class='fo-engine-card rejected'><div class='fo-engine-top'><div class='fo-engine-action'>{action}</div><div class='fo-engine-status'>NO DATA</div></div><div class='fo-engine-contract'>—</div><div class='fo-engine-reason'>No valid candidate was produced.</div></div>"
+        engine_html += f"<div class='fo-engine-card rejected'><div class='fo-engine-top'><div class='fo-engine-action'>{plan.get('action', action)}</div><div class='fo-engine-status'>NO DATA</div></div><div class='fo-engine-contract'>—</div><div class='fo-engine-reason'>No valid candidate was produced.</div></div>"
         continue
     fails = ", ".join(plan.get("fail_reasons") or []) or "All hard checks passed"
     selected = action == decision
@@ -3009,8 +3121,8 @@ for action in ["CALL BUY","CALL SELL","PUT BUY","PUT SELL"]:
     status_class = "selected" if selected else ("" if status == "PASS" else "rejected")
     engine_html += f"""
     <div class='fo-engine-card {status_class}'>
-      <div class='fo-engine-top'><div class='fo-engine-action'>{action}</div><div class='fo-engine-status'>{status}</div></div>
-      <div class='fo-engine-contract'>{plan['strike']:.0f} {'CE' if plan['side']=='CE' else 'PE'}</div>
+      <div class='fo-engine-top'><div class='fo-engine-action'>{plan.get('action', action)}</div><div class='fo-engine-status'>{status}</div></div>
+      <div class='fo-engine-contract'>{plan.get('action', action)}<br>{plan.get('long_strike', plan['strike']):.0f} / {plan.get('short_strike', plan['strike']):.0f}</div>
       <div class='fo-engine-stats'><div><span>PoP</span><b>{safe_float(plan.get('pop')):.1f}%</b></div><div><span>QUALITY</span><b>{safe_float(plan.get('score'),0):.0f}/100</b></div></div>
       <div class='fo-engine-reason'>{fails}</div>
     </div>"""
@@ -3030,19 +3142,16 @@ st.markdown(f"""
 
 if decision != "NO TRADE" and best_plan:
     st.markdown("<div class='fo-section'>SELECTED TRADE PLAN</div>", unsafe_allow_html=True)
-    selected_contract = f"{best_plan['strike']:.0f} {'CE' if best_plan['side']=='CE' else 'PE'}"
+    selected_contract = f"BUY {best_plan.get('long_strike', best_plan['strike']):.0f} / SELL {best_plan.get('short_strike', best_plan['strike']):.0f} {'CE' if best_plan['side']=='CE' else 'PE'}"
     st.markdown(f"""
     <div class="fo-plan-head">
-      <div><div class="fo-plan-action">SELECTED STRATEGY</div><div class="fo-plan-contract">{decision} · {selected_contract}</div></div>
+      <div><div class="fo-plan-action">SELECTED STRATEGY</div><div class="fo-plan-contract">{best_plan.get('action', decision)} · {selected_contract}</div></div>
       <div class="fo-plan-pop">PoP {safe_float(best_plan.get('pop')):.1f}%</div>
     </div>
     """, unsafe_allow_html=True)
     entry_value = safe_float(best_plan.get("entry"))
 
-    is_sell = (
-        str(best_plan.get("action", decision)).upper().endswith("SELL")
-        or str(decision).upper().endswith("SELL")
-    )
+    is_sell = bool(best_plan.get("is_credit_spread", False))
     lot_qty = safe_float(lot_size)
 
     def change_from_entry(level_value):
@@ -3064,7 +3173,7 @@ if decision != "NO TRADE" and best_plan:
         return f"₹{lot_pnl:+,.0f} for 1 lot"
 
     level_items = [
-        ("ENTRY", fmt_price(best_plan.get("entry")), "Option premium", "entry", change_from_entry(best_plan.get("entry")), ""),
+        ("NET ENTRY", fmt_price(best_plan.get("entry")), "Net spread debit / credit", "entry", change_from_entry(best_plan.get("entry")), ""),
         ("STOP LOSS", fmt_price(best_plan.get("sl")), "Defined risk level", "sl", change_from_entry(best_plan.get("sl")), lot_pnl_from_entry(best_plan.get("sl"))),
         ("TARGET 1", fmt_price(best_plan.get("target1")), "First profit level", "t1", change_from_entry(best_plan.get("target1")), lot_pnl_from_entry(best_plan.get("target1"))),
         ("TARGET 2", fmt_price(best_plan.get("target2")), "Second profit level", "t2", change_from_entry(best_plan.get("target2")), lot_pnl_from_entry(best_plan.get("target2"))),
@@ -3079,15 +3188,16 @@ if decision != "NO TRADE" and best_plan:
         level_html += f"<div class='fo-level {cls}'><span>{title}</span><b>{value}</b><small>{note}</small>{pct_html}{lot_html}</div>"
     level_html += "</div>"
     st.markdown(level_html, unsafe_allow_html=True)
+    st.info(f"Defined-risk spread · Width {fmt_price(best_plan.get('spread_width'))} · Maximum planned loss {fmt_price(best_plan.get('max_loss_per_unit'))} per unit / {fmt_price(best_plan.get('max_loss_lot'))} per lot · Maximum profit {fmt_price(best_plan.get('max_profit_per_unit'))} per unit / {fmt_price(best_plan.get('max_profit_lot'))} per lot. Excludes brokerage, taxes, slippage and gaps; verify broker margin and both-leg execution before placing the order.")
     st.markdown(f"<div class='fo-exit'><div class='fo-exit-icon'>🚪</div><div><span>EXIT RULE</span><b>{best_plan.get('exit','Follow stop-loss and targets.')}</b></div></div>", unsafe_allow_html=True)
 else:
-    st.markdown("<div class='fo-exit' style='margin-top:10px;'><div class='fo-exit-icon'>⛔</div><div><span>NO TRADE</span><b>None of CALL BUY, CALL SELL, PUT BUY or PUT SELL passed the backend quality + PoP gates. No executable entry, SL or target is displayed.</b></div></div>", unsafe_allow_html=True)
+    st.markdown("<div class='fo-exit' style='margin-top:10px;'><div class='fo-exit-icon'>⛔</div><div><span>NO TRADE</span><b>No defined-risk two-leg spread passed live-quote, quality, liquidity and risk gates. No executable entry, SL or target is displayed.</b></div></div>", unsafe_allow_html=True)
 
 with st.expander("Why this decision?", expanded=False):
     why_lines=[]
     if decision != "NO TRADE" and best_plan:
         why_lines += [
-            f"Selected {decision} on {best_plan['strike']:.0f} {'CE' if best_plan['side']=='CE' else 'PE'} with strategy PoP {best_plan['pop']:.1f}% and quality score {best_plan['score']:.0f}/100.",
+            f"Selected {best_plan.get('action', decision)} with strategy PoP {best_plan['pop']:.1f}% and quality score {best_plan['score']:.0f}/100.",
             f"Timeframes: 5m {tf5['trend']} · 30m {tf30['trend']} · Daily {daily_tech['trend']}.",
             f"Market structure: Support {fmt_price(support)} · Resistance {fmt_price(resistance)} · VWAP {fmt_price(tf5.get('vwap'))} · Regime {regime}.",
         ]
@@ -3102,7 +3212,7 @@ with st.expander("Why this decision?", expanded=False):
 st.markdown("<div class='fo-section'>OPTION DETAILS</div>", unsafe_allow_html=True)
 if decision != "NO TRADE" and best_plan:
     st.markdown(f"""
-    <div class="fo-why"><div class="fo-why-line"><b>{decision}</b> · {best_plan['strike']:.0f} {'CE' if best_plan['side']=='CE' else 'PE'} · PoP {best_plan['pop']:.1f}% · Delta {safe_float(best_plan['delta']):.2f} · IV {safe_float(best_plan['iv']):.1f}% · OI {fmt_num(best_plan['oi'])} · Volume {fmt_num(best_plan['volume'])}</div></div>
+    <div class="fo-why"><div class="fo-why-line"><b>{best_plan.get('action', decision)}</b> · BUY {best_plan.get('long_strike', best_plan['strike']):.0f} / SELL {best_plan.get('short_strike', best_plan['strike']):.0f} {'CE' if best_plan['side']=='CE' else 'PE'} · PoP {best_plan['pop']:.1f}% · Delta {safe_float(best_plan['delta']):.2f} · IV {safe_float(best_plan['iv']):.1f}% · OI {fmt_num(best_plan['oi'])} · Volume {fmt_num(best_plan['volume'])}</div></div>
     """,unsafe_allow_html=True)
 else:
     st.markdown("<div class='fo-why'><div class='fo-why-line' style='color:#98a2b3;text-align:center;'>No option is currently selected for execution.</div></div>",unsafe_allow_html=True)
