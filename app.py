@@ -1,5 +1,6 @@
 import gzip
 import json
+import math
 from datetime import date, datetime, timedelta
 from zoneinfo import ZoneInfo
 from urllib.parse import quote
@@ -2542,12 +2543,59 @@ call_sell = sell_candidate("CE")
 put_sell = sell_candidate("PE")
 
 
-def build_defined_risk_spread(plan, action, option_chain, spot_price):
-    """Convert a directional option candidate into a quoted, defined-risk vertical spread.
+def _normal_cdf(value):
+    """Standard normal cumulative distribution, using only the standard library."""
+    return 0.5 * (1.0 + math.erf(float(value) / math.sqrt(2.0)))
 
-    CALL/PUT BUY become debit spreads; CALL/PUT SELL become credit spreads.
-    Both legs must have usable live bid/ask quotes. If not, the candidate is
-    rejected rather than falling back to a naked option.
+
+def _spread_expiry_pop(side, is_credit, spot, breakeven, iv_value, expiry_value):
+    """Model expiry probability of profit for the COMPLETE vertical spread.
+
+    This lognormal estimate uses the spread breakeven, expiry and IV; it is not
+    a measured win rate or a guarantee. Missing/invalid IV or expiry fails closed.
+    """
+    try:
+        sigma = safe_float(iv_value)
+        if not np.isfinite(sigma) or sigma <= 0:
+            return np.nan
+        # Upstox IV is usually expressed as percent (e.g. 18.5); accept decimals too.
+        if sigma > 3.0:
+            sigma /= 100.0
+        if not 0.01 <= sigma <= 3.0:
+            return np.nan
+        expiry_date = datetime.strptime(str(expiry_value)[:10], "%Y-%m-%d").date()
+        tz = ZoneInfo("Asia/Kolkata")
+        now = datetime.now(tz)
+        expiry_dt = datetime.combine(expiry_date, datetime.strptime("15:30", "%H:%M").time()).replace(tzinfo=tz)
+        # An expired contract has no forward expiry probability; fail closed.
+        if expiry_dt <= now:
+            return np.nan
+        years = (expiry_dt - now).total_seconds() / (365.0 * 24.0 * 60.0 * 60.0)
+        spot = float(spot)
+        breakeven = float(breakeven)
+        if spot <= 0 or breakeven <= 0:
+            return np.nan
+        vol_time = sigma * math.sqrt(years)
+        if vol_time <= 0:
+            return np.nan
+        # Risk-neutral lognormal probability that expiry spot is above breakeven.
+        d2 = (math.log(spot / breakeven) + (0.065 - 0.5 * sigma * sigma) * years) / vol_time
+        p_above = _normal_cdf(d2)
+        if side == "CE":
+            p_profit = (1.0 - p_above) if is_credit else p_above
+        else:  # PE
+            p_profit = p_above if is_credit else (1.0 - p_above)
+        return float(np.clip(p_profit * 100.0, 0.0, 100.0))
+    except Exception:
+        return np.nan
+
+
+def build_defined_risk_spread(plan, action, option_chain, spot_price, expiry_value=None):
+    """Build a defined-risk vertical only from valid live bid/ask prices.
+
+    LTP is not an executable substitute for a missing bid/ask. The probability
+    displayed for a spread is calculated from its own breakeven, not copied from
+    the candidate single option.
     """
     if not plan or option_chain is None or option_chain.empty:
         return None
@@ -2586,13 +2634,25 @@ def build_defined_risk_spread(plan, action, option_chain, spot_price):
     # For credit spreads, sell the candidate and buy the farther OTM protection.
     long_leg_row = short_row if not is_credit else long_row
     short_leg_row = long_row if not is_credit else short_row
+    # Conservative executable-side pricing: buy at ask, sell at bid.
+    # Never substitute LTP, which can be stale or unavailable at that price.
+    long_bid = safe_float(long_leg_row.get(f"{prefix} Bid"))
     long_entry = safe_float(long_leg_row.get(f"{prefix} Ask"))
-    if not np.isfinite(long_entry) or long_entry <= 0:
-        long_entry = safe_float(long_leg_row.get(f"{prefix} LTP"))
     short_entry = safe_float(short_leg_row.get(f"{prefix} Bid"))
-    if not np.isfinite(short_entry) or short_entry <= 0:
-        short_entry = safe_float(short_leg_row.get(f"{prefix} LTP"))
-    if not np.isfinite(long_entry) or not np.isfinite(short_entry) or long_entry <= 0 or short_entry <= 0:
+    short_ask = safe_float(short_leg_row.get(f"{prefix} Ask"))
+    for bid_px, ask_px in ((long_bid, long_entry), (short_entry, short_ask)):
+        if (not np.isfinite(bid_px) or not np.isfinite(ask_px)
+                or bid_px <= 0 or ask_px <= 0 or ask_px < bid_px):
+            return None
+
+    # Skip wide markets: a theoretically profitable spread may be unexecutable.
+    def _leg_spread_pct(bid_px, ask_px):
+        mid_px = (bid_px + ask_px) / 2.0
+        return (ask_px - bid_px) / max(mid_px, 0.01) * 100.0
+
+    if _leg_spread_pct(long_bid, long_entry) > 4.0:
+        return None
+    if _leg_spread_pct(short_entry, short_ask) > 4.0:
         return None
 
     net = (short_entry - long_entry) if is_credit else (long_entry - short_entry)
@@ -2621,6 +2681,21 @@ def build_defined_risk_spread(plan, action, option_chain, spot_price):
     if not np.isfinite(qty_for_risk) or qty_for_risk <= 0:
         qty_for_risk = 1.0
     out = dict(plan)
+    # Derive breakeven from the actual spread legs and net premium.
+    if side == "CE":
+        breakeven = float(short_leg_row["Strike"]) + net if is_credit else float(long_leg_row["Strike"]) + net
+    else:
+        breakeven = float(short_leg_row["Strike"]) - net if is_credit else float(long_leg_row["Strike"]) - net
+    iv_long = safe_float(long_leg_row.get(f"{prefix} IV"))
+    iv_short = safe_float(short_leg_row.get(f"{prefix} IV"))
+    valid_ivs = [x for x in (iv_long, iv_short) if np.isfinite(x) and x > 0]
+    spread_iv = float(np.mean(valid_ivs)) if len(valid_ivs) == 2 else np.nan
+    spread_pop = _spread_expiry_pop(side, is_credit, spot_price, breakeven, spread_iv, expiry_value)
+    out["pop"] = spread_pop
+    out["spread_breakeven"] = float(breakeven)
+    out["pop_method"] = "lognormal spread breakeven model" if np.isfinite(spread_pop) else "unavailable"
+    if not np.isfinite(spread_pop):
+        out["fail_reasons"] = list(plan.get("fail_reasons") or []) + ["spread PoP unavailable: valid IV/expiry required"]
     out.update({
         "action": strategy_name, "strategy_type": "CREDIT SPREAD" if is_credit else "DEBIT SPREAD",
         "entry": round(net, 2), "sl": sl,
@@ -2633,15 +2708,19 @@ def build_defined_risk_spread(plan, action, option_chain, spot_price):
         "spread_width": float(width), "max_profit_per_unit": round(max_profit, 2),
         "max_loss_per_unit": round(max_loss, 2), "max_profit_lot": round(max_profit*qty_for_risk, 2),
         "max_loss_lot": round(max_loss*qty_for_risk, 2), "is_credit_spread": bool(is_credit),
-        "fail_reasons": list(plan.get("fail_reasons") or []),
+        "fail_reasons": list(out.get("fail_reasons", plan.get("fail_reasons") or [])),
         "exit": (f"Defined-risk {strategy_name}: close both legs together. Planned max loss is approximately ₹{max_loss*safe_float(lot_size,1):,.0f} per lot before costs; exit if net spread value reaches {fmt_price(sl)} or the underlying invalidates the setup."
                  if is_credit else f"Defined-risk {strategy_name}: close both legs together. Planned max loss is approximately ₹{net*safe_float(lot_size,1):,.0f} per lot before costs; exit if net spread value falls to {fmt_price(sl)} or the underlying invalidates the setup."),
         "trigger": str(plan.get("trigger", "")) + " Use both legs as one spread; never enter the short leg alone.",
     })
-    # Explicitly fail if either leg is not actually quoted/liquid.
+    # Revalidate both legs and fail closed on missing/crossed quotes.
     for legrow in (long_leg_row, short_leg_row):
-        if safe_float(legrow.get(f"{prefix} LTP"), 0) <= 0:
-            out["fail_reasons"].append("missing live quote on one spread leg")
+        bid_px = safe_float(legrow.get(f"{prefix} Bid"))
+        ask_px = safe_float(legrow.get(f"{prefix} Ask"))
+        if (not np.isfinite(bid_px) or not np.isfinite(ask_px)
+                or bid_px <= 0 or ask_px <= 0 or ask_px < bid_px):
+            out["fail_reasons"].append("missing or invalid live bid/ask on a spread leg")
+            break
     if out["fail_reasons"]:
         out["readiness"] = "NO TRADE"
     return out
@@ -2649,10 +2728,10 @@ def build_defined_risk_spread(plan, action, option_chain, spot_price):
 
 # Convert every main-engine candidate before it can be selected or displayed.
 # If a valid two-leg spread cannot be priced from live chain quotes, it is not a trade.
-call_buy = build_defined_risk_spread(call_buy, "CALL BUY", chain, spot)
-call_sell = build_defined_risk_spread(call_sell, "CALL SELL", chain, spot)
-put_buy = build_defined_risk_spread(put_buy, "PUT BUY", chain, spot)
-put_sell = build_defined_risk_spread(put_sell, "PUT SELL", chain, spot)
+call_buy = build_defined_risk_spread(call_buy, "CALL BUY", chain, spot, selected_expiry)
+call_sell = build_defined_risk_spread(call_sell, "CALL SELL", chain, spot, selected_expiry)
+put_buy = build_defined_risk_spread(put_buy, "PUT BUY", chain, spot, selected_expiry)
+put_sell = build_defined_risk_spread(put_sell, "PUT SELL", chain, spot, selected_expiry)
 
 # ============================================================
 # FINAL 5-WAY DECISION
@@ -3371,7 +3450,7 @@ else:
     st.markdown("<div class='fo-why'><div class='fo-why-line' style='color:#98a2b3;text-align:center;'>No option is currently selected for execution.</div></div>",unsafe_allow_html=True)
 
 st.markdown(f"""
-<div class="fo-footer">Live Upstox snapshot · Expiry {selected_expiry} · Updated {now_ist.strftime('%d-%b-%Y %H:%M:%S IST')}<br>PoP is a model input from the Upstox option chain; it is not a guaranteed win probability. Option selling can carry substantial risk.</div>
+<div class="fo-footer">Live Upstox snapshot · Expiry {selected_expiry} · Updated {now_ist.strftime('%d-%b-%Y %H:%M:%S IST')}<br>PoP is a model estimate from spread breakeven, option IV and expiry; it is not a guaranteed win probability or a measured win rate. Option selling can carry substantial risk.</div>
 """,unsafe_allow_html=True)
 
 # ============================================================
