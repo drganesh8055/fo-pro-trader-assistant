@@ -3698,13 +3698,25 @@ else:
     _m3.metric("CLOSED NET P/L", f"₹{_closed_net:,.0f}")
     _m4.metric("CLOSED WIN RATE", f"{(100*_wins/len(_closed_df)):.1f}%" if len(_closed_df) else "—", help="Based on closed paper trades after the estimated costs you entered; small samples are not statistically reliable.")
     if len(_open_df):
-        st.markdown("**Open trades**")
-        _open_cols = ["trade_id", "opened_at", "symbol", "expiry", "action", "lots", "entry_value", "last_mark", "stop_loss", "target1", "net_pnl", "last_updated"]
-        _open_display = _open_df[_open_cols].rename(columns={"trade_id":"ID", "opened_at":"Opened (IST)", "symbol":"Symbol", "expiry":"Expiry", "action":"Strategy", "lots":"Lots", "entry_value":"Entry spread value", "last_mark":"Latest spread value", "stop_loss":"Stop-loss value", "target1":"Target 1 value", "net_pnl":"Est. net P/L (₹)", "last_updated":"Last live update"}).copy()
-        # Use Streamlit's HTML table renderer here instead of the canvas-based
-        # dataframe grid, which can appear blank in some browser/deployment setups.
-        st.table(_open_display)
-        st.caption("Only trades matching the currently analyzed symbol and expiry are refreshed from this screen. Switch back to each trade's symbol/expiry and refresh/analyze it to update its live mark. Stop/target checks use the observed spread mark and can miss intraday touches between refreshes.")
+        st.markdown("**Open trades — simple view**")
+        st.caption("Read each row from left to right: what you recorded → latest estimated value → estimated profit/loss → exit levels.")
+        # Keep this table beginner-friendly: hide technical IDs and timestamps from
+        # the main view, and label prices in plain language. The full CSV remains
+        # available below for detailed records.
+        _simple_open = pd.DataFrame(index=_open_df.index)
+        _simple_open["Trade"] = _open_df["symbol"].astype(str) + " · " + _open_df["action"].astype(str)
+        _simple_open["Expiry"] = _open_df["expiry"].astype(str)
+        _simple_open["Lots"] = pd.to_numeric(_open_df["lots"], errors="coerce").fillna(0).map(lambda x: f"{x:g}")
+        _simple_open["Entry price"] = pd.to_numeric(_open_df["entry_value"], errors="coerce").map(lambda x: f"₹{x:.2f}" if pd.notna(x) else "—")
+        _simple_open["Current price*"] = pd.to_numeric(_open_df["last_mark"], errors="coerce").map(lambda x: f"₹{x:.2f}" if pd.notna(x) else "—")
+        _simple_open["Estimated P/L"] = pd.to_numeric(_open_df["net_pnl"], errors="coerce").map(lambda x: ("PROFIT · " if x > 0 else "LOSS · " if x < 0 else "BREAK-EVEN · ") + f"₹{abs(x):,.2f}" if pd.notna(x) else "—")
+        _simple_open["Stop-loss price"] = pd.to_numeric(_open_df["stop_loss"], errors="coerce").map(lambda x: f"₹{x:.2f}" if pd.notna(x) else "—")
+        _simple_open["Target 1 price"] = pd.to_numeric(_open_df["target1"], errors="coerce").map(lambda x: f"₹{x:.2f}" if pd.notna(x) else "—")
+        _simple_open["Last updated"] = _open_df["last_updated"].astype(str).str.replace(r"[+-]\d{2}:\d{2}$", "", regex=True).str.replace("T", " ", regex=False).str.slice(0, 16)
+        # Use Streamlit's HTML table renderer rather than its canvas-based grid.
+        st.table(_simple_open.reset_index(drop=True))
+        st.caption("*Current price is the latest recorded estimated cost to close the spread, not a guaranteed execution price. For credit spreads, lower is usually better; for debit spreads, higher is usually better. P/L is estimated after the costs entered in the app.")
+        st.caption("Prices update only when you analyze the same trade's symbol and expiry again. Stop-loss/target touches between updates can be missed.")
         _closable = _open_df.copy()
         _close_options = {f"{r['trade_id']} · {r['symbol']} · {r['action']} · {r['expiry']}": str(r['trade_id']) for _, r in _closable.iterrows()}
         with st.form("paper_trade_manual_close_form"):
