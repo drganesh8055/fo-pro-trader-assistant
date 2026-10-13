@@ -3713,8 +3713,23 @@ else:
         _simple_open["Stop-loss price"] = pd.to_numeric(_open_df["stop_loss"], errors="coerce").map(lambda x: f"₹{x:.2f}" if pd.notna(x) else "—")
         _simple_open["Target 1 price"] = pd.to_numeric(_open_df["target1"], errors="coerce").map(lambda x: f"₹{x:.2f}" if pd.notna(x) else "—")
         _simple_open["Last updated"] = _open_df["last_updated"].astype(str).str.replace(r"[+-]\d{2}:\d{2}$", "", regex=True).str.replace("T", " ", regex=False).str.slice(0, 16)
+        # Color the P/L text for quick scanning: green for profit, red for loss.
+        # Keep the existing simple table and all trade logic unchanged.
+        def _paper_pl_text_color(value):
+            text = str(value).strip().upper()
+            if text.startswith("PROFIT"):
+                return "color: #16803C; font-weight: 700;"
+            if text.startswith("LOSS"):
+                return "color: #D92D20; font-weight: 700;"
+            if text.startswith("BREAK-EVEN"):
+                return "color: #667085; font-weight: 700;"
+            return "color: inherit;"
+
+        _simple_open_styled = _simple_open.reset_index(drop=True).style.map(
+            _paper_pl_text_color, subset=["Estimated P/L"]
+        )
         # Use Streamlit's HTML table renderer rather than its canvas-based grid.
-        st.table(_simple_open.reset_index(drop=True))
+        st.table(_simple_open_styled)
         st.caption("*Current price is the latest recorded estimated cost to close the spread, not a guaranteed execution price. For credit spreads, lower is usually better; for debit spreads, higher is usually better. P/L is estimated after the costs entered in the app.")
         st.caption("Prices update only when you analyze the same trade's symbol and expiry again. Stop-loss/target touches between updates can be missed.")
         _closable = _open_df.copy()
