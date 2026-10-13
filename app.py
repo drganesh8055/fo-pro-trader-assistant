@@ -3700,7 +3700,10 @@ else:
     if len(_open_df):
         st.markdown("**Open trades**")
         _open_cols = ["trade_id", "opened_at", "symbol", "expiry", "action", "lots", "entry_value", "last_mark", "stop_loss", "target1", "net_pnl", "last_updated"]
-        st.dataframe(_open_df[_open_cols].rename(columns={"trade_id":"ID", "opened_at":"Opened (IST)", "symbol":"Symbol", "expiry":"Expiry", "action":"Strategy", "lots":"Lots", "entry_value":"Entry spread value", "last_mark":"Latest spread value", "stop_loss":"Stop-loss value", "target1":"Target 1 value", "net_pnl":"Est. net P/L (₹)", "last_updated":"Last live update"}), use_container_width=True, hide_index=True)
+        _open_display = _open_df[_open_cols].rename(columns={"trade_id":"ID", "opened_at":"Opened (IST)", "symbol":"Symbol", "expiry":"Expiry", "action":"Strategy", "lots":"Lots", "entry_value":"Entry spread value", "last_mark":"Latest spread value", "stop_loss":"Stop-loss value", "target1":"Target 1 value", "net_pnl":"Est. net P/L (₹)", "last_updated":"Last live update"}).copy()
+        # Use Streamlit's HTML table renderer here instead of the canvas-based
+        # dataframe grid, which can appear blank in some browser/deployment setups.
+        st.table(_open_display)
         st.caption("Only trades matching the currently analyzed symbol and expiry are refreshed from this screen. Switch back to each trade's symbol/expiry and refresh/analyze it to update its live mark. Stop/target checks use the observed spread mark and can miss intraday touches between refreshes.")
         _closable = _open_df.copy()
         _close_options = {f"{r['trade_id']} · {r['symbol']} · {r['action']} · {r['expiry']}": str(r['trade_id']) for _, r in _closable.iterrows()}
@@ -3732,7 +3735,9 @@ else:
     if len(_closed_df):
         st.markdown("**Closed trade history**")
         _closed_cols = ["trade_id", "opened_at", "symbol", "expiry", "action", "lots", "entry_value", "exit_price", "exit_reason", "gross_pnl", "net_pnl", "closed_at"]
-        st.dataframe(_closed_df[_closed_cols].rename(columns={"trade_id":"ID", "opened_at":"Opened (IST)", "symbol":"Symbol", "expiry":"Expiry", "action":"Strategy", "lots":"Lots", "entry_value":"Entry spread value", "exit_price":"Exit spread value", "exit_reason":"Exit reason", "gross_pnl":"Gross P/L (₹)", "net_pnl":"Net P/L (₹)", "closed_at":"Closed (IST)"}), use_container_width=True, hide_index=True)
+        _closed_display = _closed_df[_closed_cols].rename(columns={"trade_id":"ID", "opened_at":"Opened (IST)", "symbol":"Symbol", "expiry":"Expiry", "action":"Strategy", "lots":"Lots", "entry_value":"Entry spread value", "exit_price":"Exit spread value", "exit_reason":"Exit reason", "gross_pnl":"Gross P/L (₹)", "net_pnl":"Net P/L (₹)", "closed_at":"Closed (IST)"}).copy()
+        # Keep closed history on the same non-canvas renderer for consistency.
+        st.table(_closed_display)
     st.download_button("Download paper-trading ledger (CSV)", data=_paper_df.to_csv(index=False).encode("utf-8"), file_name="fo_pro_paper_trades.csv", mime="text/csv", use_container_width=True)
     st.warning("Paper-trading results are estimates, not audited returns. Quotes may be delayed/stale, spread fills may not be achievable, and stop/target events between refreshes can be missed. The CSV is saved locally by this app instance; on Streamlit Cloud, local files may reset after a restart or redeployment, so download the ledger regularly.")
 
