@@ -1678,16 +1678,6 @@ def _load_paper_ledger():
         ]
         for col in numeric_cols:
             frame[col] = pd.to_numeric(frame[col], errors="coerce").astype(float)
-        # CSV readers may infer an all-blank text column (especially
-        # exit_reason / closed_at) as float64. Pandas 3 rejects assigning a
-        # string into that column later when a paper trade is closed. Force
-        # ledger text fields to object dtype and normalize blank cells first.
-        text_cols = [
-            "trade_id", "opened_at", "symbol", "expiry", "action", "side",
-            "status", "last_updated", "exit_reason", "closed_at",
-        ]
-        for col in text_cols:
-            frame[col] = frame[col].fillna("").astype(object)
         return frame[PAPER_COLUMNS]
     except Exception:
         return pd.DataFrame(columns=PAPER_COLUMNS)
@@ -3681,92 +3671,114 @@ if _paper_plan:
 elif not _paper_pass_candidates:
     st.info("No card-level PASS strategy is available to record right now. Analyze a live instrument and check the Engine Result again.")
 
-# Refresh the ledger after possible save/automatic exits.
-_paper_df = _load_paper_ledger()
-if _paper_df.empty:
-    st.info("No paper trades recorded yet. Analyze a live instrument and record an eligible setup to begin forward testing.")
-else:
-    _open_df = _paper_df[_paper_df["status"].astype(str) == "OPEN"].copy()
-    _closed_df = _paper_df[_paper_df["status"].astype(str) == "CLOSED"].copy()
-    _closed_net = pd.to_numeric(_closed_df.get("net_pnl", pd.Series(dtype=float)), errors="coerce").fillna(0).sum()
-    _open_net = pd.to_numeric(_open_df.get("net_pnl", pd.Series(dtype=float)), errors="coerce").fillna(0).sum()
-    _wins = int((pd.to_numeric(_closed_df.get("net_pnl", pd.Series(dtype=float)), errors="coerce") > 0).sum())
-    _losses = int((pd.to_numeric(_closed_df.get("net_pnl", pd.Series(dtype=float)), errors="coerce") <= 0).sum())
-    _m1, _m2, _m3, _m4 = st.columns(4)
-    _m1.metric("OPEN PAPER TRADES", f"{len(_open_df)}")
-    _m2.metric("CLOSED TRADES", f"{len(_closed_df)}")
-    _m3.metric("CLOSED NET P/L", f"₹{_closed_net:,.0f}")
-    _m4.metric("CLOSED WIN RATE", f"{(100*_wins/len(_closed_df)):.1f}%" if len(_closed_df) else "—", help="Based on closed paper trades after the estimated costs you entered; small samples are not statistically reliable.")
-    if len(_open_df):
-        st.markdown("**Open trades — simple view**")
-        st.caption("Read each row from left to right: what you recorded → latest estimated value → estimated profit/loss → exit levels.")
-        # Keep this table beginner-friendly: hide technical IDs and timestamps from
-        # the main view, and label prices in plain language. The full CSV remains
-        # available below for detailed records.
-        _simple_open = pd.DataFrame(index=_open_df.index)
-        _simple_open["Trade"] = _open_df["symbol"].astype(str) + " · " + _open_df["action"].astype(str)
-        _simple_open["Expiry"] = _open_df["expiry"].astype(str)
-        _simple_open["Lots"] = pd.to_numeric(_open_df["lots"], errors="coerce").fillna(0).map(lambda x: f"{x:g}")
-        _simple_open["Entry price"] = pd.to_numeric(_open_df["entry_value"], errors="coerce").map(lambda x: f"₹{x:.2f}" if pd.notna(x) else "—")
-        _simple_open["Current price*"] = pd.to_numeric(_open_df["last_mark"], errors="coerce").map(lambda x: f"₹{x:.2f}" if pd.notna(x) else "—")
-        _simple_open["Estimated P/L"] = pd.to_numeric(_open_df["net_pnl"], errors="coerce").map(lambda x: ("PROFIT · " if x > 0 else "LOSS · " if x < 0 else "BREAK-EVEN · ") + f"₹{abs(x):,.2f}" if pd.notna(x) else "—")
-        _simple_open["Stop-loss price"] = pd.to_numeric(_open_df["stop_loss"], errors="coerce").map(lambda x: f"₹{x:.2f}" if pd.notna(x) else "—")
-        _simple_open["Target 1 price"] = pd.to_numeric(_open_df["target1"], errors="coerce").map(lambda x: f"₹{x:.2f}" if pd.notna(x) else "—")
-        _simple_open["Last updated"] = _open_df["last_updated"].astype(str).str.replace(r"[+-]\d{2}:\d{2}$", "", regex=True).str.replace("T", " ", regex=False).str.slice(0, 16)
-        # Color the P/L text for quick scanning: green for profit, red for loss.
-        # Keep the existing simple table and all trade logic unchanged.
-        def _paper_pl_text_color(value):
-            text = str(value).strip().upper()
-            if text.startswith("PROFIT"):
-                return "color: #16803C; font-weight: 700;"
-            if text.startswith("LOSS"):
-                return "color: #D92D20; font-weight: 700;"
-            if text.startswith("BREAK-EVEN"):
-                return "color: #667085; font-weight: 700;"
-            return "color: inherit;"
+# Open-trades table: refresh this section independently every 30 seconds.
+# The fragment fetches fresh option-chain data directly from Upstox (bypassing
+# the cached chain helper), updates marks/P&L for every open trade, and saves the
+# ledger. It does not rerun the main analyzer or refresh other UI sections.
+@st.fragment(run_every="30s")
+def _render_live_open_trades_table():
+    _live_df = _load_paper_ledger()
+    if _live_df.empty:
+        st.info("No paper trades recorded yet. Analyze a live instrument and record an eligible setup to begin forward testing.")
+        return
 
-        _simple_open_styled = _simple_open.reset_index(drop=True).style.map(
-            _paper_pl_text_color, subset=["Estimated P/L"]
-        )
-        # Use Streamlit's HTML table renderer rather than its canvas-based grid.
-        st.table(_simple_open_styled)
-        st.caption("*Current price is the latest recorded estimated cost to close the spread, not a guaranteed execution price. For credit spreads, lower is usually better; for debit spreads, higher is usually better. P/L is estimated after the costs entered in the app.")
-        st.caption("Prices update only when you analyze the same trade's symbol and expiry again. Stop-loss/target touches between updates can be missed.")
-        _closable = _open_df.copy()
-        _close_options = {f"{r['trade_id']} · {r['symbol']} · {r['action']} · {r['expiry']}": str(r['trade_id']) for _, r in _closable.iterrows()}
+    _live_open = _live_df[_live_df["status"].astype(str) == "OPEN"].copy()
+    _live_now = datetime.now(ZoneInfo("Asia/Kolkata")).isoformat(timespec="seconds")
+    _fresh_any = False
+    _refresh_errors = []
+
+    # Refresh each unique symbol/expiry once per cycle, regardless of how many
+    # open trades use that option chain.
+    _pairs = _live_open[["symbol", "expiry"]].drop_duplicates().to_dict("records") if len(_live_open) else []
+    for _pair in _pairs:
+        _sym = str(_pair["symbol"])
+        _exp = str(_pair["expiry"])
+        try:
+            _underlying = search_underlying(_sym)
+            _key = _underlying.get("instrument_key")
+            if not _key:
+                raise UpstoxError(f"Could not resolve the Upstox instrument key for {_sym}.")
+            # Direct API request is intentional: get_option_chain() is cached,
+            # which would otherwise make the displayed mark stale between TTLs.
+            _payload = api_get("/v2/option/chain", params={"instrument_key": _key, "expiry_date": _exp}, timeout=20)
+            _rows = _payload.get("data", []) if isinstance(_payload, dict) else []
+            _chain = normalize_chain(_rows)
+            if _chain.empty:
+                raise UpstoxError(f"Upstox returned no option-chain rows for {_sym} expiry {_exp}.")
+            _live_df, _changed = _update_paper_trades_for_snapshot(_live_df, _sym, _exp, _chain, _live_now)
+            _fresh_any = _fresh_any or _changed
+        except Exception as _refresh_error:
+            _refresh_errors.append(f"{_sym} ({_exp}): {_refresh_error}")
+
+    if _fresh_any:
+        try:
+            _save_paper_ledger(_live_df)
+        except Exception as _save_error:
+            st.warning(f"Live marks were calculated, but the paper-trading ledger could not be saved: {_save_error}")
+
+    _live_open = _live_df[_live_df["status"].astype(str) == "OPEN"].copy()
+    if len(_live_open):
+        st.markdown("**Open trades — simple view**")
+        _open_cols = ["trade_id", "opened_at", "symbol", "expiry", "action", "lots", "entry_value", "last_mark", "stop_loss", "target1", "net_pnl", "last_updated"]
+        _view = _live_open[_open_cols].rename(columns={"trade_id":"ID", "opened_at":"Opened (IST)", "symbol":"Symbol", "expiry":"Expiry", "action":"Strategy", "lots":"Lots", "entry_value":"Entry spread value", "last_mark":"Latest spread value", "stop_loss":"Stop-loss value", "target1":"Target 1 value", "net_pnl":"Est. net P/L (₹)", "last_updated":"Last live update"})
+        st.dataframe(_view, use_container_width=True, hide_index=True)
+        st.caption("Auto-refreshes this table every 30 seconds. Only a successful fresh Upstox quote updates the Last live update timestamp. Prices are estimated liquidation values from both spread legs; this is paper trading, not a broker order.")
+        if _refresh_errors:
+            st.warning("Some open trades could not be refreshed; their last successful values are retained. " + " | ".join(_refresh_errors))
+        _close_options = {f"{r['trade_id']} · {r['symbol']} · {r['action']} · {r['expiry']}": str(r['trade_id']) for _, r in _live_open.iterrows()}
         with st.form("paper_trade_manual_close_form"):
             _close_choice = st.selectbox("Manually close a paper trade", options=list(_close_options.keys()), key="paper_close_choice")
             _manual_close = st.form_submit_button("Close selected trade at its latest recorded mark")
         if _manual_close and _close_choice:
             _close_id = _close_options[_close_choice]
-            _mask = (_paper_df["trade_id"].astype(str) == _close_id) & (_paper_df["status"].astype(str) == "OPEN")
+            _mask = (_live_df["trade_id"].astype(str) == _close_id) & (_live_df["status"].astype(str) == "OPEN")
             if _mask.any():
-                _ix = _paper_df.index[_mask][0]
-                _exit_mark = safe_float(_paper_df.at[_ix, "last_mark"])
-                _entry_mark = safe_float(_paper_df.at[_ix, "entry_value"])
-                _credit_flag = str(_paper_df.at[_ix, "is_credit_spread"]).lower() in ("true", "1", "yes")
-                _qty = safe_float(_paper_df.at[_ix, "quantity"], 0)
-                _costs = safe_float(_paper_df.at[_ix, "cost_per_lot"], 0) * safe_float(_paper_df.at[_ix, "lots"], 1)
+                _ix = _live_df.index[_mask][0]
+                _exit_mark = safe_float(_live_df.at[_ix, "last_mark"])
+                _entry_mark = safe_float(_live_df.at[_ix, "entry_value"])
+                _credit_flag = str(_live_df.at[_ix, "is_credit_spread"]).lower() in ("true", "1", "yes")
+                _qty = safe_float(_live_df.at[_ix, "quantity"], 0)
+                _costs = safe_float(_live_df.at[_ix, "cost_per_lot"], 0) * safe_float(_live_df.at[_ix, "lots"], 1)
                 if np.isfinite(_exit_mark) and np.isfinite(_entry_mark):
                     _gross = ((_entry_mark-_exit_mark) if _credit_flag else (_exit_mark-_entry_mark)) * _qty
-                    _paper_df.at[_ix, "status"] = "CLOSED"
-                    _paper_df.at[_ix, "exit_price"] = _exit_mark
-                    _paper_df.at[_ix, "exit_reason"] = "MANUAL CLOSE"
-                    _paper_df.at[_ix, "closed_at"] = _paper_now
-                    _paper_df.at[_ix, "gross_pnl"] = round(_gross, 2)
-                    _paper_df.at[_ix, "net_pnl"] = round(_gross-_costs, 2)
-                    _paper_df.at[_ix, "last_updated"] = _paper_now
-                    _save_paper_ledger(_paper_df)
+                    _live_df.at[_ix, "status"] = "CLOSED"
+                    _live_df.at[_ix, "exit_price"] = _exit_mark
+                    _live_df.at[_ix, "exit_reason"] = "MANUAL CLOSE"
+                    _live_df.at[_ix, "closed_at"] = _live_now
+                    _live_df.at[_ix, "gross_pnl"] = round(_gross, 2)
+                    _live_df.at[_ix, "net_pnl"] = round(_gross-_costs, 2)
+                    _live_df.at[_ix, "last_updated"] = _live_now
+                    _save_paper_ledger(_live_df)
                     st.success(f"Paper trade {_close_id} closed at its latest recorded mark. No real order was placed.")
                     st.rerun()
-    if len(_closed_df):
-        st.markdown("**Closed trade history**")
-        _closed_cols = ["trade_id", "opened_at", "symbol", "expiry", "action", "lots", "entry_value", "exit_price", "exit_reason", "gross_pnl", "net_pnl", "closed_at"]
-        _closed_display = _closed_df[_closed_cols].rename(columns={"trade_id":"ID", "opened_at":"Opened (IST)", "symbol":"Symbol", "expiry":"Expiry", "action":"Strategy", "lots":"Lots", "entry_value":"Entry spread value", "exit_price":"Exit spread value", "exit_reason":"Exit reason", "gross_pnl":"Gross P/L (₹)", "net_pnl":"Net P/L (₹)", "closed_at":"Closed (IST)"}).copy()
-        # Keep closed history on the same non-canvas renderer for consistency.
-        st.table(_closed_display)
-    st.download_button("Download paper-trading ledger (CSV)", data=_paper_df.to_csv(index=False).encode("utf-8"), file_name="fo_pro_paper_trades.csv", mime="text/csv", use_container_width=True)
-    st.warning("Paper-trading results are estimates, not audited returns. Quotes may be delayed/stale, spread fills may not be achievable, and stop/target events between refreshes can be missed. The CSV is saved locally by this app instance; on Streamlit Cloud, local files may reset after a restart or redeployment, so download the ledger regularly.")
+    else:
+        st.info("There are no currently open paper trades.")
+
+_render_live_open_trades_table()
+
+# Load latest ledger snapshot for the closed-trade summary and CSV export.
+_paper_df = _load_paper_ledger()
+if _paper_df.empty:
+    _open_df = _paper_df.copy()
+    _closed_df = _paper_df.copy()
+else:
+    _open_df = _paper_df[_paper_df["status"].astype(str) == "OPEN"].copy()
+    _closed_df = _paper_df[_paper_df["status"].astype(str) == "CLOSED"].copy()
+_closed_net = pd.to_numeric(_closed_df.get("net_pnl", pd.Series(dtype=float)), errors="coerce").fillna(0).sum()
+_open_net = pd.to_numeric(_open_df.get("net_pnl", pd.Series(dtype=float)), errors="coerce").fillna(0).sum()
+_wins = int((pd.to_numeric(_closed_df.get("net_pnl", pd.Series(dtype=float)), errors="coerce") > 0).sum())
+_losses = int((pd.to_numeric(_closed_df.get("net_pnl", pd.Series(dtype=float)), errors="coerce") <= 0).sum())
+_m1, _m2, _m3, _m4 = st.columns(4)
+_m1.metric("OPEN PAPER TRADES", f"{len(_open_df)}")
+_m2.metric("CLOSED TRADES", f"{len(_closed_df)}")
+_m3.metric("CLOSED NET P/L", f"₹{_closed_net:,.0f}")
+_m4.metric("CLOSED WIN RATE", f"{(100*_wins/len(_closed_df)):.1f}%" if len(_closed_df) else "—", help="Based on closed paper trades after the estimated costs you entered; small samples are not statistically reliable.")
+if len(_closed_df):
+    st.markdown("**Closed trade history**")
+    _closed_cols = ["trade_id", "opened_at", "symbol", "expiry", "action", "lots", "entry_value", "exit_price", "exit_reason", "gross_pnl", "net_pnl", "closed_at"]
+    st.dataframe(_closed_df[_closed_cols].rename(columns={"trade_id":"ID", "opened_at":"Opened (IST)", "symbol":"Symbol", "expiry":"Expiry", "action":"Strategy", "lots":"Lots", "entry_value":"Entry spread value", "exit_price":"Exit spread value", "exit_reason":"Exit reason", "gross_pnl":"Gross P/L (₹)", "net_pnl":"Net P/L (₹)", "closed_at":"Closed (IST)"}), use_container_width=True, hide_index=True)
+st.download_button("Download paper-trading ledger (CSV)", data=_paper_df.to_csv(index=False).encode("utf-8"), file_name="fo_pro_paper_trades.csv", mime="text/csv", use_container_width=True)
+st.warning("Paper-trading results are estimates, not audited returns. Quotes may be delayed/stale, spread fills may not be achievable, and stop/target events between refreshes can be missed. The CSV is saved locally by this app instance; on Streamlit Cloud, local files may reset after a restart or redeployment, so download the ledger regularly.")
 
 # ============================================================
 # RESET RIGHT-SIDE ANALYZER SCROLL AFTER FULL RENDER
