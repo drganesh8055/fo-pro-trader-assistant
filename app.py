@@ -2922,14 +2922,20 @@ def build_defined_risk_spread(plan, action, option_chain, spot_price, expiry_val
         return None
 
     if is_credit:
-        sl = min(round(net + max_loss * 0.50, 2), round(width, 2))
+        # Conservative stop: close when the spread's buyback value reaches
+        # 1.5x the entry credit. Before costs/slippage, this limits the planned
+        # loss at the stop to roughly 0.5x the credit received, not 50% of the
+        # spread's much larger theoretical maximum loss.
+        sl = min(max(round(net * 1.50, 2), round(net + 0.01, 2)), round(width, 2))
         targets = [round(net * f, 2) for f in (0.70, 0.50, 0.30, 0.10)]
         targets = [max(0.01, x) for x in targets]
         risk_per_unit = max(sl-net, 0.01)
         rr1 = (net-targets[0])/risk_per_unit
         strategy_name = "BEAR CALL CREDIT SPREAD" if side == "CE" else "BULL PUT CREDIT SPREAD"
     else:
-        sl = round(max(net * 0.50, 0.01), 2)
+        # Debit spreads: stop after a 30% loss of the debit paid (instead of
+        # allowing the spread to lose 50% of its entry value).
+        sl = round(max(net * 0.70, 0.01), 2)
         targets = [round(net + max_profit*f, 2) for f in (0.35, 0.55, 0.75, 0.95)]
         risk_per_unit = max(net-sl, 0.01)
         rr1 = (targets[0]-net)/risk_per_unit
@@ -2957,6 +2963,8 @@ def build_defined_risk_spread(plan, action, option_chain, spot_price, expiry_val
     out.update({
         "action": strategy_name, "strategy_type": "CREDIT SPREAD" if is_credit else "DEBIT SPREAD",
         "entry": round(net, 2), "sl": sl,
+        "sl_loss_per_unit": round(max(sl-net, 0.0) if is_credit else max(net-sl, 0.0), 2),
+        "sl_loss_lot": round(max(sl-net, 0.0) * qty_for_risk if is_credit else max(net-sl, 0.0) * qty_for_risk, 2),
         "target1": targets[0], "target2": targets[1], "target3": targets[2], "target4": targets[3],
         "rr1": float(rr1), "rr2": float((net-targets[1])/risk_per_unit if is_credit else (targets[1]-net)/risk_per_unit),
         "rr3": float((net-targets[2])/risk_per_unit if is_credit else (targets[2]-net)/risk_per_unit),
@@ -2967,8 +2975,8 @@ def build_defined_risk_spread(plan, action, option_chain, spot_price, expiry_val
         "max_loss_per_unit": round(max_loss, 2), "max_profit_lot": round(max_profit*qty_for_risk, 2),
         "max_loss_lot": round(max_loss*qty_for_risk, 2), "is_credit_spread": bool(is_credit),
         "fail_reasons": list(out.get("fail_reasons", plan.get("fail_reasons") or [])),
-        "exit": (f"Defined-risk {strategy_name}: close both legs together. Planned max loss is approximately ₹{max_loss*safe_float(lot_size,1):,.0f} per lot before costs; exit if net spread value reaches {fmt_price(sl)} or the underlying invalidates the setup."
-                 if is_credit else f"Defined-risk {strategy_name}: close both legs together. Planned max loss is approximately ₹{net*safe_float(lot_size,1):,.0f} per lot before costs; exit if net spread value falls to {fmt_price(sl)} or the underlying invalidates the setup."),
+        "exit": (f"Defined-risk {strategy_name}: close both legs together. At the displayed stop, estimated loss is about ₹{max(sl-net,0.0)*safe_float(lot_size,1):,.0f} per lot before costs/slippage; theoretical maximum loss remains about ₹{max_loss*safe_float(lot_size,1):,.0f} per lot. Exit if spread value reaches {fmt_price(sl)} or the underlying invalidates the setup."
+                 if is_credit else f"Defined-risk {strategy_name}: close both legs together. At the displayed stop, estimated loss is about ₹{max(net-sl,0.0)*safe_float(lot_size,1):,.0f} per lot before costs/slippage; theoretical maximum loss remains about ₹{net*safe_float(lot_size,1):,.0f} per lot. Exit if spread value falls to {fmt_price(sl)} or the underlying invalidates the setup."),
         "trigger": str(plan.get("trigger", "")) + " Use both legs as one spread; never enter the short leg alone.",
     })
     # Revalidate both legs and fail closed on missing/crossed quotes.
@@ -3184,12 +3192,13 @@ def _build_neutral_four_leg_strategy(strategy_name, option_chain, spot_price, ex
             fails.append(f"model PoP {pop:.1f}% is below this strategy's {_strategy_min_pop:.0f}% minimum")
         if score < MIN_SCORE:
             fails.append(f"quality score {score:.0f}/100 is below {MIN_SCORE} minimum")
-        if strategy_name == "IRON CONDOR":
-            stop_loss = round(min(net_credit + max_loss*0.50, max_width), 2)
-            targets = [round(max(0.01, net_credit*f), 2) for f in (0.70,0.50,0.30,0.10)]
-        else:
-            stop_loss = round(min(net_credit + max_loss*0.50, max_width), 2)
-            targets = [round(max(0.01, net_credit*f), 2) for f in (0.70,0.50,0.30,0.10)]
+        # Tighter stop for both four-leg credit strategies: buy back all four
+        # legs when the total close value reaches 1.5x the credit collected.
+        # That plans to lose about half the credit, rather than half the much
+        # larger theoretical max loss. Actual exits can still slip/gap past it.
+        stop_loss = min(max(round(net_credit * 1.50, 2), round(net_credit + 0.01, 2)), round(max_width, 2))
+        stop_loss_loss_per_unit = max(stop_loss-net_credit, 0.0)
+        targets = [round(max(0.01, net_credit*f), 2) for f in (0.70,0.50,0.30,0.10)]
         qty = safe_float(lot_size,1)
         if not np.isfinite(qty) or qty<=0: qty=1.0
         first_ce_long = next((l for l in legs if l["side"]=="CE" and l["action"]=="BUY"), legs[-1])
@@ -3202,11 +3211,12 @@ def _build_neutral_four_leg_strategy(strategy_name, option_chain, spot_price, ex
             "pop":pop, "minimum_pop":_strategy_min_pop, "score":score, "alignment":2 if regime_norm=="RANGE" else 1,
             "readiness":"READY" if not fails else "NO TRADE", "fail_reasons":fails,
             "is_credit_spread":True, "legs":legs, "spread_width":max_width,
+            "sl_loss_per_unit":round(stop_loss_loss_per_unit,2), "sl_loss_lot":round(stop_loss_loss_per_unit*qty,2),
             "max_profit_per_unit":round(max_profit,2), "max_loss_per_unit":round(max_loss,2),
             "max_profit_lot":round(max_profit*qty,2), "max_loss_lot":round(max_loss*qty,2),
             "rr1":(net_credit-targets[0])/max(stop_loss-net_credit,0.01),
             "trigger":"Neutral/range setup only. Enter all four legs as one defined-risk strategy; never enter a naked short leg.",
-            "exit":f"Defined-risk {strategy_name}; close all four legs together. Estimated maximum loss ₹{max_loss*qty:,.0f} per lot before costs.",
+            "exit":f"Defined-risk {strategy_name}; close all four legs together. At the displayed stop, estimated loss is about ₹{stop_loss_loss_per_unit*qty:,.0f} per lot before costs/slippage; theoretical maximum loss remains about ₹{max_loss*qty:,.0f} per lot. The stop is advisory and does not auto-close the trade.",
             "volume":min([safe_float(r.get("CE Volume" if l["side"]=="CE" else "PE Volume"),0) for l,r in zip(legs,leg_rows)] or [0]),
             "delta":0.0, "iv":iv_value*100.0 if np.isfinite(iv_value) else np.nan,
             "long_entry":safe_float(first_ce_long.get("entry_price"),0), "short_entry":safe_float(first_ce_short.get("entry_price"),0),
@@ -3818,7 +3828,7 @@ if _details_plan and _engine_status(_details_action, _details_plan) == "PASS":
         _detail_table += f"<tr><td><b>{_label}</b></td><td>{_level_label}</td><td>{_result_html}</td><td>{_meaning}</td></tr>"
     _detail_table += "</tbody></table>"
     st.markdown(_detail_table, unsafe_allow_html=True)
-    st.caption("Simple rule: for a CREDIT spread, a lower spread value is usually better; for a DEBIT spread, a higher spread value is usually better. The current P/L is an estimate, not a guaranteed exit price. Percentages are measured against the entry premium, not your total account or broker margin.")
+    st.caption("Stop-loss approach: credit spreads and four-leg credit strategies plan to exit around 1.5x the entry credit; debit spreads plan to exit after a 30% decline in entry debit. These are advisory price levels, not guaranteed fills or automatic exits. For a CREDIT spread, a lower spread value is usually better; for a DEBIT spread, a higher spread value is usually better. P/L excludes costs and slippage.")
     st.warning("Margin shown is an estimate from the spread's theoretical risk/debit, not a live Upstox/broker margin quote. Actual funds blocked can differ by broker, exchange rules, charges and execution prices. Confirm margin in the order preview and place both legs as one defined-risk spread; do not place the short leg alone.")
     st.info(_details_plan.get("exit", "Close both legs together if the stop-loss or invalidation condition is reached."))
 
@@ -3881,7 +3891,9 @@ if decision != "NO TRADE" and best_plan:
         level_html += f"<div class='fo-level {cls}'><span>{title}</span><b>{value}</b><small>{note}</small>{pct_html}{lot_html}</div>"
     level_html += "</div>"
     st.markdown(level_html, unsafe_allow_html=True)
-    st.info(f"Defined-risk spread · Width {fmt_price(best_plan.get('spread_width'))} · Maximum planned loss {fmt_price(best_plan.get('max_loss_per_unit'))} per unit / {fmt_price(best_plan.get('max_loss_lot'))} per lot · Maximum profit {fmt_price(best_plan.get('max_profit_per_unit'))} per unit / {fmt_price(best_plan.get('max_profit_lot'))} per lot. Excludes brokerage, taxes, slippage and gaps; verify broker margin and both-leg execution before placing the order.")
+    _sl_loss_unit = safe_float(best_plan.get("sl_loss_per_unit"), max(safe_float(best_plan.get("sl"))-entry_value, 0.0) if is_sell else max(entry_value-safe_float(best_plan.get("sl")), 0.0))
+    _sl_loss_lot = safe_float(best_plan.get("sl_loss_lot"), _sl_loss_unit*lot_qty if lot_qty > 0 else np.nan)
+    st.info(f"Defined-risk spread · Width {fmt_price(best_plan.get('spread_width'))} · Estimated loss if SL is reached: {fmt_price(_sl_loss_unit)} per unit / {fmt_price(_sl_loss_lot)} per lot · Theoretical maximum loss if held to worst case: {fmt_price(best_plan.get('max_loss_per_unit'))} per unit / {fmt_price(best_plan.get('max_loss_lot'))} per lot · Maximum profit {fmt_price(best_plan.get('max_profit_per_unit'))} per unit / {fmt_price(best_plan.get('max_profit_lot'))} per lot. Actual loss can exceed the stop estimate due to gaps, slippage and charges; stops do not automatically close trades.")
     st.markdown(f"<div class='fo-exit'><div class='fo-exit-icon'>🚪</div><div><span>EXIT RULE</span><b>{best_plan.get('exit','Follow stop-loss and targets.')}</b></div></div>", unsafe_allow_html=True)
 else:
     st.markdown("<div class='fo-exit' style='margin-top:10px;'><div class='fo-exit-icon'>⛔</div><div><span>NO TRADE</span><b>No defined-risk two-leg spread passed live-quote, quality, liquidity and risk gates. No executable entry, SL or target is displayed.</b></div></div>", unsafe_allow_html=True)
