@@ -1,5 +1,4 @@
 import gzip
-import hmac
 import json
 import math
 import os
@@ -34,37 +33,7 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
-# If durable Supabase storage is enabled, require a password as well. The
-# Supabase service-role key must never be exposed to unauthenticated visitors,
-# because the app itself can read/write the shared paper-trade ledger.
-try:
-    _early_supabase_url = str(st.secrets.get("SUPABASE_URL", "")).strip()
-    _early_supabase_key = str(st.secrets.get("SUPABASE_SERVICE_ROLE_KEY", "")).strip()
-    _app_access_password = str(st.secrets.get("APP_ACCESS_PASSWORD", ""))
-except Exception:
-    _early_supabase_url = ""
-    _early_supabase_key = ""
-    _app_access_password = ""
-
-if _early_supabase_url and _early_supabase_key:
-    if not _app_access_password:
-        st.error(
-            "Persistent paper-trade storage is configured, but APP_ACCESS_PASSWORD is missing. "
-            "Add APP_ACCESS_PASSWORD to Streamlit Secrets before using the shared ledger."
-        )
-        st.stop()
-    if not st.session_state.get("_fo_pro_authenticated", False):
-        st.title("FO PRO Trader Assistant — Sign in")
-        with st.form("fo_pro_access_form"):
-            _entered_app_password = st.text_input("App password", type="password")
-            _login_submitted = st.form_submit_button("Sign in", type="primary")
-        if _login_submitted:
-            if hmac.compare_digest(_entered_app_password, _app_access_password):
-                st.session_state["_fo_pro_authenticated"] = True
-                st.rerun()
-            else:
-                st.error("Incorrect password. Please try again.")
-        st.stop()
+# App password login removed at the user's request.
 
 API_BASE = "https://api.upstox.com"
 
