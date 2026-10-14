@@ -1,5 +1,6 @@
 import gzip
 import json
+import html
 import math
 import os
 import uuid
@@ -3871,10 +3872,78 @@ else:
                     return "color: #667085; font-weight: 700;"
                 return "color: inherit;"
 
-            _simple_open_styled = _simple_open.reset_index(drop=True).style.map(
-                _paper_pl_text_color, subset=["Estimated P/L"]
-            )
-            st.table(_simple_open_styled)
+            # Clickable trade names jump to a detailed explanation of the exact saved spread.
+            _html_rows = []
+            for _trade_idx, _trade_row in _live_open_df.iterrows():
+                _tid = str(_trade_row.get("trade_id", ""))
+                _anchor = "paper-trade-" + "".join(ch for ch in _tid if ch.isalnum() or ch in "-_ ").replace(" ", "-")
+                _trade_label = f"{_trade_row.get('symbol', '')} · {str(_trade_row.get('action', '')).replace('_', ' ')}"
+                _pl = safe_float(_trade_row.get("net_pnl"), np.nan)
+                if np.isfinite(_pl):
+                    _pl_label = ("PROFIT · " if _pl > 0 else "LOSS · " if _pl < 0 else "BREAK-EVEN · ") + f"₹{abs(_pl):,.2f}"
+                    _pl_color = "#16803C" if _pl > 0 else "#D92D20" if _pl < 0 else "#667085"
+                else:
+                    _pl_label, _pl_color = "—", "#667085"
+                _vals = [
+                    f'<a href="#{html.escape(_anchor, quote=True)}" style="color:#2563eb;text-decoration:underline;font-weight:700">{html.escape(_trade_label)}</a>',
+                    html.escape(str(_trade_row.get("expiry", ""))),
+                    html.escape(f"{safe_float(_trade_row.get('lots'), 0):g}"),
+                    html.escape(f"₹{safe_float(_trade_row.get('entry_value'), np.nan):.2f}" if np.isfinite(safe_float(_trade_row.get('entry_value'), np.nan)) else "—"),
+                    html.escape(f"₹{safe_float(_trade_row.get('last_mark'), np.nan):.2f}" if np.isfinite(safe_float(_trade_row.get('last_mark'), np.nan)) else "—"),
+                    f'<span style="color:{_pl_color};font-weight:700">{html.escape(_pl_label)}</span>',
+                    html.escape(f"₹{safe_float(_trade_row.get('stop_loss'), np.nan):.2f}" if np.isfinite(safe_float(_trade_row.get('stop_loss'), np.nan)) else "—"),
+                    html.escape(f"₹{safe_float(_trade_row.get('target1'), np.nan):.2f}" if np.isfinite(safe_float(_trade_row.get('target1'), np.nan)) else "—"),
+                    html.escape(str(_trade_row.get("last_updated", "")).replace("T", " ")[:16]),
+                ]
+                _html_rows.append("<tr>" + "".join(f"<td style='padding:8px;border-bottom:1px solid #e5e7eb;vertical-align:top'>{v}</td>" for v in _vals) + "</tr>")
+            _headers = ["Trade (click to view details)", "Expiry", "Lots", "Entry price", "Current price*", "Estimated P/L", "Stop-loss price", "Target 1 price", "Last updated"]
+            _html_table = "<div style='overflow-x:auto'><table style='width:100%;border-collapse:collapse;font-size:0.88rem'><thead><tr>" + "".join(f"<th style='text-align:left;padding:8px;border-bottom:2px solid #98a2b3'>{html.escape(h)}</th>" for h in _headers) + "</tr></thead><tbody>" + "".join(_html_rows) + "</tbody></table></div>"
+            st.markdown(_html_table, unsafe_allow_html=True)
+            st.markdown("**Trade details — click a trade name above to jump to its details**")
+            for _trade_idx, _trade_row in _live_open_df.iterrows():
+                _tid = str(_trade_row.get("trade_id", ""))
+                _anchor = "paper-trade-" + "".join(ch for ch in _tid if ch.isalnum() or ch in "-_ ").replace(" ", "-")
+                _symbol = html.escape(str(_trade_row.get("symbol", "")))
+                _action = html.escape(str(_trade_row.get("action", "")).replace("_", " "))
+                _side = html.escape(str(_trade_row.get("side", "CE")))
+                _expiry = html.escape(str(_trade_row.get("expiry", "")))
+                _long = safe_float(_trade_row.get("long_strike"), np.nan)
+                _short = safe_float(_trade_row.get("short_strike"), np.nan)
+                _is_credit = str(_trade_row.get("is_credit_spread", "False")).lower() in ("true", "1", "yes")
+                _spread_kind = "CREDIT spread (premium received at entry)" if _is_credit else "DEBIT spread (premium paid at entry)"
+                _entry = safe_float(_trade_row.get("entry_value"), np.nan)
+                _mark = safe_float(_trade_row.get("last_mark"), np.nan)
+                _pnl = safe_float(_trade_row.get("net_pnl"), np.nan)
+                _pnl_color = "#16803C" if _pnl > 0 else "#D92D20" if _pnl < 0 else "#667085"
+                _opened = html.escape(str(_trade_row.get("opened_at", "")).replace("T", " "))
+                _updated = html.escape(str(_trade_row.get("last_updated", "")).replace("T", " "))
+                _status = html.escape(str(_trade_row.get("status", "OPEN")))
+                _pop = safe_float(_trade_row.get("model_pop"), np.nan)
+                _quality = safe_float(_trade_row.get("quality_score"), np.nan)
+                _lots = safe_float(_trade_row.get("lots"), 0)
+                _lot_size = safe_float(_trade_row.get("lot_size"), 0)
+                _qty = safe_float(_trade_row.get("quantity"), 0)
+                _costs = safe_float(_trade_row.get("cost_per_lot"), 0) * _lots
+                _details = [
+                    f"<div id='{html.escape(_anchor, quote=True)}' style='padding:14px;margin:14px 0;border:1px solid #98a2b3;border-radius:10px;scroll-margin-top:80px'>",
+                    f"<h4 style='margin:0 0 8px 0'>{_symbol} · {_action}</h4>",
+                    f"<p><b>Trade ID:</b> {html.escape(_tid)} · <b>Status:</b> {_status} · <b>Expiry:</b> {_expiry}</p>",
+                    f"<p><b>Strategy type:</b> {_spread_kind} · <b>Option type:</b> {_side}</p>",
+                    "<p><b>Exact spread legs</b></p><ul>",
+                    f"<li><b>BUY</b> {_side} strike {(_long if np.isfinite(_long) else float('nan')):g} — long leg</li>" if np.isfinite(_long) else f"<li><b>BUY</b> {_side} long leg — strike unavailable in saved record</li>",
+                    f"<li><b>SELL</b> {_side} strike {(_short if np.isfinite(_short) else float('nan')):g} — short leg</li>" if np.isfinite(_short) else f"<li><b>SELL</b> {_side} short leg — strike unavailable in saved record</li>",
+                    "</ul>",
+                    f"<p><b>Position size:</b> {_lots:g} lot(s) × {_lot_size:g} quantity per lot = {_qty:g} total quantity.</p>",
+                    f"<p><b>Entry spread value:</b> {('₹'+format(_entry, '.2f')) if np.isfinite(_entry) else '—'} · <b>Latest estimated close value:</b> {('₹'+format(_mark, '.2f')) if np.isfinite(_mark) else '—'}</p>",
+                    f"<p><b>Estimated net P/L:</b> <span style='color:{_pnl_color};font-weight:700'>{(('PROFIT · ' if _pnl > 0 else 'LOSS · ' if _pnl < 0 else 'BREAK-EVEN · ') + '₹' + format(abs(_pnl), ',.2f')) if np.isfinite(_pnl) else '—'}</span> · <b>Estimated costs entered:</b> ₹{_costs:,.2f}</p>",
+                    f"<p><b>Stop-loss spread value:</b> {('₹'+format(safe_float(_trade_row.get('stop_loss'), np.nan), '.2f')) if np.isfinite(safe_float(_trade_row.get('stop_loss'), np.nan)) else '—'} · <b>Target 1:</b> {('₹'+format(safe_float(_trade_row.get('target1'), np.nan), '.2f')) if np.isfinite(safe_float(_trade_row.get('target1'), np.nan)) else '—'} · <b>Target 2:</b> {('₹'+format(safe_float(_trade_row.get('target2'), np.nan), '.2f')) if np.isfinite(safe_float(_trade_row.get('target2'), np.nan)) else '—'}</p>",
+                    f"<p><b>Model-estimated PoP:</b> {(_pop if np.isfinite(_pop) else float('nan')):.1f}%" if np.isfinite(_pop) else "<p><b>Model-estimated PoP:</b> —",
+                    f" · <b>Quality score:</b> {(_quality if np.isfinite(_quality) else float('nan')):.0f}/100</p>" if np.isfinite(_quality) else " · <b>Quality score:</b> —</p>",
+                    f"<p><b>Recorded at:</b> {_opened} · <b>Last quote update:</b> {_updated}</p>",
+                    "<p style='margin-bottom:0;color:#667085'>These are virtual paper-trade details only. Quotes and P/L are estimates; no broker order is placed, and stop-loss/target levels do not automatically close this trade.</p>",
+                    "</div>",
+                ]
+                st.markdown("".join(_details), unsafe_allow_html=True)
             st.caption("*Current price is the latest recorded estimated cost to close the spread, not a guaranteed execution price. For credit spreads, lower is usually better; for debit spreads, higher is usually better. P/L is estimated after the costs entered in the app.")
             st.caption("This table alone refreshes about every 60 seconds while the app tab is open. Other app sections do not refresh on this timer. Quotes may be delayed or unavailable; a failed refresh keeps the last valid mark. Stop-loss/target touches between updates can be missed, and the app never closes a trade automatically.")
             for _live_refresh_error in _live_refresh_errors:
