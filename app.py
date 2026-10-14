@@ -1655,7 +1655,7 @@ PAPER_COLUMNS = [
     "long_strike", "short_strike", "entry_value", "stop_loss", "target1", "target2",
     "target3", "target4", "lot_size", "lots", "quantity", "cost_per_lot",
     "status", "last_mark", "last_updated", "exit_price", "exit_reason", "closed_at",
-    "gross_pnl", "net_pnl", "model_pop", "quality_score",
+    "gross_pnl", "net_pnl", "model_pop", "quality_score", "strategy_kind", "legs_json",
 ]
 
 
@@ -1728,7 +1728,7 @@ def _normalize_paper_ledger(frame):
         frame[col] = pd.to_numeric(frame[col], errors="coerce").astype(float)
     text_cols = [
         "trade_id", "opened_at", "symbol", "expiry", "action", "side",
-        "status", "last_updated", "exit_reason", "closed_at",
+        "status", "last_updated", "exit_reason", "closed_at", "strategy_kind", "legs_json",
     ]
     for col in text_cols:
         frame[col] = frame[col].fillna("").astype(object)
@@ -1782,23 +1782,50 @@ def _save_paper_ledger(frame):
     frame.to_csv(path, index=False)
 
 
-def _paper_current_spread_mark(chain_frame, side, long_strike, short_strike, is_credit):
-    """Executable-side liquidation estimate from current bid/ask; no LTP fallback."""
+def _paper_current_trade_mark(chain_frame, trade):
+    """Executable-side close estimate for legacy verticals and saved multi-leg strategies."""
     try:
-        long_row = nearest_row(chain_frame, float(long_strike))
-        short_row = nearest_row(chain_frame, float(short_strike))
+        raw_legs = str(trade.get("legs_json", "") or "").strip()
+        legs = json.loads(raw_legs) if raw_legs and raw_legs not in ("nan", "None", "[]") else []
+        if isinstance(legs, list) and len(legs) >= 3:
+            close_value = 0.0
+            for leg in legs:
+                side = str(leg.get("side", "CE"))
+                strike = safe_float(leg.get("strike"), np.nan)
+                action = str(leg.get("action", "")).upper()
+                row = nearest_row(chain_frame, strike)
+                if row is None or side not in {"CE", "PE"}:
+                    return np.nan
+                # To close: buy back a short at ask; sell a long at bid.
+                quote_col = f"{side} {'Ask' if action == 'SELL' else 'Bid'}"
+                px = safe_float(row.get(quote_col), np.nan)
+                if not np.isfinite(px) or px <= 0:
+                    return np.nan
+                close_value += px if action == "SELL" else -px
+            return float(max(close_value, 0.0))
+
+        side = str(trade.get("side", "CE"))
+        long_row = nearest_row(chain_frame, float(trade.get("long_strike")))
+        short_row = nearest_row(chain_frame, float(trade.get("short_strike")))
         if long_row is None or short_row is None:
             return np.nan
         long_bid = safe_float(long_row.get(f"{side} Bid"))
         short_ask = safe_float(short_row.get(f"{side} Ask"))
         if not np.isfinite(long_bid) or not np.isfinite(short_ask) or long_bid <= 0 or short_ask <= 0:
             return np.nan
-        mark = (short_ask - long_bid) if bool(is_credit) else (long_bid - short_ask)
-        if not np.isfinite(mark):
-            return np.nan
-        return float(max(mark, 0.0))
+        is_credit = str(trade.get("is_credit_spread", "False")).lower() in ("true", "1", "yes")
+        mark = (short_ask - long_bid) if is_credit else (long_bid - short_ask)
+        return float(max(mark, 0.0)) if np.isfinite(mark) else np.nan
     except Exception:
         return np.nan
+
+
+def _paper_current_spread_mark(chain_frame, side, long_strike, short_strike, is_credit):
+    """Compatibility wrapper retained for existing callers."""
+    return _paper_current_trade_mark(chain_frame, {
+        "side": side, "long_strike": long_strike, "short_strike": short_strike,
+        "is_credit_spread": is_credit,
+    })
 
 
 def _update_paper_trades_for_snapshot(frame, symbol_value, expiry_value, chain_frame, timestamp):
@@ -1811,10 +1838,7 @@ def _update_paper_trades_for_snapshot(frame, symbol_value, expiry_value, chain_f
             continue
         if str(trade.get("symbol", "")) != str(symbol_value) or str(trade.get("expiry", "")) != str(expiry_value):
             continue
-        mark = _paper_current_spread_mark(
-            chain_frame, str(trade.get("side", "CE")), trade.get("long_strike"),
-            trade.get("short_strike"), str(trade.get("is_credit_spread", "False")).lower() in ("true", "1", "yes"),
-        )
+        mark = _paper_current_trade_mark(chain_frame, trade)
         if not np.isfinite(mark):
             continue
         is_credit = str(trade.get("is_credit_spread", "False")).lower() in ("true", "1", "yes")
@@ -2968,7 +2992,9 @@ put_buy = build_defined_risk_spread(put_buy, "PUT BUY", chain, spot, selected_ex
 put_sell = build_defined_risk_spread(put_sell, "PUT SELL", chain, spot, selected_expiry)
 
 # ============================================================
-# FINAL 5-WAY DECISION
+# FINAL 5-WAY DECISION — deliberately limited to the original four candidates.
+# Supplemental neutral strategies are evaluated separately below and cannot
+# override this primary decision without a future explicit, validated change.
 # ============================================================
 MIN_SCORE = 65
 MIN_POP = 55
@@ -3015,6 +3041,184 @@ else:
     # label it as a recommendation.
     available = [(safe_float(p.get("score"), 0), action, p) for action, p in strategy_plans.items() if p]
     best_plan = max(available, key=lambda x: x[0])[2] if available else None
+
+# ============================================================
+# SUPPLEMENTAL NEUTRAL STRATEGIES — ISOLATED FROM THE EXISTING MAIN DECISION
+# ============================================================
+def _build_neutral_four_leg_strategy(strategy_name, option_chain, spot_price, expiry_value, regime_value):
+    """Build a live-quote-only Iron Condor or Iron Butterfly; never alters primary selection."""
+    if option_chain is None or option_chain.empty or not np.isfinite(safe_float(spot_price)) or spot_price <= 0:
+        return None
+    try:
+        strikes = sorted(float(x) for x in option_chain["Strike"].dropna().unique() if np.isfinite(safe_float(x)))
+        if len(strikes) < 5:
+            return None
+        gaps = [b-a for a,b in zip(strikes, strikes[1:]) if b>a]
+        if not gaps:
+            return None
+        min_gap = min(gaps)
+        width_goal = max(float(spot_price) * (0.03 if strategy_name == "IRON BUTTERFLY" else 0.01), min_gap)
+        # Place condor shorts relative to the option-implied expected move, not a
+        # fixed 1% offset that would often create an unrealistically narrow range.
+        _expiry_dt_for_strikes = datetime.combine(datetime.strptime(str(expiry_value)[:10], "%Y-%m-%d").date(), datetime.strptime("15:30", "%H:%M").time()).replace(tzinfo=ZoneInfo("Asia/Kolkata"))
+        _now_dt_for_strikes = datetime.now(ZoneInfo("Asia/Kolkata"))
+        _years_for_strikes = max((_expiry_dt_for_strikes-_now_dt_for_strikes).total_seconds()/(365.0*24*60*60), 0.0)
+        _chain_ivs = [safe_float(v, np.nan) for col in ("CE IV", "PE IV") if col in option_chain.columns for v in option_chain[col].tolist()]
+        _chain_ivs = [v for v in _chain_ivs if np.isfinite(v) and v > 0]
+        _iv_for_strikes = float(np.mean(_chain_ivs)) if _chain_ivs else np.nan
+        if np.isfinite(_iv_for_strikes) and _iv_for_strikes > 3.0:
+            _iv_for_strikes /= 100.0
+        legs = []
+        if strategy_name == "IRON CONDOR":
+            if _expiry_dt_for_strikes <= _now_dt_for_strikes or not np.isfinite(_iv_for_strikes):
+                return None
+            offset = max(float(spot_price) * 0.02, float(spot_price) * _iv_for_strikes * math.sqrt(max(_years_for_strikes, 0.0)) * 0.85, min_gap)
+            put_candidates = [x for x in strikes if x < spot_price]
+            call_candidates = [x for x in strikes if x > spot_price]
+            if not put_candidates or not call_candidates:
+                return None
+            short_put = min(put_candidates, key=lambda x: abs((spot_price-x)-offset))
+            short_call = min(call_candidates, key=lambda x: abs((x-spot_price)-offset))
+            long_put_candidates = [x for x in strikes if x < short_put and (short_put-x) >= width_goal*0.75]
+            long_call_candidates = [x for x in strikes if x > short_call and (x-short_call) >= width_goal*0.75]
+            if not long_put_candidates or not long_call_candidates:
+                return None
+            long_put = min(long_put_candidates, key=lambda x: abs((short_put-x)-width_goal))
+            long_call = min(long_call_candidates, key=lambda x: abs((x-short_call)-width_goal))
+            legs = [
+                {"action":"BUY", "side":"PE", "strike":long_put},
+                {"action":"SELL", "side":"PE", "strike":short_put},
+                {"action":"SELL", "side":"CE", "strike":short_call},
+                {"action":"BUY", "side":"CE", "strike":long_call},
+            ]
+            short_low, short_high = short_put, short_call
+        elif strategy_name == "IRON BUTTERFLY":
+            center = min(strikes, key=lambda x: abs(x-float(spot_price)))
+            put_wings = [x for x in strikes if x < center and (center-x) >= width_goal*0.75]
+            call_wings = [x for x in strikes if x > center and (x-center) >= width_goal*0.75]
+            if not put_wings or not call_wings:
+                return None
+            long_put = min(put_wings, key=lambda x: abs((center-x)-width_goal))
+            long_call = min(call_wings, key=lambda x: abs((x-center)-width_goal))
+            legs = [
+                {"action":"BUY", "side":"PE", "strike":long_put},
+                {"action":"SELL", "side":"PE", "strike":center},
+                {"action":"SELL", "side":"CE", "strike":center},
+                {"action":"BUY", "side":"CE", "strike":long_call},
+            ]
+            short_low, short_high = center, center
+        else:
+            return None
+
+        net_credit = 0.0
+        ivs = []
+        leg_rows = []
+        for leg in legs:
+            row = nearest_row(option_chain, leg["strike"])
+            if row is None:
+                return None
+            side = leg["side"]
+            bid = safe_float(row.get(f"{side} Bid"), np.nan)
+            ask = safe_float(row.get(f"{side} Ask"), np.nan)
+            if not np.isfinite(bid) or not np.isfinite(ask) or bid <= 0 or ask <= 0 or ask < bid:
+                return None
+            mid = (bid+ask)/2.0
+            if mid <= 0 or (ask-bid)/mid*100.0 > 4.0:
+                return None
+            leg["entry_price"] = round(bid if leg["action"] == "SELL" else ask, 2)
+            net_credit += bid if leg["action"] == "SELL" else -ask
+            iv = safe_float(row.get(f"{side} IV"), np.nan)
+            if np.isfinite(iv) and iv > 0:
+                ivs.append(iv)
+            leg_rows.append(row)
+        if not np.isfinite(net_credit) or net_credit <= 0:
+            return None
+        put_width = abs(float(legs[1]["strike"])-float(legs[0]["strike"]))
+        call_width = abs(float(legs[3]["strike"])-float(legs[2]["strike"]))
+        max_width = max(put_width, call_width)
+        max_profit = net_credit
+        max_loss = max_width-net_credit
+        if max_loss <= 0:
+            return None
+        if len(ivs) != 4:
+            iv_value = np.nan
+        else:
+            iv_value = float(np.mean(ivs))
+            if iv_value > 3.0:
+                iv_value /= 100.0
+        expiry_dt = datetime.combine(datetime.strptime(str(expiry_value)[:10], "%Y-%m-%d").date(), datetime.strptime("15:30", "%H:%M").time()).replace(tzinfo=ZoneInfo("Asia/Kolkata"))
+        now_dt = datetime.now(ZoneInfo("Asia/Kolkata"))
+        if expiry_dt <= now_dt or not np.isfinite(iv_value) or iv_value <= 0:
+            pop = np.nan
+        else:
+            years = (expiry_dt-now_dt).total_seconds()/(365.0*24*60*60)
+            vol_time = iv_value*math.sqrt(years)
+            drift = 0.065-0.5*iv_value*iv_value
+            def _prob_below(level):
+                if level <= 0 or vol_time <= 0:
+                    return 0.0
+                z=(math.log(float(level)/float(spot_price))-drift*years)/vol_time
+                return _normal_cdf(z)
+            if strategy_name == "IRON CONDOR":
+                lower_be = float(short_low)-net_credit
+                upper_be = float(short_high)+net_credit
+            else:
+                center=float(short_low)
+                lower_be=center-net_credit
+                upper_be=center+net_credit
+            pop=float(np.clip((_prob_below(upper_be)-_prob_below(lower_be))*100.0,0.0,100.0))
+        regime_norm = str(regime_value or "MIXED").upper()
+        regime_score = {"RANGE":78, "MIXED":68, "HIGH VOLATILITY":48, "TRENDING UP":45, "TRENDING DOWN":45, "BREAKOUT":35, "BREAKDOWN":35}.get(regime_norm, 55)
+        if strategy_name == "IRON BUTTERFLY" and regime_norm != "RANGE":
+            regime_score = min(regime_score, 58)
+        if not np.isfinite(pop):
+            score = 0.0
+            fails = ["model PoP unavailable: valid live IV and future expiry required"]
+        else:
+            score = float(np.clip(regime_score*0.65 + min(pop,100)*0.35, 0, 100))
+            fails = []
+        if regime_norm not in {"RANGE", "MIXED"}:
+            fails.append(f"market regime {regime_norm} is not preferred for this neutral strategy")
+        _strategy_min_pop = 55 if strategy_name == "IRON CONDOR" else 40
+        if np.isfinite(pop) and pop < _strategy_min_pop:
+            fails.append(f"model PoP {pop:.1f}% is below this strategy's {_strategy_min_pop:.0f}% minimum")
+        if score < MIN_SCORE:
+            fails.append(f"quality score {score:.0f}/100 is below {MIN_SCORE} minimum")
+        if strategy_name == "IRON CONDOR":
+            stop_loss = round(min(net_credit + max_loss*0.50, max_width), 2)
+            targets = [round(max(0.01, net_credit*f), 2) for f in (0.70,0.50,0.30,0.10)]
+        else:
+            stop_loss = round(min(net_credit + max_loss*0.50, max_width), 2)
+            targets = [round(max(0.01, net_credit*f), 2) for f in (0.70,0.50,0.30,0.10)]
+        qty = safe_float(lot_size,1)
+        if not np.isfinite(qty) or qty<=0: qty=1.0
+        first_ce_long = next((l for l in legs if l["side"]=="CE" and l["action"]=="BUY"), legs[-1])
+        first_ce_short = next((l for l in legs if l["side"]=="CE" and l["action"]=="SELL"), legs[2])
+        return {
+            "action":strategy_name, "strategy_type":"FOUR-LEG CREDIT STRATEGY", "strategy_kind":strategy_name,
+            "side":"CE", "strike":float(spot_price), "long_strike":float(first_ce_long["strike"]),
+            "short_strike":float(first_ce_short["strike"]), "entry":round(net_credit,2), "sl":stop_loss,
+            "target1":targets[0], "target2":targets[1], "target3":targets[2], "target4":targets[3],
+            "pop":pop, "minimum_pop":_strategy_min_pop, "score":score, "alignment":2 if regime_norm=="RANGE" else 1,
+            "readiness":"READY" if not fails else "NO TRADE", "fail_reasons":fails,
+            "is_credit_spread":True, "legs":legs, "spread_width":max_width,
+            "max_profit_per_unit":round(max_profit,2), "max_loss_per_unit":round(max_loss,2),
+            "max_profit_lot":round(max_profit*qty,2), "max_loss_lot":round(max_loss*qty,2),
+            "rr1":(net_credit-targets[0])/max(stop_loss-net_credit,0.01),
+            "trigger":"Neutral/range setup only. Enter all four legs as one defined-risk strategy; never enter a naked short leg.",
+            "exit":f"Defined-risk {strategy_name}; close all four legs together. Estimated maximum loss ₹{max_loss*qty:,.0f} per lot before costs.",
+            "volume":min([safe_float(r.get("CE Volume" if l["side"]=="CE" else "PE Volume"),0) for l,r in zip(legs,leg_rows)] or [0]),
+            "delta":0.0, "iv":iv_value*100.0 if np.isfinite(iv_value) else np.nan,
+            "long_entry":safe_float(first_ce_long.get("entry_price"),0), "short_entry":safe_float(first_ce_short.get("entry_price"),0),
+        }
+    except Exception:
+        return None
+
+supplemental_strategy_plans = {
+    "IRON CONDOR": _build_neutral_four_leg_strategy("IRON CONDOR", chain, spot, selected_expiry, regime),
+    "IRON BUTTERFLY": _build_neutral_four_leg_strategy("IRON BUTTERFLY", chain, spot, selected_expiry, regime),
+}
+all_strategy_plans = {**strategy_plans, **supplemental_strategy_plans}
 
 # ============================================================
 # BEGINNER SAFETY + EXPLAINABILITY LAYER
@@ -3425,22 +3629,31 @@ section[data-testid="stSidebar"] .stCaption { color:#64748b !important; }
 
 # Render each strategy card and its action directly together. This keeps the
 # View Details button immediately below the corresponding PASS/SELECTED trade.
-_engine_order = ["CALL BUY", "CALL SELL", "PUT BUY", "PUT SELL"]
-_engine_rows = [st.columns(2), st.columns(2)]
+_engine_order = ["CALL BUY", "CALL SELL", "PUT BUY", "PUT SELL", "IRON CONDOR", "IRON BUTTERFLY"]
+_engine_rows = [st.columns(2) for _ in range((len(_engine_order) + 1) // 2)]
 
 def _engine_status(action_name, candidate_plan):
     if not candidate_plan:
         return "NO DATA"
-    if action_name == decision:
-        return "SELECTED"
+    if action_name in strategy_plans:
+        if action_name == decision:
+            return "SELECTED"
+        # Preserve the existing PASS calculation for the original four strategies.
+        if (not candidate_plan.get("fail_reasons") and
+            safe_float(candidate_plan.get("score"), 0) >= MIN_SCORE and
+            safe_float(candidate_plan.get("pop"), 0) >= MIN_POP):
+            return "PASS"
+        return "REJECTED"
+    # Supplemental strategies use their own explicit strategy-specific PoP floor.
     if (not candidate_plan.get("fail_reasons") and
         safe_float(candidate_plan.get("score"), 0) >= MIN_SCORE and
-        safe_float(candidate_plan.get("pop"), 0) >= MIN_POP):
+        safe_float(candidate_plan.get("pop"), 0) >= safe_float(candidate_plan.get("minimum_pop"), MIN_POP) and
+        candidate_plan.get("readiness") == "READY"):
         return "PASS"
     return "REJECTED"
 
 for _idx, _action in enumerate(_engine_order):
-    _plan = strategy_plans.get(_action)
+    _plan = all_strategy_plans.get(_action)
     _status = _engine_status(_action, _plan)
     _col = _engine_rows[_idx // 2][_idx % 2]
     with _col:
@@ -3469,7 +3682,7 @@ for _idx, _action in enumerate(_engine_order):
         # misleading “details unavailable” message.
 
 _details_action = st.session_state.get("fo_pass_details_action")
-_details_plan = strategy_plans.get(_details_action) if _details_action else None
+_details_plan = all_strategy_plans.get(_details_action) if _details_action else None
 if _details_plan and _engine_status(_details_action, _details_plan) == "PASS":
     st.markdown("<div class='fo-section'>PASS STRATEGY · TRADE DETAILS</div>", unsafe_allow_html=True)
     _is_credit = bool(_details_plan.get("is_credit_spread", False))
@@ -3489,17 +3702,31 @@ if _details_plan and _engine_status(_details_action, _details_plan) == "PASS":
       <div class='fo-plan-pop'>ENTRY ₹{_unit_entry:,.2f}</div>
     </div>
     """, unsafe_allow_html=True)
-    _leg1_action = "SELL" if _is_credit else "BUY"
-    _leg2_action = "BUY" if _is_credit else "SELL"
-    _leg1_strike = safe_float(_details_plan.get("short_strike"), 0) if _is_credit else safe_float(_details_plan.get("long_strike"), 0)
-    _leg2_strike = safe_float(_details_plan.get("long_strike"), 0) if _is_credit else safe_float(_details_plan.get("short_strike"), 0)
-    _leg1_price = safe_float(_details_plan.get("short_entry"), 0) if _is_credit else safe_float(_details_plan.get("long_entry"), 0)
-    _leg2_price = safe_float(_details_plan.get("long_entry"), 0) if _is_credit else safe_float(_details_plan.get("short_entry"), 0)
+    _extra_legs = _details_plan.get("legs") or []
+    if _extra_legs:
+        _legs_html = "".join(
+            f"<div class='fo-level entry'><span>LEG {i+1} · {html.escape(str(leg.get('action','')))}</span><b>{safe_float(leg.get('strike'),0):.0f} {html.escape(str(leg.get('side','')))}</b><small>Quoted premium ₹{safe_float(leg.get('entry_price'),0):,.2f}</small></div>"
+            for i, leg in enumerate(_extra_legs)
+        )
+        _contract_text = " · ".join(f"{leg.get('action')} {safe_float(leg.get('strike'),0):.0f} {leg.get('side')}" for leg in _extra_legs)
+    else:
+        _leg1_action = "SELL" if _is_credit else "BUY"
+        _leg2_action = "BUY" if _is_credit else "SELL"
+        _leg1_strike = safe_float(_details_plan.get("short_strike"), 0) if _is_credit else safe_float(_details_plan.get("long_strike"), 0)
+        _leg2_strike = safe_float(_details_plan.get("long_strike"), 0) if _is_credit else safe_float(_details_plan.get("short_strike"), 0)
+        _leg1_price = safe_float(_details_plan.get("short_entry"), 0) if _is_credit else safe_float(_details_plan.get("long_entry"), 0)
+        _leg2_price = safe_float(_details_plan.get("long_entry"), 0) if _is_credit else safe_float(_details_plan.get("short_entry"), 0)
+        _legs_html = f"<div class='fo-level entry'><span>LEG 1 · {_leg1_action}</span><b>{_leg1_strike:.0f} {_opt_side}</b><small>Quoted premium ₹{_leg1_price:,.2f}</small></div><div class='fo-level entry'><span>LEG 2 · {_leg2_action}</span><b>{_leg2_strike:.0f} {_opt_side}</b><small>Quoted premium ₹{_leg2_price:,.2f}</small></div>"
+        _contract_text = f"{_leg1_action} {_leg1_strike:.0f} {_opt_side} / {_leg2_action} {_leg2_strike:.0f} {_opt_side}"
     st.markdown(f"""
-    <div class='fo-levels'>
-      <div class='fo-level entry'><span>LEG 1 · {_leg1_action}</span><b>{_leg1_strike:.0f} {_opt_side}</b><small>Quoted premium ₹{_leg1_price:,.2f}</small></div>
-      <div class='fo-level entry'><span>LEG 2 · {_leg2_action}</span><b>{_leg2_strike:.0f} {_opt_side}</b><small>Quoted premium ₹{_leg2_price:,.2f}</small></div>
-      <div class='fo-level'><span>EST. CAPITAL / MARGIN</span><b>₹{_estimated_margin:,.0f}</b><small>{'Defined-risk max-loss estimate for credit spread' if _is_credit else 'Net debit paid for debit spread'} · 1 lot</small></div>
+    <div class='fo-plan-head'>
+      <div><div class='fo-plan-action'>{html.escape(str(_details_plan.get('action', _details_action)))}</div>
+      <div class='fo-plan-contract'>{html.escape(_contract_text)}</div>
+      <div style='font-size:13px;color:#475569;margin-top:5px;'>Expiry {_expiry_text} · {int(_lot_qty) if _lot_qty > 0 else '—'} units per lot · {safe_float(_details_plan.get('pop'), 0):.1f}% model PoP · Quality {safe_float(_details_plan.get('score'), 0):.0f}/100</div></div>
+      <div class='fo-plan-pop'>ENTRY ₹{_unit_entry:,.2f}</div>
+    </div>
+    <div class='fo-levels'>{_legs_html}
+      <div class='fo-level'><span>EST. CAPITAL / MARGIN</span><b>₹{_estimated_margin:,.0f}</b><small>{'Defined-risk max-loss estimate for credit strategy' if _is_credit else 'Net debit paid for debit spread'} · 1 lot</small></div>
       <div class='fo-level'><span>MAX PROFIT · 1 LOT</span><b>₹{_max_profit_lot:,.0f}</b><small>Before costs</small></div>
       <div class='fo-level'><span>MAX LOSS · 1 LOT</span><b>₹{_max_loss_lot:,.0f}</b><small>Theoretical defined risk before costs</small></div>
     </div>
@@ -3511,32 +3738,32 @@ if _details_plan and _engine_status(_details_action, _details_plan) == "PASS":
     _current_value = np.nan
     _current_source = "Live bid/ask estimate"
     try:
-        _side_prefix = "CE" if _details_plan.get("side") == "CE" else "PE"
-        _current_short_row = nearest_row(chain, safe_float(_details_plan.get("short_strike"), np.nan))
-        _current_long_row = nearest_row(chain, safe_float(_details_plan.get("long_strike"), np.nan))
-        if _current_short_row is not None and _current_long_row is not None:
-            if _is_credit:
-                # Close a credit spread by buying back the short leg and selling the hedge.
-                _close_short = safe_float(_current_short_row.get(f"{_side_prefix} Ask"), np.nan)
-                _close_long = safe_float(_current_long_row.get(f"{_side_prefix} Bid"), np.nan)
-                if np.isfinite(_close_short) and _close_short > 0 and np.isfinite(_close_long) and _close_long > 0:
-                    _current_value = max(_close_short - _close_long, 0.0)
+        if _extra_legs:
+            _current_value = 0.0
+            for _leg in _extra_legs:
+                _leg_row = nearest_row(chain, safe_float(_leg.get("strike"), np.nan))
+                _leg_quote = safe_float(_leg_row.get(f"{_leg.get('side')} {'Ask' if _leg.get('action') == 'SELL' else 'Bid'}"), np.nan) if _leg_row is not None else np.nan
+                if not np.isfinite(_leg_quote) or _leg_quote <= 0:
+                    _current_value = np.nan
+                    break
+                _current_value += _leg_quote if _leg.get("action") == "SELL" else -_leg_quote
+            if np.isfinite(_current_value):
+                _current_value = max(_current_value, 0.0)
+        else:
+            _side_prefix = "CE" if _details_plan.get("side") == "CE" else "PE"
+            _current_short_row = nearest_row(chain, safe_float(_details_plan.get("short_strike"), np.nan))
+            _current_long_row = nearest_row(chain, safe_float(_details_plan.get("long_strike"), np.nan))
+            if _current_short_row is not None and _current_long_row is not None:
+                if _is_credit:
+                    _close_short = safe_float(_current_short_row.get(f"{_side_prefix} Ask"), np.nan)
+                    _close_long = safe_float(_current_long_row.get(f"{_side_prefix} Bid"), np.nan)
+                    if np.isfinite(_close_short) and _close_short > 0 and np.isfinite(_close_long) and _close_long > 0:
+                        _current_value = max(_close_short - _close_long, 0.0)
                 else:
-                    _ltp_short = safe_float(_current_short_row.get(f"{_side_prefix} LTP"), np.nan)
-                    _ltp_long = safe_float(_current_long_row.get(f"{_side_prefix} LTP"), np.nan)
-                    _current_value = max(_ltp_short - _ltp_long, 0.0) if np.isfinite(_ltp_short) and _ltp_short > 0 and np.isfinite(_ltp_long) and _ltp_long > 0 else np.nan
-                    _current_source = "Indicative LTP estimate"
-            else:
-                # Close a debit spread by selling the long leg and buying back the short leg.
-                _close_long = safe_float(_current_long_row.get(f"{_side_prefix} Bid"), np.nan)
-                _close_short = safe_float(_current_short_row.get(f"{_side_prefix} Ask"), np.nan)
-                if np.isfinite(_close_long) and _close_long > 0 and np.isfinite(_close_short) and _close_short > 0:
-                    _current_value = max(_close_long - _close_short, 0.0)
-                else:
-                    _ltp_long = safe_float(_current_long_row.get(f"{_side_prefix} LTP"), np.nan)
-                    _ltp_short = safe_float(_current_short_row.get(f"{_side_prefix} LTP"), np.nan)
-                    _current_value = max(_ltp_long - _ltp_short, 0.0) if np.isfinite(_ltp_long) and _ltp_long > 0 and np.isfinite(_ltp_short) and _ltp_short > 0 else np.nan
-                    _current_source = "Indicative LTP estimate"
+                    _close_long = safe_float(_current_long_row.get(f"{_side_prefix} Bid"), np.nan)
+                    _close_short = safe_float(_current_short_row.get(f"{_side_prefix} Ask"), np.nan)
+                    if np.isfinite(_close_long) and _close_long > 0 and np.isfinite(_close_short) and _close_short > 0:
+                        _current_value = max(_close_long - _close_short, 0.0)
     except Exception:
         _current_value = np.nan
         _current_source = "Live value unavailable"
@@ -3711,15 +3938,28 @@ if not _paper_supabase_config():
 # be forward-tested separately, clearly labelled experimental, without changing
 # the actual live-trade decision or relaxing any execution gates.
 _paper_pass_candidates = [
-    (action, plan) for action, plan in strategy_plans.items()
+    (action, plan) for action, plan in all_strategy_plans.items()
     if plan and _engine_status(action, plan) == "PASS"
 ]
 _paper_plan = None
 _paper_experimental = False
 
+_paper_has_supplemental_pass = any(action in supplemental_strategy_plans for action, _plan in _paper_pass_candidates)
 if decision != "NO TRADE" and best_plan:
-    _paper_plan = best_plan
-    st.markdown(f"**Current eligible setup:** {symbol} · {_paper_plan.get('action', decision)} · {selected_expiry} · Entry {fmt_price(_paper_plan.get('entry'))} · SL {fmt_price(_paper_plan.get('sl'))} · Target 1 {fmt_price(_paper_plan.get('target1'))}")
+    if _paper_has_supplemental_pass:
+        _paper_candidate_labels = {
+            f"MAIN ENGINE · {best_plan.get('action', decision)} · PoP {safe_float(best_plan.get('pop'), 0):.1f}%": (decision, best_plan, False)
+        }
+        for _action, _plan in _paper_pass_candidates:
+            _label = f"ADDITIONAL · {_plan.get('action', _action)} · PoP {safe_float(_plan.get('pop'), 0):.1f}% · Quality {safe_float(_plan.get('score'), 0):.0f}/100"
+            _paper_candidate_labels[_label] = (_action, _plan, True)
+        _paper_selected_label = st.selectbox("Choose a strategy to paper-test", options=list(_paper_candidate_labels.keys()), key="paper_pass_candidate_choice", help="The main engine's selection remains unchanged. Additional strategies are optional paper tests only.")
+        _paper_selected_action, _paper_plan, _paper_experimental = _paper_candidate_labels[_paper_selected_label]
+        if _paper_experimental:
+            st.warning("ADDITIONAL STRATEGY PAPER TEST ONLY: selecting this strategy does not change the main engine's recommendation or make it an approved live trade.")
+    else:
+        _paper_plan = best_plan
+    st.markdown(f"**Selected setup for paper trading:** {symbol} · {_paper_plan.get('action', decision)} · {selected_expiry} · Entry {fmt_price(_paper_plan.get('entry'))} · SL {fmt_price(_paper_plan.get('sl'))} · Target 1 {fmt_price(_paper_plan.get('target1'))}")
 elif _paper_pass_candidates:
     _paper_candidate_labels = {
         f"{plan.get('action', action)} · PoP {safe_float(plan.get('pop'), 0):.1f}% · Quality {safe_float(plan.get('score'), 0):.0f}/100": (action, plan)
@@ -3729,11 +3969,11 @@ elif _paper_pass_candidates:
         "Choose a PASS strategy to paper-test",
         options=list(_paper_candidate_labels.keys()),
         key="paper_pass_candidate_choice",
-        help="These cards pass the card-level score/PoP check but may not pass every final execution gate.",
+        help="These strategies pass the displayed strategy-specific checks, but are additional paper tests rather than the main engine's recommendation.",
     )
     _paper_selected_action, _paper_plan = _paper_candidate_labels[_paper_selected_label]
     _paper_experimental = True
-    st.warning("EXPERIMENTAL PAPER TEST ONLY: this strategy card says PASS, but the main engine's final decision is NO TRADE. Recording it here does not make it an approved live trade and does not change any live-trading safeguards.")
+    st.warning("ADDITIONAL STRATEGY PAPER TEST ONLY: the main engine's final decision is NO TRADE. Recording this strategy does not make it an approved live trade and does not change any live-trading safeguards.")
     st.markdown(f"**Selected test setup:** {symbol} · {_paper_plan.get('action', _paper_selected_action)} · {selected_expiry} · Entry {fmt_price(_paper_plan.get('entry'))} · SL {fmt_price(_paper_plan.get('sl'))} · Target 1 {fmt_price(_paper_plan.get('target1'))}")
 
 if _paper_plan:
@@ -3775,6 +4015,8 @@ if _paper_plan:
                 "trade_id": uuid.uuid4().hex[:10].upper(), "opened_at": _paper_now,
                 "symbol": str(symbol), "expiry": str(selected_expiry), "action": str(_paper_plan.get("action", decision)),
                 "side": str(_paper_plan.get("side", "CE")), "is_credit_spread": _is_credit,
+                "strategy_kind": str(_paper_plan.get("strategy_kind", _paper_plan.get("action", "VERTICAL SPREAD"))),
+                "legs_json": json.dumps(_paper_plan.get("legs") or [], separators=(",", ":")),
                 "long_strike": _long_strike, "short_strike": _short_strike,
                 "entry_value": _entry, "stop_loss": _sl,
                 "target1": _t1, "target2": safe_float(_paper_plan.get("target2")),
@@ -3927,7 +4169,13 @@ else:
                 _long = safe_float(_trade_row.get("long_strike"), np.nan)
                 _short = safe_float(_trade_row.get("short_strike"), np.nan)
                 _is_credit = str(_trade_row.get("is_credit_spread", "False")).lower() in ("true", "1", "yes")
-                _spread_kind = "CREDIT spread (premium received at entry)" if _is_credit else "DEBIT spread (premium paid at entry)"
+                _spread_kind = "CREDIT strategy (premium received at entry)" if _is_credit else "DEBIT strategy (premium paid at entry)"
+                try:
+                    _saved_legs_raw = str(_trade_row.get("legs_json", "") or "").strip()
+                    _saved_legs = json.loads(_saved_legs_raw) if _saved_legs_raw and _saved_legs_raw not in ("nan", "None") else []
+                    if not isinstance(_saved_legs, list): _saved_legs = []
+                except Exception:
+                    _saved_legs = []
                 _entry = safe_float(_trade_row.get("entry_value"), np.nan)
                 _mark = safe_float(_trade_row.get("last_mark"), np.nan)
                 _pnl = safe_float(_trade_row.get("net_pnl"), np.nan)
@@ -3947,9 +4195,8 @@ else:
                     f"<h4 style='margin:0 0 8px 0'>{_symbol} · {_action}</h4>",
                     f"<p><b>Trade ID:</b> {html.escape(_tid)} · <b>Status:</b> {_status} · <b>Expiry:</b> {_expiry}</p>",
                     f"<p><b>Strategy type:</b> {_spread_kind} · <b>Option type:</b> {_side}</p>",
-                    "<p><b>Exact spread legs</b></p><ul>",
-                    f"<li><b>BUY</b> {_side} strike {_long:g} — long leg</li>" if np.isfinite(_long) else f"<li><b>BUY</b> {_side} long leg — strike unavailable in saved record</li>",
-                    f"<li><b>SELL</b> {_side} strike {_short:g} — short leg</li>" if np.isfinite(_short) else f"<li><b>SELL</b> {_side} short leg — strike unavailable in saved record</li>",
+                    "<p><b>Exact strategy legs</b></p><ul>",
+                    ("".join(f"<li><b>{html.escape(str(leg.get('action','')))}</b> {html.escape(str(leg.get('side','')))} strike {safe_float(leg.get('strike'),0):g} — quoted entry ₹{safe_float(leg.get('entry_price'),0):.2f}</li>" for leg in _saved_legs) if _saved_legs else (f"<li><b>BUY</b> {_side} strike {_long:g} — long leg</li>" if np.isfinite(_long) else f"<li><b>BUY</b> {_side} long leg — strike unavailable in saved record</li>") + (f"<li><b>SELL</b> {_side} strike {_short:g} — short leg</li>" if np.isfinite(_short) else f"<li><b>SELL</b> {_side} short leg — strike unavailable in saved record</li>")),
                     "</ul>",
                     f"<p><b>Position size:</b> {_lots:g} lot(s) × {_lot_size:g} quantity per lot = {_qty:g} total quantity.</p>",
                     f"<p><b>Entry spread value:</b> {('₹'+format(_entry, '.2f')) if np.isfinite(_entry) else '—'} · <b>Latest estimated close value:</b> {('₹'+format(_mark, '.2f')) if np.isfinite(_mark) else '—'}</p>",
