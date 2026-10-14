@@ -1864,6 +1864,53 @@ def _update_paper_trades_for_snapshot(frame, symbol_value, expiry_value, chain_f
     return frame, changed
 
 
+def _refresh_all_open_paper_trades(frame, timestamp, preferred_symbol=None,
+                                   preferred_expiry=None, preferred_chain=None):
+    """Refresh every open spread from Upstox; never auto-close any trade."""
+    if frame.empty:
+        return frame, False, []
+    open_rows = frame[frame["status"].astype(str) == "OPEN"]
+    if open_rows.empty:
+        return frame, False, []
+
+    changed_any = False
+    errors = []
+    pairs = list(dict.fromkeys(
+        (str(row.get("symbol", "")).strip(), str(row.get("expiry", "")).strip())
+        for _, row in open_rows.iterrows()
+        if str(row.get("symbol", "")).strip() and str(row.get("expiry", "")).strip()
+    ))
+    for symbol_value, expiry_value in pairs:
+        try:
+            if (str(symbol_value) == str(preferred_symbol)
+                    and str(expiry_value) == str(preferred_expiry)
+                    and preferred_chain is not None and not preferred_chain.empty):
+                chain_frame = preferred_chain
+            else:
+                underlying = search_underlying(symbol_value)
+                underlying_key = str(underlying.get("instrument_key", "")).strip()
+                if not underlying_key:
+                    raise UpstoxError(f"Could not resolve the Upstox underlying for {symbol_value}.")
+                raw_chain = get_option_chain(underlying_key, expiry_value)
+                chain_frame = normalize_chain(raw_chain)
+            frame, changed = _update_paper_trades_for_snapshot(
+                frame, symbol_value, expiry_value, chain_frame, timestamp
+            )
+            changed_any = changed_any or changed
+            # If quotes were returned but one/both spread legs had no usable
+            # bid/ask, preserve the last valid mark and report this pair as stale.
+            pair_rows = frame[
+                (frame["status"].astype(str) == "OPEN")
+                & (frame["symbol"].astype(str) == symbol_value)
+                & (frame["expiry"].astype(str) == expiry_value)
+            ]
+            if not pair_rows.empty and not pair_rows["last_updated"].astype(str).eq(timestamp).all():
+                errors.append(f"{symbol_value} {expiry_value}: one or more spread legs had missing/invalid bid-ask quotes; last valid values were kept.")
+        except Exception as exc:
+            errors.append(f"{symbol_value} {expiry_value}: {exc}")
+    return frame, changed_any, errors
+
+
 # ============================================================
 # FULL F&O TRADE ALERT SCANNER — USES THIS FILE'S EXISTING ENGINE
 # ============================================================
@@ -2635,13 +2682,8 @@ with st.sidebar:
         use_container_width=True,
     )
 
-    auto_refresh = st.checkbox(
-        "Auto refresh every 60 seconds",
-        value=False,
-    )
-
-    if auto_refresh and st_autorefresh is not None:
-        st_autorefresh(interval=60_000, key="simple_live_refresh")
+    # Full-app timed refresh is intentionally disabled. Only the paper-trade table
+    # uses a 60-second fragment refresh.
 
     st.divider()
     st.caption("LIVE DATA • Powered by Upstox")
@@ -3680,7 +3722,7 @@ st.markdown(f"""
 # PAPER TRADING — FORWARD TESTING WITH LIVE UPSTOX OPTION QUOTES
 # ============================================================
 st.markdown("<div class='fo-section'>PAPER TRADING & LIVE STRATEGY TRACKER</div>", unsafe_allow_html=True)
-st.caption("Virtual trades only — this feature never places broker orders. Open trades remain open until you manually close them. Estimated values refresh when you analyze the same symbol and expiry again, using live bid/ask quotes for both legs; historical option prices are not reconstructed.")
+st.caption("Virtual trades only — no broker orders are placed. Open trades refresh automatically about every 60 seconds from Upstox bid/ask quotes for both spread legs. Trades remain open until you manually close them; historical option prices are not reconstructed.")
 
 _paper_now = datetime.now(ZoneInfo("Asia/Kolkata")).isoformat(timespec="seconds")
 try:
@@ -3693,12 +3735,7 @@ except Exception as _paper_load_error:
 if not _paper_supabase_config():
     st.warning("PERSISTENT STORAGE NOT CONFIGURED: paper trades are currently saved only to this app's local CSV. On Streamlit Cloud, that file can disappear after a restart/redeploy. Follow the Supabase setup instructions provided with this code to keep trades permanently.")
 
-_paper_df, _paper_updated = _update_paper_trades_for_snapshot(_paper_df, symbol, selected_expiry, chain, _paper_now)
-if _paper_updated:
-    try:
-        _save_paper_ledger(_paper_df)
-    except Exception as _paper_save_error:
-        st.warning(f"Paper-trade results were updated in this session but could not be saved to the local file: {_paper_save_error}")
+# Live paper-trade quote refresh is isolated in the table fragment below.
 
 # A card-level PASS can still fail the stricter final decision gates. Allow it to
 # be forward-tested separately, clearly labelled experimental, without changing
@@ -3812,40 +3849,69 @@ else:
     _m3.metric("CLOSED NET P/L", f"₹{_closed_net:,.0f}")
     _m4.metric("CLOSED WIN RATE", f"{(100*_wins/len(_closed_df)):.1f}%" if len(_closed_df) else "—", help="Based on closed paper trades after the estimated costs you entered; small samples are not statistically reliable.")
     if len(_open_df):
-        st.markdown("**Open trades — simple view**")
-        st.caption("Read each row from left to right: what you recorded → latest estimated value → estimated profit/loss → exit levels.")
-        # Keep this table beginner-friendly: hide technical IDs and timestamps from
-        # the main view, and label prices in plain language. The full CSV remains
-        # available below for detailed records.
-        _simple_open = pd.DataFrame(index=_open_df.index)
-        _simple_open["Trade"] = _open_df["symbol"].astype(str) + " · " + _open_df["action"].astype(str)
-        _simple_open["Expiry"] = _open_df["expiry"].astype(str)
-        _simple_open["Lots"] = pd.to_numeric(_open_df["lots"], errors="coerce").fillna(0).map(lambda x: f"{x:g}")
-        _simple_open["Entry price"] = pd.to_numeric(_open_df["entry_value"], errors="coerce").map(lambda x: f"₹{x:.2f}" if pd.notna(x) else "—")
-        _simple_open["Current price*"] = pd.to_numeric(_open_df["last_mark"], errors="coerce").map(lambda x: f"₹{x:.2f}" if pd.notna(x) else "—")
-        _simple_open["Estimated P/L"] = pd.to_numeric(_open_df["net_pnl"], errors="coerce").map(lambda x: ("PROFIT · " if x > 0 else "LOSS · " if x < 0 else "BREAK-EVEN · ") + f"₹{abs(x):,.2f}" if pd.notna(x) else "—")
-        _simple_open["Stop-loss price"] = pd.to_numeric(_open_df["stop_loss"], errors="coerce").map(lambda x: f"₹{x:.2f}" if pd.notna(x) else "—")
-        _simple_open["Target 1 price"] = pd.to_numeric(_open_df["target1"], errors="coerce").map(lambda x: f"₹{x:.2f}" if pd.notna(x) else "—")
-        _simple_open["Last updated"] = _open_df["last_updated"].astype(str).str.replace(r"[+-]\d{2}:\d{2}$", "", regex=True).str.replace("T", " ", regex=False).str.slice(0, 16)
-        # Color the P/L text for quick scanning: green for profit, red for loss.
-        # Keep the existing simple table and all trade logic unchanged.
-        def _paper_pl_text_color(value):
-            text = str(value).strip().upper()
-            if text.startswith("PROFIT"):
-                return "color: #16803C; font-weight: 700;"
-            if text.startswith("LOSS"):
-                return "color: #D92D20; font-weight: 700;"
-            if text.startswith("BREAK-EVEN"):
-                return "color: #667085; font-weight: 700;"
-            return "color: inherit;"
+        @st.fragment(run_every=60)
+        def _render_live_open_paper_trade_table():
+            """Refresh only this fragment every 60 seconds, not the full app."""
+            try:
+                _live_paper_df = _load_paper_ledger()
+            except Exception as _live_load_error:
+                st.error(f"Could not refresh open paper trades from storage: {_live_load_error}")
+                return
 
-        _simple_open_styled = _simple_open.reset_index(drop=True).style.map(
-            _paper_pl_text_color, subset=["Estimated P/L"]
-        )
-        # Use Streamlit's HTML table renderer rather than its canvas-based grid.
-        st.table(_simple_open_styled)
-        st.caption("*Current price is the latest recorded estimated cost to close the spread, not a guaranteed execution price. For credit spreads, lower is usually better; for debit spreads, higher is usually better. P/L is estimated after the costs entered in the app.")
-        st.caption("Prices update only when you analyze the same trade's symbol and expiry again. Stop-loss/target touches between updates can be missed.")
+            _live_open_df = _live_paper_df[_live_paper_df["status"].astype(str) == "OPEN"].copy()
+            _live_refresh_errors = []
+            if len(_live_open_df):
+                _live_now = datetime.now(ZoneInfo("Asia/Kolkata")).isoformat(timespec="seconds")
+                _live_paper_df, _live_updated, _live_refresh_errors = _refresh_all_open_paper_trades(
+                    _live_paper_df, _live_now,
+                    preferred_symbol=symbol,
+                    preferred_expiry=selected_expiry,
+                    preferred_chain=chain,
+                )
+                if _live_updated:
+                    try:
+                        _save_paper_ledger(_live_paper_df)
+                    except Exception as _live_save_error:
+                        st.warning(f"Prices were refreshed in this view but could not be saved to Supabase: {_live_save_error}")
+                _live_open_df = _live_paper_df[_live_paper_df["status"].astype(str) == "OPEN"].copy()
+
+            st.markdown("**Open trades — simple view**")
+            st.caption("Read each row from left to right: what you recorded → latest estimated value → estimated profit/loss → exit levels.")
+            if _live_open_df.empty:
+                st.info("There are currently no open paper trades.")
+                return
+
+            _simple_open = pd.DataFrame(index=_live_open_df.index)
+            _simple_open["Trade"] = _live_open_df["symbol"].astype(str) + " · " + _live_open_df["action"].astype(str)
+            _simple_open["Expiry"] = _live_open_df["expiry"].astype(str)
+            _simple_open["Lots"] = pd.to_numeric(_live_open_df["lots"], errors="coerce").fillna(0).map(lambda x: f"{x:g}")
+            _simple_open["Entry price"] = pd.to_numeric(_live_open_df["entry_value"], errors="coerce").map(lambda x: f"₹{x:.2f}" if pd.notna(x) else "—")
+            _simple_open["Current price*"] = pd.to_numeric(_live_open_df["last_mark"], errors="coerce").map(lambda x: f"₹{x:.2f}" if pd.notna(x) else "—")
+            _simple_open["Estimated P/L"] = pd.to_numeric(_live_open_df["net_pnl"], errors="coerce").map(lambda x: ("PROFIT · " if x > 0 else "LOSS · " if x < 0 else "BREAK-EVEN · ") + f"₹{abs(x):,.2f}" if pd.notna(x) else "—")
+            _simple_open["Stop-loss price"] = pd.to_numeric(_live_open_df["stop_loss"], errors="coerce").map(lambda x: f"₹{x:.2f}" if pd.notna(x) else "—")
+            _simple_open["Target 1 price"] = pd.to_numeric(_live_open_df["target1"], errors="coerce").map(lambda x: f"₹{x:.2f}" if pd.notna(x) else "—")
+            _simple_open["Last updated"] = _live_open_df["last_updated"].astype(str).str.replace(r"[+-]\d{2}:\d{2}$", "", regex=True).str.replace("T", " ", regex=False).str.slice(0, 16)
+
+            def _paper_pl_text_color(value):
+                text = str(value).strip().upper()
+                if text.startswith("PROFIT"):
+                    return "color: #16803C; font-weight: 700;"
+                if text.startswith("LOSS"):
+                    return "color: #D92D20; font-weight: 700;"
+                if text.startswith("BREAK-EVEN"):
+                    return "color: #667085; font-weight: 700;"
+                return "color: inherit;"
+
+            _simple_open_styled = _simple_open.reset_index(drop=True).style.map(
+                _paper_pl_text_color, subset=["Estimated P/L"]
+            )
+            st.table(_simple_open_styled)
+            st.caption("*Current price is the latest recorded estimated cost to close the spread, not a guaranteed execution price. For credit spreads, lower is usually better; for debit spreads, higher is usually better. P/L is estimated after the costs entered in the app.")
+            st.caption("This table alone refreshes about every 60 seconds while the app tab is open. Other app sections do not refresh on this timer. Quotes may be delayed or unavailable; a failed refresh keeps the last valid mark. Stop-loss/target touches between updates can be missed, and the app never closes a trade automatically.")
+            for _live_refresh_error in _live_refresh_errors:
+                st.caption(f"Refresh note: {_live_refresh_error}")
+
+        _render_live_open_paper_trade_table()
         _closable = _open_df.copy()
         _close_options = {f"{r['trade_id']} · {r['symbol']} · {r['action']} · {r['expiry']}": str(r['trade_id']) for _, r in _closable.iterrows()}
         with st.form("paper_trade_manual_close_form"):
