@@ -1,4 +1,5 @@
 import gzip
+import hmac
 import json
 import math
 import os
@@ -32,6 +33,38 @@ st.set_page_config(
     layout="wide",
     initial_sidebar_state="expanded",
 )
+
+# If durable Supabase storage is enabled, require a password as well. The
+# Supabase service-role key must never be exposed to unauthenticated visitors,
+# because the app itself can read/write the shared paper-trade ledger.
+try:
+    _early_supabase_url = str(st.secrets.get("SUPABASE_URL", "")).strip()
+    _early_supabase_key = str(st.secrets.get("SUPABASE_SERVICE_ROLE_KEY", "")).strip()
+    _app_access_password = str(st.secrets.get("APP_ACCESS_PASSWORD", ""))
+except Exception:
+    _early_supabase_url = ""
+    _early_supabase_key = ""
+    _app_access_password = ""
+
+if _early_supabase_url and _early_supabase_key:
+    if not _app_access_password:
+        st.error(
+            "Persistent paper-trade storage is configured, but APP_ACCESS_PASSWORD is missing. "
+            "Add APP_ACCESS_PASSWORD to Streamlit Secrets before using the shared ledger."
+        )
+        st.stop()
+    if not st.session_state.get("_fo_pro_authenticated", False):
+        st.title("FO PRO Trader Assistant — Sign in")
+        with st.form("fo_pro_access_form"):
+            _entered_app_password = st.text_input("App password", type="password")
+            _login_submitted = st.form_submit_button("Sign in", type="primary")
+        if _login_submitted:
+            if hmac.compare_digest(_entered_app_password, _app_access_password):
+                st.session_state["_fo_pro_authenticated"] = True
+                st.rerun()
+            else:
+                st.error("Incorrect password. Please try again.")
+        st.stop()
 
 API_BASE = "https://api.upstox.com"
 
@@ -1657,49 +1690,126 @@ PAPER_COLUMNS = [
 
 
 def _paper_ledger_path():
-    # Local file persistence is convenient on a single app instance. Streamlit
-    # Cloud files can reset on restart/redeploy, so the UI also offers CSV export.
+    # Local CSV is retained as a fallback/import source, but is not durable on
+    # Streamlit Community Cloud. Configure Supabase secrets for durable storage.
     return os.path.join(os.path.dirname(os.path.abspath(__file__)), "fo_pro_paper_trades.csv")
 
 
-def _load_paper_ledger():
-    path = _paper_ledger_path()
-    if not os.path.exists(path):
-        return pd.DataFrame(columns=PAPER_COLUMNS)
+def _paper_supabase_config():
+    """Return durable-storage config when Supabase secrets are configured."""
     try:
-        frame = pd.read_csv(path)
-        for col in PAPER_COLUMNS:
-            if col not in frame.columns:
-                frame[col] = np.nan
-        numeric_cols = [
-            "long_strike", "short_strike", "entry_value", "stop_loss", "target1", "target2",
-            "target3", "target4", "lot_size", "lots", "quantity", "cost_per_lot", "last_mark",
-            "exit_price", "gross_pnl", "net_pnl", "model_pop", "quality_score",
-        ]
-        for col in numeric_cols:
-            frame[col] = pd.to_numeric(frame[col], errors="coerce").astype(float)
-        # CSV readers may infer an all-blank text column (especially
-        # exit_reason / closed_at) as float64. Pandas 3 rejects assigning a
-        # string into that column later when a paper trade is closed. Force
-        # ledger text fields to object dtype and normalize blank cells first.
-        text_cols = [
-            "trade_id", "opened_at", "symbol", "expiry", "action", "side",
-            "status", "last_updated", "exit_reason", "closed_at",
-        ]
-        for col in text_cols:
-            frame[col] = frame[col].fillna("").astype(object)
-        return frame[PAPER_COLUMNS]
+        url = str(st.secrets.get("SUPABASE_URL", "")).strip().rstrip("/")
+        key = str(st.secrets.get("SUPABASE_SERVICE_ROLE_KEY", "")).strip()
     except Exception:
-        return pd.DataFrame(columns=PAPER_COLUMNS)
+        url, key = "", ""
+    if url and key:
+        return url, key
+    return None
 
 
-def _save_paper_ledger(frame):
-    path = _paper_ledger_path()
+def _paper_supabase_request(method, params=None, payload=None):
+    config = _paper_supabase_config()
+    if not config:
+        raise RuntimeError("Supabase persistent storage is not configured.")
+    base_url, service_key = config
+    headers = {
+        "apikey": service_key,
+        "Authorization": f"Bearer {service_key}",
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+        "Prefer": "resolution=merge-duplicates,return=minimal",
+    }
+    try:
+        response = requests.request(
+            method,
+            f"{base_url}/rest/v1/fo_paper_ledger",
+            headers=headers,
+            params=params,
+            json=payload,
+            timeout=20,
+        )
+    except requests.RequestException as exc:
+        raise RuntimeError(f"Could not reach Supabase paper-trade storage: {exc}") from exc
+    if response.status_code not in (200, 201, 204):
+        detail = response.text[:800] if response.text else f"HTTP {response.status_code}"
+        raise RuntimeError(
+            f"Supabase paper-trade storage returned HTTP {response.status_code}: {detail}. "
+            "Check the table and Streamlit secrets; existing trades were not replaced with an empty ledger."
+        )
+    if not response.content:
+        return None
+    try:
+        return response.json()
+    except ValueError:
+        return None
+
+
+def _normalize_paper_ledger(frame):
     frame = frame.copy()
     for col in PAPER_COLUMNS:
         if col not in frame.columns:
             frame[col] = np.nan
-    frame[PAPER_COLUMNS].to_csv(path, index=False)
+    numeric_cols = [
+        "long_strike", "short_strike", "entry_value", "stop_loss", "target1", "target2",
+        "target3", "target4", "lot_size", "lots", "quantity", "cost_per_lot", "last_mark",
+        "exit_price", "gross_pnl", "net_pnl", "model_pop", "quality_score",
+    ]
+    for col in numeric_cols:
+        frame[col] = pd.to_numeric(frame[col], errors="coerce").astype(float)
+    text_cols = [
+        "trade_id", "opened_at", "symbol", "expiry", "action", "side",
+        "status", "last_updated", "exit_reason", "closed_at",
+    ]
+    for col in text_cols:
+        frame[col] = frame[col].fillna("").astype(object)
+    return frame[PAPER_COLUMNS]
+
+
+def _load_paper_ledger():
+    """Load from durable Supabase first; never hide database errors as no trades."""
+    if _paper_supabase_config():
+        rows = _paper_supabase_request("GET", params={"id": "eq.main", "select": "trades"})
+        if rows:
+            trades = rows[0].get("trades") or []
+            return _normalize_paper_ledger(pd.DataFrame(trades, columns=PAPER_COLUMNS))
+
+        # One-time migration from an existing local CSV if the DB has no ledger yet.
+        local_path = _paper_ledger_path()
+        if os.path.exists(local_path):
+            try:
+                local_frame = _normalize_paper_ledger(pd.read_csv(local_path))
+            except Exception as exc:
+                raise RuntimeError(f"Supabase has no ledger row and the local CSV could not be read: {exc}") from exc
+            if not local_frame.empty:
+                _save_paper_ledger(local_frame)
+                return local_frame
+        return pd.DataFrame(columns=PAPER_COLUMNS)
+
+    # Local fallback keeps local development usable, but the UI warns that it is
+    # not durable across Streamlit Cloud restarts/redeployments.
+    path = _paper_ledger_path()
+    if not os.path.exists(path):
+        return pd.DataFrame(columns=PAPER_COLUMNS)
+    try:
+        return _normalize_paper_ledger(pd.read_csv(path))
+    except Exception as exc:
+        raise RuntimeError(f"Could not read the local paper-trade ledger at {path}: {exc}") from exc
+
+
+def _save_paper_ledger(frame):
+    frame = _normalize_paper_ledger(frame)
+    if _paper_supabase_config():
+        # Store the ledger as one JSONB document. Upsert is atomic and survives
+        # app reruns, Cloud restarts, and redeployments.
+        records = json.loads(frame.to_json(orient="records", date_format="iso"))
+        _paper_supabase_request(
+            "POST",
+            params={"on_conflict": "id"},
+            payload={"id": "main", "trades": records, "updated_at": datetime.now(ZoneInfo("Asia/Kolkata")).isoformat(timespec="seconds")},
+        )
+        return
+    path = _paper_ledger_path()
+    frame.to_csv(path, index=False)
 
 
 def _paper_current_spread_mark(chain_frame, side, long_strike, short_strike, is_credit):
@@ -1722,7 +1832,7 @@ def _paper_current_spread_mark(chain_frame, side, long_strike, short_strike, is_
 
 
 def _update_paper_trades_for_snapshot(frame, symbol_value, expiry_value, chain_frame, timestamp):
-    """Mark/exit only trades for the instrument+expiry whose live chain is loaded."""
+    """Refresh marks for matching open trades; ONLY the user can close a trade."""
     if frame.empty or chain_frame is None or chain_frame.empty:
         return frame, False
     changed = False
@@ -1739,28 +1849,17 @@ def _update_paper_trades_for_snapshot(frame, symbol_value, expiry_value, chain_f
             continue
         is_credit = str(trade.get("is_credit_spread", "False")).lower() in ("true", "1", "yes")
         entry = safe_float(trade.get("entry_value"))
-        sl = safe_float(trade.get("stop_loss"))
-        target = safe_float(trade.get("target1"))
         qty = safe_float(trade.get("quantity"), 0.0)
         costs = safe_float(trade.get("cost_per_lot"), 0.0) * safe_float(trade.get("lots"), 1.0)
-        if not all(np.isfinite(x) for x in (entry, sl, target, qty, costs)):
+        if not all(np.isfinite(x) for x in (entry, qty, costs)):
             continue
         gross = ((entry - mark) if is_credit else (mark - entry)) * qty
         frame.at[idx, "last_mark"] = round(mark, 2)
         frame.at[idx, "last_updated"] = timestamp
         frame.at[idx, "gross_pnl"] = round(gross, 2)
         frame.at[idx, "net_pnl"] = round(gross - costs, 2)
-        if is_credit:
-            stop_hit = mark >= sl
-            target_hit = mark <= target
-        else:
-            stop_hit = mark <= sl
-            target_hit = mark >= target
-        if stop_hit or target_hit:
-            frame.at[idx, "status"] = "CLOSED"
-            frame.at[idx, "exit_price"] = round(mark, 2)
-            frame.at[idx, "exit_reason"] = "STOP LOSS" if stop_hit else "TARGET 1"
-            frame.at[idx, "closed_at"] = timestamp
+        # Stop-loss and target are advisory levels. They never close a paper
+        # trade automatically; the user closes it explicitly in the tracker.
         changed = True
     return frame, changed
 
@@ -3581,10 +3680,19 @@ st.markdown(f"""
 # PAPER TRADING — FORWARD TESTING WITH LIVE UPSTOX OPTION QUOTES
 # ============================================================
 st.markdown("<div class='fo-section'>PAPER TRADING & LIVE STRATEGY TRACKER</div>", unsafe_allow_html=True)
-st.caption("Virtual trades only — this feature never places broker orders. Open trades are marked when this instrument and expiry are analyzed again, using live bid/ask quotes for both legs. Historical option prices are not reconstructed.")
+st.caption("Virtual trades only — this feature never places broker orders. Open trades remain open until you manually close them. Estimated values refresh when you analyze the same symbol and expiry again, using live bid/ask quotes for both legs; historical option prices are not reconstructed.")
 
 _paper_now = datetime.now(ZoneInfo("Asia/Kolkata")).isoformat(timespec="seconds")
-_paper_df = _load_paper_ledger()
+try:
+    _paper_df = _load_paper_ledger()
+except Exception as _paper_load_error:
+    st.error(f"Paper-trade ledger could not be loaded: {_paper_load_error}")
+    st.warning("For safety, the app has not replaced the ledger with an empty list. Fix the Supabase table/secrets and reload.")
+    st.stop()
+
+if not _paper_supabase_config():
+    st.warning("PERSISTENT STORAGE NOT CONFIGURED: paper trades are currently saved only to this app's local CSV. On Streamlit Cloud, that file can disappear after a restart/redeploy. Follow the Supabase setup instructions provided with this code to keep trades permanently.")
+
 _paper_df, _paper_updated = _update_paper_trades_for_snapshot(_paper_df, symbol, selected_expiry, chain, _paper_now)
 if _paper_updated:
     try:
@@ -3681,8 +3789,14 @@ if _paper_plan:
 elif not _paper_pass_candidates:
     st.info("No card-level PASS strategy is available to record right now. Analyze a live instrument and check the Engine Result again.")
 
-# Refresh the ledger after possible save/automatic exits.
-_paper_df = _load_paper_ledger()
+# Refresh the ledger after a possible new trade or manual close. Do not hide
+# storage errors as an empty ledger: doing so could mislead the user into thinking
+# saved trades disappeared.
+try:
+    _paper_df = _load_paper_ledger()
+except Exception as _paper_reload_error:
+    st.error(f"Could not refresh the saved paper-trade ledger: {_paper_reload_error}")
+    st.stop()
 if _paper_df.empty:
     st.info("No paper trades recorded yet. Analyze a live instrument and record an eligible setup to begin forward testing.")
 else:
@@ -3756,9 +3870,13 @@ else:
                     _paper_df.at[_ix, "gross_pnl"] = round(_gross, 2)
                     _paper_df.at[_ix, "net_pnl"] = round(_gross-_costs, 2)
                     _paper_df.at[_ix, "last_updated"] = _paper_now
-                    _save_paper_ledger(_paper_df)
-                    st.success(f"Paper trade {_close_id} closed at its latest recorded mark. No real order was placed.")
-                    st.rerun()
+                    try:
+                        _save_paper_ledger(_paper_df)
+                    except Exception as _paper_close_save_error:
+                        st.error(f"The trade could not be saved as closed: {_paper_close_save_error}. It may still be OPEN in persistent storage; please retry after fixing storage.")
+                    else:
+                        st.success(f"Paper trade {_close_id} closed at its latest recorded mark. No real order was placed.")
+                        st.rerun()
     if len(_closed_df):
         st.markdown("**Closed trade history**")
         _closed_cols = ["trade_id", "opened_at", "symbol", "expiry", "action", "lots", "entry_value", "exit_price", "exit_reason", "gross_pnl", "net_pnl", "closed_at"]
@@ -3766,7 +3884,7 @@ else:
         # Keep closed history on the same non-canvas renderer for consistency.
         st.table(_closed_display)
     st.download_button("Download paper-trading ledger (CSV)", data=_paper_df.to_csv(index=False).encode("utf-8"), file_name="fo_pro_paper_trades.csv", mime="text/csv", use_container_width=True)
-    st.warning("Paper-trading results are estimates, not audited returns. Quotes may be delayed/stale, spread fills may not be achievable, and stop/target events between refreshes can be missed. The CSV is saved locally by this app instance; on Streamlit Cloud, local files may reset after a restart or redeployment, so download the ledger regularly.")
+    st.warning("Paper-trading results are estimates, not audited returns. Quotes may be delayed/stale and spread fills may not be achievable. Stop-loss and target levels are reminders only: trades stay OPEN until you manually close them. With Supabase configured, the ledger is stored outside the app and survives restarts/redeployments; without it, only the local CSV is used and Streamlit Cloud may reset it.")
 
 # ============================================================
 # RESET RIGHT-SIDE ANALYZER SCROLL AFTER FULL RENDER
