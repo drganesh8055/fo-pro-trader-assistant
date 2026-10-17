@@ -3105,7 +3105,9 @@ else:
     best_plan = max(available, key=lambda x: x[0])[2] if available else None
 
 # ============================================================
-# SUPPLEMENTAL NEUTRAL STRATEGIES — ISOLATED FROM THE EXISTING MAIN DECISION
+# SUPPLEMENTAL NEUTRAL STRATEGIES
+# Iron Condor can join the main selection only in a confirmed RANGE regime.
+# Iron Butterfly is retained for visibility/testing but is not recommended yet.
 # ============================================================
 def _build_neutral_four_leg_strategy(strategy_name, option_chain, spot_price, expiry_value, regime_value):
     """Build a live-quote-only Iron Condor or Iron Butterfly; never alters primary selection."""
@@ -3239,8 +3241,10 @@ def _build_neutral_four_leg_strategy(strategy_name, option_chain, spot_price, ex
         else:
             score = float(np.clip(regime_score*0.65 + min(pop,100)*0.35, 0, 100))
             fails = []
-        if regime_norm not in {"RANGE", "MIXED"}:
-            fails.append(f"market regime {regime_norm} is not preferred for this neutral strategy")
+        if strategy_name == "IRON CONDOR" and regime_norm != "RANGE":
+            fails.append(f"Iron Condor requires a RANGE market; current regime is {regime_norm}")
+        elif strategy_name == "IRON BUTTERFLY":
+            fails.append("Testing only: Iron Butterfly is not enabled for recommendation until its live-paper results are validated")
         _strategy_min_pop = 55 if strategy_name == "IRON CONDOR" else 40
         if np.isfinite(pop) and pop < _strategy_min_pop:
             fails.append(f"model PoP {pop:.1f}% is below this strategy's {_strategy_min_pop:.0f}% minimum")
@@ -3283,6 +3287,41 @@ supplemental_strategy_plans = {
     "IRON BUTTERFLY": _build_neutral_four_leg_strategy("IRON BUTTERFLY", chain, spot, selected_expiry, regime),
 }
 all_strategy_plans = {**strategy_plans, **supplemental_strategy_plans}
+
+# Premium-first selection: favor protected credit spreads modestly, without
+# allowing a lower-quality setup to bypass the normal quality/PoP/readiness gates.
+# A live-quote Iron Condor may compete only when its strategy-specific checks pass.
+_selection_candidates = []
+for _base_score, _action_name, _candidate in eligible:
+    _pop_value = safe_float(_candidate.get("pop"), 0)
+    _quality_value = safe_float(_candidate.get("score"), 0)
+    _volume_value = safe_float(_candidate.get("volume"), 0)
+    _premium_preference = 8.0 if _action_name in {"CALL SELL", "PUT SELL"} else 0.0
+    _selection_score = _quality_value + _pop_value * 0.20 + min(_volume_value / 100000, 3) + _premium_preference
+    _selection_candidates.append((_selection_score, _action_name, _candidate))
+
+_iron_condor = supplemental_strategy_plans.get("IRON CONDOR")
+if _iron_condor:
+    _ic_pop = safe_float(_iron_condor.get("pop"), np.nan)
+    _ic_ready = (
+        not (_iron_condor.get("fail_reasons") or [])
+        and _iron_condor.get("readiness") == "READY"
+        and safe_float(_iron_condor.get("score"), 0) >= MIN_SCORE
+        and np.isfinite(_ic_pop) and _ic_pop >= safe_float(_iron_condor.get("minimum_pop"), 55)
+        and str(regime or "").upper() == "RANGE"
+    )
+    if _ic_ready:
+        _ic_score = safe_float(_iron_condor.get("score"), 0) + _ic_pop * 0.20 + min(safe_float(_iron_condor.get("volume"), 0) / 100000, 3)
+        _selection_candidates.append((_ic_score, "IRON CONDOR", _iron_condor))
+
+if _selection_candidates:
+    _, decision, best_plan = max(_selection_candidates, key=lambda item: item[0])
+else:
+    decision = "NO TRADE"
+    # Keep the best reference candidate only for diagnostics; it is not a recommendation.
+    _reference_candidates = [(safe_float(plan.get("score"), 0), action, plan)
+                             for action, plan in strategy_plans.items() if plan]
+    best_plan = max(_reference_candidates, key=lambda item: item[0])[2] if _reference_candidates else None
 
 # ============================================================
 # BEGINNER SAFETY + EXPLAINABILITY LAYER
@@ -3353,7 +3392,7 @@ if decision != "NO TRADE" and best_plan:
     log_signal(symbol, selected_expiry, decision, best_plan, spot, pcr, support, resistance, tf5, tf30, daily_tech, regime)
 
 
-# ENGINE RESULT: 4 strategy cards in a fixed 2x2 grid.
+# ENGINE RESULT: strategy cards in a fixed 2-column grid.
 st.markdown("""<style>
 .fo-engine-grid{display:grid!important;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px;width:100%;align-items:stretch;}
 .fo-engine-grid .fo-engine-card{min-width:0!important;width:100%!important;margin:0!important;height:100%;box-sizing:border-box;}
@@ -3422,7 +3461,7 @@ st.markdown(f"""
   <div class="fo-hero-top">
     <div>
       <div class="fo-brand">📊 FO PRO Trader Assistant</div>
-      <div class="fo-tagline">Live Upstox data · 5-way F&O decision engine · Quality-focused trade selection</div>
+      <div class="fo-tagline">Live Upstox data · Premium-first defined-risk F&O engine · Quality-focused trade selection</div>
     </div>
     <div class="fo-live" style="background:{status_bg};border-color:transparent;">
       <b>{status_text}</b>
@@ -3693,7 +3732,7 @@ section[data-testid="stSidebar"] .stCaption { color:#64748b !important; }
 
 # Render each strategy card and its action directly together. This keeps the
 # View Details button immediately below the corresponding PASS/SELECTED trade.
-_engine_order = ["CALL BUY", "CALL SELL", "PUT BUY", "PUT SELL", "IRON CONDOR", "IRON BUTTERFLY"]
+_engine_order = ["PUT SELL", "CALL SELL", "IRON CONDOR", "CALL BUY", "PUT BUY", "IRON BUTTERFLY"]
 _engine_rows = [st.columns(2) for _ in range((len(_engine_order) + 1) // 2)]
 
 def _engine_status(action_name, candidate_plan):
@@ -3790,7 +3829,7 @@ if _details_plan and _engine_status(_details_action, _details_plan) == "PASS":
       <div class='fo-plan-pop'>ENTRY ₹{_unit_entry:,.2f}</div>
     </div>
     <div class='fo-levels'>{_legs_html}
-      <div class='fo-level'><span>EST. CAPITAL / MARGIN</span><b>₹{_estimated_margin:,.0f}</b><small>{'Defined-risk max-loss estimate for credit strategy' if _is_credit else 'Net debit paid for debit spread'} · 1 lot</small></div>
+      <div class='fo-level'><span>{'DEFINED-RISK EXPOSURE' if _is_credit else 'NET DEBIT REQUIRED'}</span><b>₹{_estimated_margin:,.0f}</b><small>{'Maximum theoretical loss proxy' if _is_credit else 'Premium paid for the spread'} · 1 lot</small></div>
       <div class='fo-level'><span>MAX PROFIT · 1 LOT</span><b>₹{_max_profit_lot:,.0f}</b><small>Before costs</small></div>
       <div class='fo-level'><span>MAX LOSS · 1 LOT</span><b>₹{_max_loss_lot:,.0f}</b><small>Theoretical defined risk before costs</small></div>
     </div>
@@ -3947,7 +3986,8 @@ if decision != "NO TRADE" and best_plan:
     st.markdown(level_html, unsafe_allow_html=True)
     _sl_loss_unit = safe_float(best_plan.get("sl_loss_per_unit"), max(safe_float(best_plan.get("sl"))-entry_value, 0.0) if is_sell else max(entry_value-safe_float(best_plan.get("sl")), 0.0))
     _sl_loss_lot = safe_float(best_plan.get("sl_loss_lot"), _sl_loss_unit*lot_qty if lot_qty > 0 else np.nan)
-    st.info(f"Defined-risk spread · Width {fmt_price(best_plan.get('spread_width'))} · Estimated loss if SL is reached: {fmt_price(_sl_loss_unit)} per unit / {fmt_price(_sl_loss_lot)} per lot · Theoretical maximum loss if held to worst case: {fmt_price(best_plan.get('max_loss_per_unit'))} per unit / {fmt_price(best_plan.get('max_loss_lot'))} per lot · Maximum profit {fmt_price(best_plan.get('max_profit_per_unit'))} per unit / {fmt_price(best_plan.get('max_profit_lot'))} per lot. Actual loss can exceed the stop estimate due to gaps, slippage and charges; stops do not automatically close trades.")
+    st.info(f"Defined-risk strategy · Width {fmt_price(best_plan.get('spread_width'))} · Estimated loss if SL is reached: {fmt_price(_sl_loss_unit)} per unit / {fmt_price(_sl_loss_lot)} per lot · Theoretical maximum loss if held to worst case: {fmt_price(best_plan.get('max_loss_per_unit'))} per unit / {fmt_price(best_plan.get('max_loss_lot'))} per lot · Maximum profit {fmt_price(best_plan.get('max_profit_per_unit'))} per unit / {fmt_price(best_plan.get('max_profit_lot'))} per lot. Actual loss can exceed the stop estimate due to gaps, slippage and charges; stops do not automatically close trades.")
+    st.caption("Margin note: the amount above is a risk/debit estimate, NOT a live Upstox margin quote. Actual exchange/broker margin can differ materially; check Upstox margin calculator before any real order.")
     st.markdown(f"<div class='fo-exit'><div class='fo-exit-icon'>🚪</div><div><span>EXIT RULE</span><b>{best_plan.get('exit','Follow stop-loss and targets.')}</b></div></div>", unsafe_allow_html=True)
 else:
     st.markdown("<div class='fo-exit' style='margin-top:10px;'><div class='fo-exit-icon'>⛔</div><div><span>NO TRADE</span><b>No defined-risk two-leg spread passed live-quote, quality, liquidity and risk gates. No executable entry, SL or target is displayed.</b></div></div>", unsafe_allow_html=True)
