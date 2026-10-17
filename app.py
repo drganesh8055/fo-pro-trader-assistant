@@ -3746,7 +3746,7 @@ section[data-testid="stSidebar"] .stCaption { color:#64748b !important; }
 
 # Render each strategy card and its action directly together. This keeps the
 # View Details button immediately below the corresponding PASS/SELECTED trade.
-_engine_order = ["PUT SELL", "CALL SELL", "IRON CONDOR", "CALL BUY", "PUT BUY", "IRON BUTTERFLY"]
+_engine_order = ["CALL BUY", "PUT SELL", "CALL SELL", "PUT BUY", "IRON CONDOR", "IRON BUTTERFLY"]  # Display order: Bull Call, Bull Put; Bear Call, Bear Put; Iron Condor, Iron Butterfly
 _engine_rows = [st.columns(2) for _ in range((len(_engine_order) + 1) // 2)]
 
 def _engine_status(action_name, candidate_plan):
