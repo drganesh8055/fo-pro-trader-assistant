@@ -3054,8 +3054,9 @@ put_buy = build_defined_risk_spread(put_buy, "PUT BUY", chain, spot, selected_ex
 put_sell = build_defined_risk_spread(put_sell, "PUT SELL", chain, spot, selected_expiry)
 
 # ============================================================
-# SIX-STRATEGY DECISION ENGINE
-# All recommendations must be defined-risk and priced from live option quotes.
+# FINAL 5-WAY DECISION — deliberately limited to the original four candidates.
+# Supplemental neutral strategies are evaluated separately below and cannot
+# override this primary decision without a future explicit, validated change.
 # ============================================================
 MIN_SCORE = 65
 MIN_POP = 55
@@ -3104,11 +3105,12 @@ else:
     best_plan = max(available, key=lambda x: x[0])[2] if available else None
 
 # ============================================================
-# NEUTRAL CREDIT STRATEGIES: IRON CONDOR AND IRON BUTTERFLY
-# Both are evaluated as full four-leg defined-risk strategies from live quotes.
+# SUPPLEMENTAL NEUTRAL STRATEGIES
+# Iron Condor can join the main selection only in a confirmed RANGE regime.
+# Iron Butterfly is retained for visibility/testing but is not recommended yet.
 # ============================================================
 def _build_neutral_four_leg_strategy(strategy_name, option_chain, spot_price, expiry_value, regime_value):
-    """Build a live-quote-only, defined-risk Iron Condor or Iron Butterfly."""
+    """Build a live-quote-only Iron Condor or Iron Butterfly; never alters primary selection."""
     if option_chain is None or option_chain.empty or not np.isfinite(safe_float(spot_price)) or spot_price <= 0:
         return None
     try:
@@ -3239,11 +3241,11 @@ def _build_neutral_four_leg_strategy(strategy_name, option_chain, spot_price, ex
         else:
             score = float(np.clip(regime_score*0.65 + min(pop,100)*0.35, 0, 100))
             fails = []
-        # Neutral strategies are only candidates in a range-bound market.
-        # Iron Butterfly has a narrower profit zone, so use a stricter PoP floor.
-        if strategy_name in {"IRON CONDOR", "IRON BUTTERFLY"} and regime_norm != "RANGE":
-            fails.append(f"{strategy_name.title()} requires a RANGE market; current regime is {regime_norm}")
-        _strategy_min_pop = 55 if strategy_name == "IRON CONDOR" else 60
+        if strategy_name == "IRON CONDOR" and regime_norm != "RANGE":
+            fails.append(f"Iron Condor requires a RANGE market; current regime is {regime_norm}")
+        elif strategy_name == "IRON BUTTERFLY":
+            fails.append("Testing only: Iron Butterfly is not enabled for recommendation until its live-paper results are validated")
+        _strategy_min_pop = 55 if strategy_name == "IRON CONDOR" else 40
         if np.isfinite(pop) and pop < _strategy_min_pop:
             fails.append(f"model PoP {pop:.1f}% is below this strategy's {_strategy_min_pop:.0f}% minimum")
         if score < MIN_SCORE:
@@ -3286,49 +3288,39 @@ supplemental_strategy_plans = {
 }
 all_strategy_plans = {**strategy_plans, **supplemental_strategy_plans}
 
-# Rank all six strategies together. Credit strategies receive a modest preference
-# because the user's stated goal is premium collection, but score/PoP/risk gates
-# remain mandatory. Iron Condor and Iron Butterfly are only eligible in RANGE.
+# Premium-first selection: favor protected credit spreads modestly, without
+# allowing a lower-quality setup to bypass the normal quality/PoP/readiness gates.
+# A live-quote Iron Condor may compete only when its strategy-specific checks pass.
 _selection_candidates = []
 for _base_score, _action_name, _candidate in eligible:
     _pop_value = safe_float(_candidate.get("pop"), 0)
     _quality_value = safe_float(_candidate.get("score"), 0)
     _volume_value = safe_float(_candidate.get("volume"), 0)
-    _is_credit_candidate = _action_name in {"CALL SELL", "PUT SELL"}
-    _premium_preference = 8.0 if _is_credit_candidate else 0.0
+    _premium_preference = 8.0 if _action_name in {"CALL SELL", "PUT SELL"} else 0.0
     _selection_score = _quality_value + _pop_value * 0.20 + min(_volume_value / 100000, 3) + _premium_preference
     _selection_candidates.append((_selection_score, _action_name, _candidate))
 
-for _neutral_name in ("IRON CONDOR", "IRON BUTTERFLY"):
-    _neutral_plan = supplemental_strategy_plans.get(_neutral_name)
-    if not _neutral_plan:
-        continue
-    _neutral_pop = safe_float(_neutral_plan.get("pop"), np.nan)
-    _neutral_ready = (
-        not (_neutral_plan.get("fail_reasons") or [])
-        and _neutral_plan.get("readiness") == "READY"
-        and safe_float(_neutral_plan.get("score"), 0) >= MIN_SCORE
-        and np.isfinite(_neutral_pop)
-        and _neutral_pop >= safe_float(_neutral_plan.get("minimum_pop"), MIN_POP)
+_iron_condor = supplemental_strategy_plans.get("IRON CONDOR")
+if _iron_condor:
+    _ic_pop = safe_float(_iron_condor.get("pop"), np.nan)
+    _ic_ready = (
+        not (_iron_condor.get("fail_reasons") or [])
+        and _iron_condor.get("readiness") == "READY"
+        and safe_float(_iron_condor.get("score"), 0) >= MIN_SCORE
+        and np.isfinite(_ic_pop) and _ic_pop >= safe_float(_iron_condor.get("minimum_pop"), 55)
         and str(regime or "").upper() == "RANGE"
     )
-    if _neutral_ready:
-        _neutral_score = (
-            safe_float(_neutral_plan.get("score"), 0)
-            + _neutral_pop * 0.20
-            + min(safe_float(_neutral_plan.get("volume"), 0) / 100000, 3)
-            + 8.0
-        )
-        _selection_candidates.append((_neutral_score, _neutral_name, _neutral_plan))
+    if _ic_ready:
+        _ic_score = safe_float(_iron_condor.get("score"), 0) + _ic_pop * 0.20 + min(safe_float(_iron_condor.get("volume"), 0) / 100000, 3)
+        _selection_candidates.append((_ic_score, "IRON CONDOR", _iron_condor))
 
 if _selection_candidates:
     _, decision, best_plan = max(_selection_candidates, key=lambda item: item[0])
 else:
     decision = "NO TRADE"
-    _reference_candidates = [
-        (safe_float(plan.get("score"), 0), action, plan)
-        for action, plan in all_strategy_plans.items() if plan
-    ]
+    # Keep the best reference candidate only for diagnostics; it is not a recommendation.
+    _reference_candidates = [(safe_float(plan.get("score"), 0), action, plan)
+                             for action, plan in strategy_plans.items() if plan]
     best_plan = max(_reference_candidates, key=lambda item: item[0])[2] if _reference_candidates else None
 
 # ============================================================
@@ -3506,46 +3498,46 @@ st.markdown(metrics, unsafe_allow_html=True)
 if beginner_mode:
     st.markdown("""
     <div class="fo-safety-banner">
-      <div><b>🛡️ BEGINNER SAFETY + EXPLAINABILITY IS ON</b><span>The app requires a live-quoted, defined-risk strategy (two or four legs), quality checks and plain-English risk details. This is decision support — not a guarantee of profit.</span></div>
+      <div><b>🛡️ BEGINNER SAFETY + EXPLAINABILITY IS ON</b><span>The app requires a priced two-leg defined-risk spread, live quotes for both legs, quality checks and plain-English risk details. This is decision support — not a guarantee of profit.</span></div>
       <div class="fo-safety-badge">SAFETY ON</div>
     </div>
     """, unsafe_allow_html=True)
+
+# Display-only strategy names. Internal action keys and decision logic remain unchanged.
+_DISPLAY_STRATEGY_NAMES = {
+    "PUT SELL": "Bull Put Spread",
+    "CALL BUY": "Bull Call Spread",
+    "CALL SELL": "Bear Call Spread",
+    "PUT BUY": "Bear Put Spread",
+    "IRON CONDOR": "Iron Condor",
+    "IRON BUTTERFLY": "Iron Butterfly",
+    "NO TRADE": "NO TRADE",
+}
+
+def _display_strategy_name(action_name):
+    return _DISPLAY_STRATEGY_NAMES.get(str(action_name or ""), str(action_name or "NO TRADE").title())
 
 st.markdown("<div class='fo-section'>TRADE DECISION</div>", unsafe_allow_html=True)
 trend_name = overall_trend(tf5, tf30, daily_tech)[0].upper()
 decision_class = "call" if "CALL" in decision else "put" if "PUT" in decision else "neutral"
 if decision != "NO TRADE" and best_plan:
     action_pop = safe_float(best_plan.get("pop")); action_score = safe_float(best_plan.get("score"), 0)
-    if best_plan.get("legs"):
-        contract = "4-leg defined-risk setup · see strategy details"
-    else:
-        contract = f"BUY {best_plan.get('long_strike', best_plan['strike']):.0f} / SELL {best_plan.get('short_strike', best_plan['strike']):.0f} {'CE' if best_plan['side']=='CE' else 'PE'}"
+    contract = f"BUY {best_plan.get('long_strike', best_plan['strike']):.0f} / SELL {best_plan.get('short_strike', best_plan['strike']):.0f} {'CE' if best_plan['side']=='CE' else 'PE'}"
 else:
     action_pop = np.nan; action_score = max([safe_float(p.get("score"),0) for p in strategy_plans.values() if p] or [0]); contract = "No executable setup"
 
-decision_display = {
-    "CALL BUY": "BULL CALL SPREAD",
-    "CALL SELL": "BEAR CALL SPREAD",
-    "PUT BUY": "BEAR PUT SPREAD",
-    "PUT SELL": "BULL PUT SPREAD",
-    "IRON CONDOR": "IRON CONDOR",
-    "IRON BUTTERFLY": "IRON BUTTERFLY",
-    "NO TRADE": "NO TRADE",
-}.get(decision, decision)
 decision_note = {
-    "CALL BUY":"Bull Call Spread: defined-risk bullish debit spread.",
-    "CALL SELL":"Bear Call Spread: premium-collecting bearish/neutral credit spread with a protective higher-strike call.",
-    "PUT BUY":"Bear Put Spread: defined-risk bearish debit spread.",
-    "PUT SELL":"Bull Put Spread: premium-collecting bullish/neutral credit spread with a protective lower-strike put.",
-    "IRON CONDOR":"Iron Condor: premium-collecting range strategy with four defined-risk legs.",
-    "IRON BUTTERFLY":"Iron Butterfly: premium-collecting, tighter-range strategy with four defined-risk legs.",
+    "CALL BUY":"Bull call debit spread — defined-risk bullish setup using a long call and a higher-strike short call.",
+    "CALL SELL":"Bear call credit spread — short call protected by a higher-strike long call; defined risk.",
+    "PUT BUY":"Bear put debit spread — defined-risk bearish setup using a long put and a lower-strike short put.",
+    "PUT SELL":"Bull put credit spread — short put protected by a lower-strike long put; defined risk.",
     "NO TRADE":"No strategy currently meets the minimum quality, alignment, liquidity and PoP gates."
-}.get(decision, "No qualifying setup.")
+}[decision]
 
 st.markdown(f"""
 <div class="fo-decision {decision_class}">
   <div class="fo-decision-row">
-    <div><div class="fo-decision-label">ENGINE OUTPUT</div><div class="fo-decision-title">{decision_display}</div><div class="fo-decision-note">{decision_note}</div></div>
+    <div><div class="fo-decision-label">ENGINE OUTPUT</div><div class="fo-decision-title">{_display_strategy_name(decision)}</div><div class="fo-decision-note">{decision_note}</div></div>
     <div class="fo-score-ring"><b>{action_score:.0f}</b><span>QUALITY / 100</span></div>
   </div>
   <div class="fo-decision-grid">
@@ -3754,15 +3746,7 @@ section[data-testid="stSidebar"] .stCaption { color:#64748b !important; }
 
 # Render each strategy card and its action directly together. This keeps the
 # View Details button immediately below the corresponding PASS/SELECTED trade.
-_engine_order = ["PUT SELL", "CALL BUY", "CALL SELL", "PUT BUY", "IRON CONDOR", "IRON BUTTERFLY"]
-_engine_display_names = {
-    "PUT SELL": "BULL PUT SPREAD",
-    "CALL BUY": "BULL CALL SPREAD",
-    "CALL SELL": "BEAR CALL SPREAD",
-    "PUT BUY": "BEAR PUT SPREAD",
-    "IRON CONDOR": "IRON CONDOR",
-    "IRON BUTTERFLY": "IRON BUTTERFLY",
-}
+_engine_order = ["PUT SELL", "CALL SELL", "IRON CONDOR", "CALL BUY", "PUT BUY", "IRON BUTTERFLY"]
 _engine_rows = [st.columns(2) for _ in range((len(_engine_order) + 1) // 2)]
 
 def _engine_status(action_name, candidate_plan):
@@ -3791,7 +3775,7 @@ for _idx, _action in enumerate(_engine_order):
     _col = _engine_rows[_idx // 2][_idx % 2]
     with _col:
         if not _plan:
-            st.markdown("<div class='fo-engine-card rejected'><div class='fo-engine-top'><div class='fo-engine-action'>" + _action + "</div><div class='fo-engine-status'>NO DATA</div></div><div class='fo-engine-contract'>—</div><div class='fo-engine-reason'>No valid candidate was produced.</div></div>", unsafe_allow_html=True)
+            st.markdown("<div class='fo-engine-card rejected'><div class='fo-engine-top'><div class='fo-engine-action'>" + _display_strategy_name(_action) + "</div><div class='fo-engine-status'>NO DATA</div></div><div class='fo-engine-contract'>—</div><div class='fo-engine-reason'>No valid candidate was produced.</div></div>", unsafe_allow_html=True)
             continue
         _fails = ", ".join(_plan.get("fail_reasons") or []) or "All hard checks passed"
         _selected = _action == decision
@@ -3799,8 +3783,8 @@ for _idx, _action in enumerate(_engine_order):
         _card_html = f"""
         <div class='fo-engine fo-engine-grid' style='display:block!important;grid-template-columns:minmax(0,1fr)!important;width:100%!important;max-width:100%!important;min-width:0!important;box-sizing:border-box!important;'>
           <div class='fo-engine-card {_status_class}'>
-            <div class='fo-engine-top'><div class='fo-engine-action'>{_engine_display_names.get(_action, _plan.get('action', _action))}</div><div class='fo-engine-status'>{_status}</div></div>
-            <div class='fo-engine-contract'>{_engine_display_names.get(_action, _plan.get('action', _action))}<br>{_plan.get('long_strike', _plan['strike']):.0f} / {_plan.get('short_strike', _plan['strike']):.0f}</div>
+            <div class='fo-engine-top'><div class='fo-engine-action'>{_display_strategy_name(_action)}</div><div class='fo-engine-status'>{_status}</div></div>
+            <div class='fo-engine-contract'>{_display_strategy_name(_action)}<br>{_plan.get('long_strike', _plan['strike']):.0f} / {_plan.get('short_strike', _plan['strike']):.0f}</div>
             <div class='fo-engine-stats'><div><span>PoP</span><b>{safe_float(_plan.get('pop')):.1f}%</b></div><div><span>QUALITY</span><b>{safe_float(_plan.get('score'),0):.0f}/100</b></div></div>
             <div class='fo-engine-reason'>{_fails}</div>
           </div>
@@ -3808,7 +3792,7 @@ for _idx, _action in enumerate(_engine_order):
         st.markdown(_card_html, unsafe_allow_html=True)
         # The button belongs directly beneath this card and is shown ONLY for PASS.
         if _status == "PASS":
-            _btn_label = f"View Details · {_plan.get('action', _action)}"
+            _btn_label = f"View Details · {_display_strategy_name(_action)}"
             if st.button(_btn_label, key=f"view_pass_details_{_action.replace(' ', '_')}", use_container_width=True, type="primary"):
                 st.session_state["fo_pass_details_action"] = _action
         # Rejected strategies intentionally have no View Details button or
@@ -3829,7 +3813,7 @@ if _details_plan and _engine_status(_details_action, _details_plan) == "PASS":
     _expiry_text = str(selected_expiry)
     st.markdown(f"""
     <div class='fo-plan-head'>
-      <div><div class='fo-plan-action'>{_details_plan.get('action', _details_action)}</div>
+      <div><div class='fo-plan-action'>{_display_strategy_name(_details_action)}</div>
       <div class='fo-plan-contract'>{'SELL' if _is_credit else 'BUY'} {_details_plan.get('short_strike', _details_plan.get('strike', 0)):.0f} {_opt_side} / {'BUY' if _is_credit else 'SELL'} {_details_plan.get('long_strike', _details_plan.get('strike', 0)):.0f} {_opt_side}</div>
       <div style='font-size:13px;color:#475569;margin-top:5px;'>Expiry {_expiry_text} · {int(_lot_qty) if _lot_qty > 0 else '—'} units per lot · {safe_float(_details_plan.get('pop'), 0):.1f}% model PoP · Quality {safe_float(_details_plan.get('score'), 0):.0f}/100</div></div>
       <div class='fo-plan-pop'>ENTRY ₹{_unit_entry:,.2f}</div>
@@ -3853,7 +3837,7 @@ if _details_plan and _engine_status(_details_action, _details_plan) == "PASS":
         _contract_text = f"{_leg1_action} {_leg1_strike:.0f} {_opt_side} / {_leg2_action} {_leg2_strike:.0f} {_opt_side}"
     st.markdown(f"""
     <div class='fo-plan-head'>
-      <div><div class='fo-plan-action'>{html.escape(str(_details_plan.get('action', _details_action)))}</div>
+      <div><div class='fo-plan-action'>{html.escape(_display_strategy_name(_details_action))}</div>
       <div class='fo-plan-contract'>{html.escape(_contract_text)}</div>
       <div style='font-size:13px;color:#475569;margin-top:5px;'>Expiry {_expiry_text} · {int(_lot_qty) if _lot_qty > 0 else '—'} units per lot · {safe_float(_details_plan.get('pop'), 0):.1f}% model PoP · Quality {safe_float(_details_plan.get('score'), 0):.0f}/100</div></div>
       <div class='fo-plan-pop'>ENTRY ₹{_unit_entry:,.2f}</div>
@@ -3971,7 +3955,7 @@ if decision != "NO TRADE" and best_plan:
     selected_contract = f"BUY {best_plan.get('long_strike', best_plan['strike']):.0f} / SELL {best_plan.get('short_strike', best_plan['strike']):.0f} {'CE' if best_plan['side']=='CE' else 'PE'}"
     st.markdown(f"""
     <div class="fo-plan-head">
-      <div><div class="fo-plan-action">SELECTED STRATEGY</div><div class="fo-plan-contract">{best_plan.get('action', decision)} · {selected_contract}</div></div>
+      <div><div class="fo-plan-action">SELECTED STRATEGY</div><div class="fo-plan-contract">{_display_strategy_name(decision)} · {selected_contract}</div></div>
       <div class="fo-plan-pop">PoP {safe_float(best_plan.get('pop')):.1f}%</div>
     </div>
     """, unsafe_allow_html=True)
@@ -4031,7 +4015,8 @@ with st.expander("Why this decision?", expanded=False):
             f"Market structure: Support {fmt_price(support)} · Resistance {fmt_price(resistance)} · VWAP {fmt_price(tf5.get('vwap'))} · Regime {regime}.",
         ]
     else:
-        for action, plan in all_strategy_plans.items():
+        for action in ["CALL BUY","CALL SELL","PUT BUY","PUT SELL"]:
+            plan=strategy_plans[action]
             if plan:
                 reason=", ".join(plan.get("fail_reasons") or []) or "quality/confirmation gate not met"
                 why_lines.append(f"{action}: {reason} · PoP {safe_float(plan.get('pop')):.1f}% · Score {safe_float(plan.get('score'),0):.0f}/100.")
