@@ -1788,51 +1788,157 @@ def _tighten_existing_open_credit_stops(frame):
     return _normalize_paper_ledger(frame), changed
 
 
-def _load_paper_ledger():
-    """Load from durable Supabase first; never hide database errors as no trades."""
-    if _paper_supabase_config():
-        rows = _paper_supabase_request("GET", params={"id": "eq.main", "select": "trades"})
-        if rows:
-            trades = rows[0].get("trades") or []
-            return _normalize_paper_ledger(pd.DataFrame(trades, columns=PAPER_COLUMNS))
-
-        # One-time migration from an existing local CSV if the DB has no ledger yet.
-        local_path = _paper_ledger_path()
-        if os.path.exists(local_path):
-            try:
-                local_frame = _normalize_paper_ledger(pd.read_csv(local_path))
-            except Exception as exc:
-                raise RuntimeError(f"Supabase has no ledger row and the local CSV could not be read: {exc}") from exc
-            if not local_frame.empty:
-                _save_paper_ledger(local_frame)
-                return local_frame
-        return pd.DataFrame(columns=PAPER_COLUMNS)
-
-    # Local fallback keeps local development usable, but the UI warns that it is
-    # not durable across Streamlit Cloud restarts/redeployments.
+def _paper_local_load():
+    """Read the local recovery ledger without ever treating a read error as empty."""
     path = _paper_ledger_path()
     if not os.path.exists(path):
         return pd.DataFrame(columns=PAPER_COLUMNS)
     try:
         return _normalize_paper_ledger(pd.read_csv(path))
     except Exception as exc:
-        raise RuntimeError(f"Could not read the local paper-trade ledger at {path}: {exc}") from exc
+        raise RuntimeError(
+            f"Could not read the local recovery copy at {path}: {exc}. "
+            "The app has not replaced it with an empty ledger."
+        ) from exc
+
+
+def _paper_local_save(frame):
+    """Atomically save a local recovery copy before attempting network storage."""
+    frame = _normalize_paper_ledger(frame)
+    path = _paper_ledger_path()
+    folder = os.path.dirname(path) or "."
+    os.makedirs(folder, exist_ok=True)
+    temp_path = path + ".tmp"
+    backup_path = path + ".bak"
+    if os.path.exists(path):
+        try:
+            import shutil
+            shutil.copy2(path, backup_path)
+        except Exception:
+            pass
+    frame.to_csv(temp_path, index=False)
+    os.replace(temp_path, path)
+
+
+def _paper_merge_ledgers(primary, secondary):
+    """Merge by trade ID, keeping the most recently updated version of each trade."""
+    a = _normalize_paper_ledger(primary)
+    b = _normalize_paper_ledger(secondary)
+    if a.empty:
+        return b
+    if b.empty:
+        return a
+    combined = pd.concat([a, b], ignore_index=True)
+    combined["_sort_time"] = combined["last_updated"].astype(str)
+    combined["_sort_time"] = combined["_sort_time"].where(
+        combined["_sort_time"].str.len() > 0, combined["opened_at"].astype(str)
+    )
+    combined = combined.sort_values("_sort_time").drop_duplicates(
+        subset=["trade_id"], keep="last"
+    )
+    combined = combined.drop(columns=["_sort_time"], errors="ignore")
+    return _normalize_paper_ledger(combined.reset_index(drop=True))
+
+
+def _paper_remote_write(frame):
+    """Write one complete ledger document to Supabase."""
+    records = json.loads(_normalize_paper_ledger(frame).to_json(orient="records", date_format="iso"))
+    _paper_supabase_request(
+        "POST",
+        params={"on_conflict": "id"},
+        payload={
+            "id": "main",
+            "trades": records,
+            "updated_at": datetime.now(ZoneInfo("Asia/Kolkata")).isoformat(timespec="seconds"),
+        },
+    )
+
+
+def _load_paper_ledger():
+    """
+    Prefer Supabase, but fall back to the local recovery copy on DNS/network/API
+    failure. When Supabase returns, merge local-only trades into the remote
+    ledger and sync the merged result back to both locations.
+    """
+    local_frame = _paper_local_load()
+    if not _paper_supabase_config():
+        st.session_state["_paper_storage_mode"] = "LOCAL_ONLY"
+        st.session_state["_paper_storage_warning"] = (
+            "Supabase is not configured. Paper trades are being saved to this "
+            "app's local recovery CSV; Streamlit Cloud may erase it on restart or redeploy."
+        )
+        return local_frame
+
+    try:
+        rows = _paper_supabase_request(
+            "GET", params={"id": "eq.main", "select": "trades"}
+        )
+        remote_frame = pd.DataFrame(columns=PAPER_COLUMNS)
+        if rows:
+            trades = rows[0].get("trades") or []
+            remote_frame = _normalize_paper_ledger(
+                pd.DataFrame(trades, columns=PAPER_COLUMNS)
+            )
+        merged = _paper_merge_ledgers(remote_frame, local_frame)
+
+        # Sync if the local recovery copy contains trades/updates missing remotely,
+        # or if the remote ledger has changed since the local copy.
+        remote_ids = set(remote_frame["trade_id"].astype(str)) if not remote_frame.empty else set()
+        merged_ids = set(merged["trade_id"].astype(str)) if not merged.empty else set()
+        if merged_ids != remote_ids or not merged.equals(remote_frame):
+            _paper_remote_write(merged)
+        _paper_local_save(merged)
+        st.session_state["_paper_storage_mode"] = "SUPABASE"
+        st.session_state["_paper_storage_warning"] = ""
+        return merged
+    except Exception as exc:
+        st.session_state["_paper_storage_mode"] = "LOCAL_RECOVERY"
+        st.session_state["_paper_storage_warning"] = (
+            f"Supabase is temporarily unreachable: {exc} "
+            "The app is using its local recovery copy and will retry Supabase on the next refresh. "
+            "This local copy is not guaranteed to survive a Streamlit Cloud restart/redeployment."
+        )
+        return local_frame
 
 
 def _save_paper_ledger(frame):
+    """
+    Save locally first, then sync to Supabase. A temporary DNS/network outage
+    does not block paper-trade recording or manual closure. The UI reports which
+    storage location accepted the latest save.
+    """
     frame = _normalize_paper_ledger(frame)
-    if _paper_supabase_config():
-        # Store the ledger as one JSONB document. Upsert is atomic and survives
-        # app reruns, Cloud restarts, and redeployments.
-        records = json.loads(frame.to_json(orient="records", date_format="iso"))
-        _paper_supabase_request(
-            "POST",
-            params={"on_conflict": "id"},
-            payload={"id": "main", "trades": records, "updated_at": datetime.now(ZoneInfo("Asia/Kolkata")).isoformat(timespec="seconds")},
+    _paper_local_save(frame)
+    if not _paper_supabase_config():
+        st.session_state["_paper_storage_mode"] = "LOCAL_ONLY"
+        st.session_state["_paper_storage_warning"] = (
+            "Paper trade saved to the local recovery CSV only. Configure/fix Supabase "
+            "for durable storage across Streamlit Cloud restarts and redeployments."
         )
-        return
-    path = _paper_ledger_path()
-    frame.to_csv(path, index=False)
+        return "LOCAL_ONLY"
+
+    try:
+        rows = _paper_supabase_request(
+            "GET", params={"id": "eq.main", "select": "trades"}
+        )
+        remote_frame = pd.DataFrame(columns=PAPER_COLUMNS)
+        if rows:
+            remote_frame = _normalize_paper_ledger(
+                pd.DataFrame(rows[0].get("trades") or [], columns=PAPER_COLUMNS)
+            )
+        merged = _paper_merge_ledgers(remote_frame, frame)
+        _paper_remote_write(merged)
+        _paper_local_save(merged)
+        st.session_state["_paper_storage_mode"] = "SUPABASE"
+        st.session_state["_paper_storage_warning"] = ""
+        return "SUPABASE"
+    except Exception as exc:
+        st.session_state["_paper_storage_mode"] = "LOCAL_RECOVERY"
+        st.session_state["_paper_storage_warning"] = (
+            f"Saved to the local recovery copy, but Supabase sync is pending: {exc} "
+            "The local copy may be lost if Streamlit Cloud restarts/redeploys before sync succeeds."
+        )
+        return "LOCAL_RECOVERY"
 
 
 def _paper_current_trade_mark(chain_frame, trade):
@@ -3790,18 +3896,27 @@ for _idx, _action in enumerate(_engine_order):
           </div>
         </div>"""
         st.markdown(_card_html, unsafe_allow_html=True)
-        # The button belongs directly beneath this card and is shown ONLY for PASS.
-        if _status == "PASS":
+        # The button belongs directly beneath the relevant card. The selected
+        # strategy must also have this button (not only non-selected PASS cards).
+        if _status in {"PASS", "SELECTED"}:
             _btn_label = f"View Details · {_display_strategy_name(_action)}"
-            if st.button(_btn_label, key=f"view_pass_details_{_action.replace(' ', '_')}", use_container_width=True, type="primary"):
+            if st.button(
+                _btn_label,
+                key=f"view_pass_details_{_action.replace(' ', '_')}",
+                use_container_width=True,
+                type="primary",
+            ):
                 st.session_state["fo_pass_details_action"] = _action
-        # Rejected strategies intentionally have no View Details button or
-        # misleading “details unavailable” message.
+        # Rejected / NO DATA strategies intentionally have no details button.
 
 _details_action = st.session_state.get("fo_pass_details_action")
 _details_plan = all_strategy_plans.get(_details_action) if _details_action else None
-if _details_plan and _engine_status(_details_action, _details_plan) == "PASS":
-    st.markdown("<div class='fo-section'>PASS STRATEGY · TRADE DETAILS</div>", unsafe_allow_html=True)
+if _details_plan and _engine_status(_details_action, _details_plan) in {"PASS", "SELECTED"}:
+    _details_status = _engine_status(_details_action, _details_plan)
+    st.markdown(
+        f"<div class='fo-section'>{'SELECTED' if _details_status == 'SELECTED' else 'PASS'} STRATEGY · TRADE DETAILS</div>",
+        unsafe_allow_html=True,
+    )
     _is_credit = bool(_details_plan.get("is_credit_spread", False))
     _unit_entry = safe_float(_details_plan.get("entry"), 0)
     _lot_qty = safe_float(lot_size, 0)
@@ -4049,15 +4164,20 @@ try:
         # Persist tighter stop levels for existing open paper trades across restarts.
         _save_paper_ledger(_paper_df)
 except Exception as _paper_load_error:
-    st.error(f"Paper-trade ledger could not be loaded or safely updated: {_paper_load_error}")
-    st.warning("For safety, the app has not replaced the ledger with an empty list. Fix the Supabase table/secrets and reload.")
-    st.stop()
+    st.error(f"Paper-trade ledger could not be loaded safely: {_paper_load_error}")
+    st.warning("The app has not replaced your ledger with an empty list. Repair the local recovery file or storage configuration before continuing.")
+    _paper_df = pd.DataFrame(columns=PAPER_COLUMNS)
+    _paper_stops_tightened = False
+
+_paper_storage_notice = st.session_state.get("_paper_storage_warning", "")
+if _paper_storage_notice:
+    st.warning("PAPER-TRADE STORAGE NOTICE: " + str(_paper_storage_notice))
 
 if _paper_stops_tightened:
     st.warning("Risk update applied to existing open credit-spread paper trades: stop-loss levels were tightened to target about 25% of entry credit at the planned stop. Check the latest price against each updated stop. These are advisory levels; the app does not close trades automatically.")
 
 if not _paper_supabase_config():
-    st.warning("PERSISTENT STORAGE NOT CONFIGURED: paper trades are currently saved only to this app's local CSV. On Streamlit Cloud, that file can disappear after a restart/redeploy. Follow the Supabase setup instructions provided with this code to keep trades permanently.")
+    st.warning("PERSISTENT STORAGE NOT CONFIGURED: paper trades are saved to a local recovery CSV only. On Streamlit Cloud, that file can disappear after a restart/redeploy. Configure Supabase for durable storage.")
 
 # Live paper-trade quote refresh is isolated in the table fragment below.
 
@@ -4157,8 +4277,13 @@ if _paper_plan:
             }
             _paper_df = pd.concat([_paper_df, pd.DataFrame([_new_trade])], ignore_index=True)
             try:
-                _save_paper_ledger(_paper_df)
-                st.success(f"Paper trade {_new_trade['trade_id']} recorded. No real order was placed." + (" Marked EXPERIMENTAL because the final engine decision is NO TRADE." if _paper_experimental else ""))
+                _save_mode = _save_paper_ledger(_paper_df)
+                if _save_mode == "SUPABASE":
+                    st.success(f"Paper trade {_new_trade['trade_id']} recorded and synced to persistent storage. No real order was placed.")
+                else:
+                    st.warning(f"Paper trade {_new_trade['trade_id']} was saved to the local recovery copy. Supabase sync is pending; this copy may not survive a Cloud restart/redeploy.")
+                if _paper_experimental:
+                    st.caption("This paper trade is marked EXPERIMENTAL because the final engine decision is NO TRADE.")
                 st.rerun()
             except Exception as _paper_save_error:
                 st.error(f"Could not save the paper trade: {_paper_save_error}")
@@ -4171,8 +4296,13 @@ elif not _paper_pass_candidates:
 try:
     _paper_df = _load_paper_ledger()
 except Exception as _paper_reload_error:
-    st.error(f"Could not refresh the saved paper-trade ledger: {_paper_reload_error}")
-    st.stop()
+    st.error(f"Could not refresh the local recovery ledger: {_paper_reload_error}")
+    st.info("The paper-trading table is temporarily unavailable; the app has not cleared or overwritten saved trades.")
+    _paper_df = pd.DataFrame(columns=PAPER_COLUMNS)
+_paper_storage_notice = st.session_state.get("_paper_storage_warning", "")
+if _paper_storage_notice:
+    st.warning("PAPER-TRADE STORAGE NOTICE: " + str(_paper_storage_notice))
+
 if _paper_df.empty:
     st.info("No paper trades recorded yet. Analyze a live instrument and record an eligible setup to begin forward testing.")
 else:
@@ -4395,7 +4525,7 @@ else:
         # Keep closed history on the same non-canvas renderer for consistency.
         st.table(_closed_display)
     st.download_button("Download paper-trading ledger (CSV)", data=_paper_df.to_csv(index=False).encode("utf-8"), file_name="fo_pro_paper_trades.csv", mime="text/csv", use_container_width=True)
-    st.warning("Paper-trading results are estimates, not audited returns. Quotes may be delayed/stale and spread fills may not be achievable. Stop-loss and target levels are reminders only: trades stay OPEN until you manually close them. With Supabase configured, the ledger is stored outside the app and survives restarts/redeployments; without it, only the local CSV is used and Streamlit Cloud may reset it.")
+    st.warning("Paper-trading results are estimates, not audited returns. Quotes may be delayed/stale and spread fills may not be achievable. Trades stay OPEN until you manually close them. When Supabase is connected, the ledger is synced to persistent storage. During a Supabase outage, the app uses a local recovery copy and retries sync later; that local copy is not guaranteed to survive a Streamlit Cloud restart/redeployment.")
 
 # ============================================================
 # RESET RIGHT-SIDE ANALYZER SCROLL AFTER FULL RENDER
